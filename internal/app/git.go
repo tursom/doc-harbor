@@ -280,8 +280,14 @@ func (g *Git) pathHistory(ctx context.Context, repoPath, branch, scanPath string
 }
 
 func (g *Git) commitLog(ctx context.Context, repoPath, branch string, limit int) ([]CommitSummary, error) {
-	out, err := g.run(ctx, repoPath, "log", "--topo-order", "--date=iso-strict", "--decorate=short", "--parents",
-		fmt.Sprintf("--max-count=%d", limit), "--pretty=format:%H%x00%P%x00%an%x00%ae%x00%cI%x00%D%x00%s", branch)
+	args := []string{"log", "--topo-order", "--date=iso-strict", "--decorate=short", "--parents",
+		fmt.Sprintf("--max-count=%d", limit), "--pretty=format:%H%x00%P%x00%an%x00%ae%x00%cI%x00%D%x00%s"}
+	if strings.TrimSpace(branch) == "" {
+		args = append(args, "--all")
+	} else {
+		args = append(args, branch)
+	}
+	out, err := g.run(ctx, repoPath, args...)
 	if err != nil {
 		return nil, err
 	}

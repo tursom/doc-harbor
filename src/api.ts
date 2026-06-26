@@ -69,10 +69,10 @@ export const api = {
       `/api/repos/${repoID}/documents/${documentID}/history`
     )
   },
-  async history(repoID: number, branch: string, limit = 80) {
-    return request<{ items: CommitSummary[] }>(
-      `/api/repos/${repoID}/history?${new URLSearchParams({ branch, limit: String(limit) })}`
-    )
+  async history(repoID: number, branch = '', limit = 80) {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (branch) params.set('branch', branch)
+    return request<{ items: CommitSummary[] }>(`/api/repos/${repoID}/history?${params}`)
   },
   async commit(repoID: number, sha: string) {
     return request<CommitDetail>(`/api/repos/${repoID}/commits/${sha}`)

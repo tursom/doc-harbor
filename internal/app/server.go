@@ -550,15 +550,11 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request, repoID in
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	repo, err := getRepository(r.Context(), s.db, repoID)
-	if err != nil {
+	if _, err := getRepository(r.Context(), s.db, repoID); err != nil {
 		writeError(w, err)
 		return
 	}
 	branch := r.URL.Query().Get("branch")
-	if branch == "" {
-		branch = repo.DefaultBranch
-	}
 	limit := cleanLimit(r.URL.Query().Get("limit"), 80, 300)
 	commits, err := s.git.commitLog(r.Context(), s.git.repoPath(repoID), branch, limit)
 	if err != nil {

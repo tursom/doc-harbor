@@ -1,0 +1,189 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="920" viewBox="0 0 1440 920">
+  <rect width="1440" height="920" fill="#f4f6f1"/>
+
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+    <rect x="0" y="0" width="280" height="920" fill="#20382c"/>
+    <rect x="22" y="22" width="42" height="42" rx="7" fill="#d8f36b"/>
+    <path d="M36 36 h18 v14 h-18z M39 40 h12" fill="none" stroke="#20382c" stroke-width="2" stroke-linecap="round"/>
+    <text x="78" y="42" fill="#f8fbf4" font-size="19" font-weight="700">DocHarbor</text>
+    <text x="78" y="62" fill="#b7c8be" font-size="13">Git 文档入口</text>
+
+    <rect x="20" y="96" width="240" height="38" rx="7" fill="#d8f36b"/>
+    <text x="94" y="121" fill="#203028" font-size="14" font-weight="700">新增仓库</text>
+
+    <rect x="20" y="158" width="240" height="58" rx="7" fill="#30483a" stroke="#d8f36b"/>
+    <text x="34" y="184" fill="#f8fbf4" font-size="15" font-weight="700">YYM 文档中心</text>
+    <text x="34" y="203" fill="#b7c8be" font-size="12">main · success</text>
+
+    <rect x="20" y="226" width="240" height="58" rx="7" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.12)"/>
+    <text x="34" y="252" fill="#f8fbf4" font-size="15" font-weight="700">Tradeup Server</text>
+    <text x="34" y="271" fill="#b7c8be" font-size="12">master · scheduled</text>
+
+    <rect x="280" y="0" width="1160" height="920" fill="#f4f6f1"/>
+    <rect x="280" y="0" width="1160" height="92" fill="#fbfcf8" stroke="#dce3d8"/>
+    <text x="304" y="34" fill="#17201a" font-size="22" font-weight="700">YYM 文档中心</text>
+    <text x="304" y="58" fill="#698073" font-size="13">git@github.com:yym/doc-center.git</text>
+    <text x="304" y="80" fill="#41544a" font-size="12" font-weight="700">GitHub Webhook</text>
+    <rect x="414" y="64" width="358" height="20" rx="6" fill="#eef3e9" stroke="#dce3d8"/>
+    <text x="424" y="79" fill="#20382c" font-size="11" font-family="SFMono-Regular, Consolas, monospace">https://docs.example.com/api/webhooks/github/1</text>
+
+    <rect x="1238" y="28" width="36" height="36" rx="7" fill="#ffffff" stroke="#c9d2c6"/>
+    <path d="M1250 46a8 8 0 1 0 3-6 M1250 40v6h6" fill="none" stroke="#203028" stroke-width="1.8" stroke-linecap="round"/>
+    <rect x="1284" y="28" width="76" height="36" rx="7" fill="#ffffff" stroke="#c9d2c6"/>
+    <text x="1310" y="51" fill="#213028" font-size="14" font-weight="650">扫描</text>
+    <rect x="1368" y="28" width="52" height="36" rx="7" fill="#ffffff" stroke="#c9d2c6"/>
+    <text x="1380" y="51" fill="#213028" font-size="14" font-weight="650">配置</text>
+
+    <g transform="translate(304 112)">
+      <rect x="0" y="0" width="86" height="34" rx="7" fill="#ffffff" stroke="#c9d2c6"/>
+      <text x="26" y="22" fill="#304039" font-size="14" font-weight="650">文档</text>
+      <rect x="92" y="0" width="86" height="34" rx="7" fill="#20382c" stroke="#20382c"/>
+      <text x="118" y="22" fill="#ffffff" font-size="14" font-weight="650">历史</text>
+      <rect x="184" y="0" width="86" height="34" rx="7" fill="#ffffff" stroke="#c9d2c6"/>
+      <text x="210" y="22" fill="#304039" font-size="14" font-weight="650">扫描</text>
+    </g>
+
+    <g transform="translate(304 160)">
+      <rect x="0" y="0" width="130" height="36" rx="7" fill="#ffffff" stroke="#c9d2c6"/>
+      <text x="14" y="23" fill="#203028" font-size="14">全部分支</text>
+      <path d="M106 14 l6 6 l6-6" fill="none" stroke="#506257" stroke-width="1.6" stroke-linecap="round"/>
+      <rect x="144" y="0" width="78" height="36" rx="7" fill="#ffffff" stroke="#c9d2c6"/>
+      <text x="176" y="23" fill="#213028" font-size="14" font-weight="650">刷新</text>
+      <rect x="238" y="0" width="210" height="36" rx="7" fill="#fbfcf8" stroke="#dce3d8"/>
+      <text x="252" y="23" fill="#698073" font-size="13">120 commits · topo order</text>
+    </g>
+
+    <g transform="translate(304 212)">
+      <rect x="0" y="0" width="1112" height="476" rx="8" fill="#ffffff" stroke="#dce3d8"/>
+      <rect x="0" y="0" width="1112" height="44" rx="8" fill="#f7faf4"/>
+      <rect x="0" y="36" width="1112" height="8" fill="#f7faf4"/>
+      <line x1="152" y1="0" x2="152" y2="476" stroke="#eef1eb"/>
+      <line x1="730" y1="0" x2="730" y2="476" stroke="#eef1eb"/>
+      <line x1="884" y1="0" x2="884" y2="476" stroke="#eef1eb"/>
+      <line x1="1000" y1="0" x2="1000" y2="476" stroke="#eef1eb"/>
+      <line x1="0" y1="44" x2="1112" y2="44" stroke="#eef1eb"/>
+      <text x="26" y="28" fill="#4b6053" font-size="14" font-weight="700">Graph</text>
+      <text x="178" y="28" fill="#4b6053" font-size="14" font-weight="700">Description</text>
+      <text x="746" y="28" fill="#4b6053" font-size="14" font-weight="700">Date</text>
+      <text x="900" y="28" fill="#4b6053" font-size="14" font-weight="700">Author</text>
+      <text x="1016" y="28" fill="#4b6053" font-size="14" font-weight="700">Commit</text>
+
+      <rect x="0" y="196" width="1112" height="38" fill="#eef3e9"/>
+
+      <g stroke-width="3" stroke-linecap="round" fill="none">
+        <path d="M34 62 L34 452" stroke="#1aa7f3"/>
+        <path d="M62 178 C62 198 34 198 34 220" stroke="#e315a6"/>
+        <path d="M62 234 L62 452" stroke="#e315a6"/>
+        <path d="M34 310 C34 288 62 288 62 266" stroke="#1aa7f3"/>
+        <path d="M90 266 C90 286 62 286 62 310" stroke="#38bdf8"/>
+        <path d="M90 310 L90 420" stroke="#38bdf8"/>
+      </g>
+
+      <g fill="#1aa7f3" stroke="#ffffff" stroke-width="2">
+        <circle cx="34" cy="62" r="6"/>
+        <circle cx="34" cy="100" r="6"/>
+        <circle cx="34" cy="138" r="6"/>
+        <circle cx="34" cy="176" r="6"/>
+        <circle cx="34" cy="214" r="6"/>
+        <circle cx="34" cy="252" r="6"/>
+        <circle cx="34" cy="290" r="6"/>
+        <circle cx="34" cy="328" r="6"/>
+        <circle cx="34" cy="366" r="6"/>
+        <circle cx="34" cy="404" r="6"/>
+        <circle cx="34" cy="442" r="6"/>
+      </g>
+      <g fill="#e315a6" stroke="#ffffff" stroke-width="2">
+        <circle cx="62" cy="178" r="6"/>
+        <circle cx="62" cy="234" r="6"/>
+        <circle cx="62" cy="272" r="6"/>
+      </g>
+      <g fill="#38bdf8" stroke="#ffffff" stroke-width="2">
+        <circle cx="90" cy="266" r="6"/>
+        <circle cx="90" cy="310" r="6"/>
+      </g>
+
+      <g font-size="15" font-weight="650">
+        <rect x="176" y="50" width="56" height="24" rx="5" fill="#eff8ff" stroke="#1aa7f3"/>
+        <text x="188" y="67" fill="#075985">全部分支</text>
+        <rect x="238" y="50" width="82" height="24" rx="5" fill="#eff8ff" stroke="#1aa7f3"/>
+        <text x="250" y="67" fill="#075985">origin/main</text>
+        <text x="330" y="68" fill="#4b6053">新增 GitHub webhook secret 显示按钮</text>
+
+        <text x="176" y="106" fill="#26342e">修复 Mermaid 低对比度节点文字</text>
+        <text x="176" y="144" fill="#26342e">改进文档路径分享和目录导航</text>
+        <text x="176" y="182" fill="#26342e">合并 GitHub webhook 支持</text>
+        <rect x="176" y="202" width="86" height="24" rx="5" fill="#fdf4ff" stroke="#e315a6"/>
+        <text x="188" y="219" fill="#86198f">feature/ui</text>
+        <text x="272" y="220" fill="#4b6053">历史页改为 Git graph 表格</text>
+        <text x="176" y="258" fill="#26342e">历史接口返回 decorations 和 parents</text>
+        <rect x="176" y="278" width="62" height="24" rx="5" fill="#eff8ff" stroke="#38bdf8"/>
+        <text x="188" y="295" fill="#166534">v1.2.0</text>
+        <text x="250" y="296" fill="#26342e">整理 DocHarbor 产品设计文档</text>
+        <text x="176" y="334" fill="#26342e">增加文档预览异常保护</text>
+        <text x="176" y="372" fill="#26342e">支持 HTTP Git 凭据挂载</text>
+        <text x="176" y="410" fill="#26342e">添加 DocHarbor 应用图标</text>
+        <text x="176" y="448" fill="#26342e">初始化 DocHarbor MVP</text>
+      </g>
+
+      <g fill="#26342e" font-size="14" font-weight="650">
+        <text x="746" y="68">27 Jun 2026 15:42</text>
+        <text x="746" y="106">27 Jun 2026 14:08</text>
+        <text x="746" y="144">26 Jun 2026 21:31</text>
+        <text x="746" y="182">26 Jun 2026 18:09</text>
+        <text x="746" y="220">26 Jun 2026 17:20</text>
+        <text x="746" y="258">26 Jun 2026 16:02</text>
+        <text x="746" y="296">25 Jun 2026 22:44</text>
+        <text x="746" y="334">25 Jun 2026 20:18</text>
+        <text x="746" y="372">25 Jun 2026 18:57</text>
+        <text x="746" y="410">25 Jun 2026 17:46</text>
+        <text x="746" y="448">25 Jun 2026 15:12</text>
+      </g>
+
+      <g fill="#26342e" font-size="14" font-weight="650">
+        <text x="900" y="68">codex</text>
+        <text x="900" y="106">codex</text>
+        <text x="900" y="144">codex</text>
+        <text x="900" y="182">tursom</text>
+        <text x="900" y="220">codex</text>
+        <text x="900" y="258">codex</text>
+        <text x="900" y="296">tursom</text>
+        <text x="900" y="334">codex</text>
+        <text x="900" y="372">codex</text>
+        <text x="900" y="410">codex</text>
+        <text x="900" y="448">codex</text>
+      </g>
+
+      <g fill="#26342e" font-size="14" font-weight="650" font-family="SFMono-Regular, Consolas, monospace">
+        <text x="1016" y="68">5f34c2a1</text>
+        <text x="1016" y="106">4a110ed8</text>
+        <text x="1016" y="144">629574c</text>
+        <text x="1016" y="182">88d7d2b</text>
+        <text x="1016" y="220">2c91a0fb</text>
+        <text x="1016" y="258">a81b7ce0</text>
+        <text x="1016" y="296">880b9c6</text>
+        <text x="1016" y="334">dd83678a</text>
+        <text x="1016" y="372">b610ee91</text>
+        <text x="1016" y="410">59aa18ef</text>
+        <text x="1016" y="448">13ca489b</text>
+      </g>
+    </g>
+
+    <g transform="translate(304 706)">
+      <rect x="0" y="0" width="1112" height="174" rx="8" fill="#fbfcf8" stroke="#dce3d8"/>
+      <text x="18" y="30" fill="#17201a" font-size="18" font-weight="700">历史页改为 Git graph 表格</text>
+      <text x="18" y="54" fill="#65766a" font-size="13" font-family="SFMono-Regular, Consolas, monospace">2c91a0fb8d0d7c7bb3f2e8c21b16a445e809e610</text>
+      <rect x="18" y="70" width="60" height="24" rx="6" fill="#eef3e9"/>
+      <text x="31" y="87" fill="#384c42" font-size="12">codex</text>
+      <rect x="86" y="70" width="136" height="24" rx="6" fill="#eef3e9"/>
+      <text x="98" y="87" fill="#384c42" font-size="12">26 Jun 2026 17:20</text>
+      <text x="18" y="124" fill="#45584d" font-size="14" font-weight="700">变更文件</text>
+      <rect x="18" y="138" width="1076" height="1" fill="#eef1eb"/>
+      <text x="28" y="160" fill="#72510a" font-size="13" font-weight="700">M</text>
+      <text x="68" y="160" fill="#26342e" font-size="13">src/App.vue</text>
+      <text x="278" y="160" fill="#72510a" font-size="13" font-weight="700">M</text>
+      <text x="318" y="160" fill="#26342e" font-size="13">src/styles.css</text>
+      <text x="548" y="160" fill="#285d25" font-size="13" font-weight="700">A</text>
+      <text x="588" y="160" fill="#26342e" font-size="13">src/gitGraph.ts</text>
+    </g>
+  </g>
+</svg>

@@ -266,7 +266,8 @@
 
         <section v-if="tab === 'history'" class="history-panel">
           <div class="browser-toolbar">
-            <select v-model="historyBranch" @change="loadHistory">
+            <select v-model="historyBranch" @change="changeHistoryBranch">
+              <option value="">全部分支</option>
               <option v-for="branch in branches" :key="branch.ref_name" :value="branch.ref_name">{{ branch.ref_name }}</option>
             </select>
             <button class="command" type="button" @click="loadHistory">
@@ -275,19 +276,77 @@
             </button>
           </div>
           <div class="history-layout">
-            <div class="commit-list">
-              <button
-                v-for="(commit, index) in commits"
-                :key="commit.sha"
-                class="commit-row"
-                :class="{ active: selectedCommit?.sha === commit.sha }"
-                type="button"
-                @click="openCommit(commit.sha)"
-              >
-                <span class="graph-dot" :style="{ '--lane': `${index % 4}` }"></span>
-                <strong>{{ commit.message }}</strong>
-                <small>{{ shortSha(commit.sha) }} · {{ commit.author }} · {{ formatTime(commit.commit_time) }}</small>
-              </button>
+            <div class="git-graph-scroll">
+              <div class="git-graph-table" :style="{ '--graph-width': `${graphWidth}px` }">
+                <div class="git-graph-head">
+                  <span>Graph</span>
+                  <span>Description</span>
+                  <span>Date</span>
+                  <span>Author</span>
+                  <span>Commit</span>
+                </div>
+                <div v-if="!graphRows.length" class="graph-empty">
+                  暂无提交历史
+                </div>
+                <button
+                  v-for="row in graphRows"
+                  :key="row.commit.sha"
+                  class="git-graph-row"
+                  :class="{ active: selectedCommit?.sha === row.commit.sha }"
+                  type="button"
+                  @click="openCommit(row.commit.sha)"
+                >
+                  <span class="git-graph-cell" :title="row.commit.parents.length ? `parents: ${row.commit.parents.join(', ')}` : 'root commit'">
+                    <svg :width="graphWidth" :height="graphRowHeight" :viewBox="`0 0 ${graphWidth} ${graphRowHeight}`" aria-hidden="true">
+                      <line
+                        v-for="lane in row.beforeLanes"
+                        :key="`before-${lane}`"
+                        :x1="graphLaneX(lane)"
+                        :x2="graphLaneX(lane)"
+                        y1="0"
+                        :y2="graphCenterY"
+                        :stroke="graphLineColor(lane)"
+                        stroke-width="3"
+                        stroke-linecap="round"
+                      />
+                      <line
+                        v-for="lane in row.afterLanes"
+                        :key="`after-${lane}`"
+                        :x1="graphLaneX(lane)"
+                        :x2="graphLaneX(lane)"
+                        :y1="graphCenterY"
+                        :y2="graphRowHeight"
+                        :stroke="graphLineColor(lane)"
+                        stroke-width="3"
+                        stroke-linecap="round"
+                      />
+                      <path
+                        v-for="lane in row.connectorLanes"
+                        :key="`connector-${lane}`"
+                        :d="graphConnectorPath(row.lane, lane)"
+                        :stroke="graphLineColor(lane)"
+                        stroke-width="3"
+                        stroke-linecap="round"
+                        fill="none"
+                      />
+                      <circle :cx="graphLaneX(row.lane)" :cy="graphCenterY" r="6" :fill="graphLineColor(row.lane)" />
+                      <circle :cx="graphLaneX(row.lane)" :cy="graphCenterY" r="4" fill="#ffffff" />
+                      <circle :cx="graphLaneX(row.lane)" :cy="graphCenterY" r="2.5" :fill="graphLineColor(row.lane)" />
+                    </svg>
+                  </span>
+                  <span class="git-desc-cell" :title="row.commit.decorations ? `${row.commit.decorations} ${row.commit.message}` : row.commit.message">
+                    <span v-if="row.badges.length" class="decoration-list">
+                      <span v-for="badge in row.badges" :key="`${row.commit.sha}:${badge.label}`" class="ref-badge" :class="badge.type">
+                        {{ badge.label }}
+                      </span>
+                    </span>
+                    <span class="commit-message" :class="{ merge: row.isMerge }">{{ row.commit.message }}</span>
+                  </span>
+                  <span class="git-date-cell">{{ formatHistoryTime(row.commit.commit_time) }}</span>
+                  <span class="git-author-cell" :title="row.commit.author_email">{{ row.commit.author }}</span>
+                  <span class="git-sha-cell" :title="row.commit.sha">{{ shortCommit(row.commit.sha) }}</span>
+                </button>
+              </div>
             </div>
             <aside class="commit-detail">
               <template v-if="selectedCommit">
@@ -417,6 +476,35 @@ const githubWebhookURL = computed(() =>
   selectedRepo.value ? `${window.location.origin}/api/webhooks/github/${selectedRepo.value.id}` : ''
 )
 
+const graphRowHeight = 38
+const graphCenterY = graphRowHeight / 2
+const graphLanePadding = 18
+const graphLaneGap = 28
+const graphPalette = ['#0ea5e9', '#d946ef', '#10b981', '#f59e0b', '#6366f1', '#ef4444']
+
+interface GraphBadge {
+  label: string
+  type: 'branch' | 'remote' | 'tag' | 'stash' | 'head'
+}
+
+interface GraphRow {
+  commit: CommitSummary
+  lane: number
+  beforeLanes: number[]
+  afterLanes: number[]
+  connectorLanes: number[]
+  badges: GraphBadge[]
+  isMerge: boolean
+  maxLane: number
+}
+
+const graphRows = computed(() => buildGraphRows(commits.value))
+
+const graphWidth = computed(() => {
+  const maxLane = graphRows.value.reduce((max, row) => Math.max(max, row.maxLane), 0)
+  return Math.max(96, graphLanePadding * 2 + (maxLane + 1) * graphLaneGap)
+})
+
 const renderedHtml = computed(() => {
   if (!fileContent.value?.content) return ''
   const html = marked.parse(fileContent.value.content, {
@@ -500,8 +588,8 @@ async function selectRepo(repo: Repository, options: { state?: URLState; syncURL
     viewMode.value = state.view
     if (state.branch && branches.value.some((branch) => branch.ref_name === state.branch)) {
       selectedBranch.value = state.branch
-      historyBranch.value = state.branch
     }
+    historyBranch.value = state.branch && branches.value.some((branch) => branch.ref_name === state.branch) ? state.branch : ''
   }
   await loadFiles(state?.dir || '.', { syncURL: false })
   if (state?.versionID) {
@@ -518,7 +606,7 @@ async function loadBranches() {
   branches.value = response.items
   const defaultBranch = selectedRepo.value.default_branch
   selectedBranch.value = branches.value.find((branch) => branch.ref_name === defaultBranch)?.ref_name || branches.value[0]?.ref_name || ''
-  historyBranch.value = selectedBranch.value
+  historyBranch.value = ''
 }
 
 async function loadFiles(dir: string, options: { syncURL?: boolean } = {}) {
@@ -590,7 +678,7 @@ async function scanSelected() {
 
 async function switchTab(nextTab: 'docs' | 'history' | 'runs') {
   tab.value = nextTab
-  updateURL()
+  updateURL({ clearVersion: nextTab !== 'docs' })
   if (nextTab === 'history') await loadHistory()
   if (nextTab === 'runs') await loadScanRuns()
 }
@@ -643,10 +731,18 @@ async function saveRepo() {
 }
 
 async function loadHistory() {
-  if (!selectedRepo.value || !historyBranch.value) return
+  if (!selectedRepo.value) return
   const response = await api.history(selectedRepo.value.id, historyBranch.value, 120)
   commits.value = response.items
   selectedCommit.value = null
+  if (commits.value[0]) {
+    await openCommit(commits.value[0].sha)
+  }
+}
+
+async function changeHistoryBranch() {
+  await loadHistory()
+  updateURL({ clearVersion: true })
 }
 
 async function openCommit(sha: string) {
@@ -729,6 +825,125 @@ function splitList(value: string) {
     .filter(Boolean)
 }
 
+function buildGraphRows(values: CommitSummary[]): GraphRow[] {
+  const activeLanes: Array<string | null> = []
+  const rows: GraphRow[] = []
+  for (const commit of values) {
+    let lane = activeLanes.findIndex((sha) => sha === commit.sha)
+    const knownLane = lane >= 0
+    if (!knownLane) {
+      lane = firstAvailableLane(activeLanes)
+    }
+
+    const beforeLanes = activeLaneIndexes(activeLanes)
+    if (!knownLane) {
+      activeLanes[lane] = commit.sha
+    }
+
+    for (let index = 0; index < activeLanes.length; index++) {
+      if (index !== lane && activeLanes[index] === commit.sha) {
+        activeLanes[index] = null
+      }
+    }
+
+    const connectorLanes: number[] = []
+    const parents = commit.parents || []
+    if (!parents.length) {
+      activeLanes[lane] = null
+    } else {
+      const firstParentLane = activeLanes.findIndex((sha, index) => index !== lane && sha === parents[0])
+      if (firstParentLane >= 0) {
+        activeLanes[lane] = null
+        connectorLanes.push(firstParentLane)
+      } else {
+        activeLanes[lane] = parents[0]
+      }
+
+      for (const parent of parents.slice(1)) {
+        let parentLane = activeLanes.findIndex((sha) => sha === parent)
+        if (parentLane < 0) {
+          parentLane = firstAvailableLane(activeLanes, [lane])
+          activeLanes[parentLane] = parent
+        }
+        if (parentLane !== lane) {
+          connectorLanes.push(parentLane)
+        }
+      }
+    }
+
+    trimTrailingEmptyLanes(activeLanes)
+    const afterLanes = activeLaneIndexes(activeLanes)
+    const maxLane = Math.max(lane, ...beforeLanes, ...afterLanes, ...connectorLanes, 0)
+    rows.push({
+      commit,
+      lane,
+      beforeLanes,
+      afterLanes,
+      connectorLanes: [...new Set(connectorLanes)],
+      badges: decorationBadges(commit.decorations),
+      isMerge: parents.length > 1 || /^merge\b/i.test(commit.message),
+      maxLane
+    })
+  }
+  return rows
+}
+
+function firstAvailableLane(activeLanes: Array<string | null>, avoid: number[] = []) {
+  for (let index = 0; index < activeLanes.length; index++) {
+    if (!activeLanes[index] && !avoid.includes(index)) return index
+  }
+  activeLanes.push(null)
+  return activeLanes.length - 1
+}
+
+function activeLaneIndexes(activeLanes: Array<string | null>) {
+  return activeLanes.map((sha, index) => (sha ? index : -1)).filter((index) => index >= 0)
+}
+
+function trimTrailingEmptyLanes(activeLanes: Array<string | null>) {
+  while (activeLanes.length && !activeLanes[activeLanes.length - 1]) {
+    activeLanes.pop()
+  }
+}
+
+function decorationBadges(decorations: string) {
+  return decorations
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((label): GraphBadge => {
+      if (label.startsWith('HEAD -> ')) {
+        return { label: label.replace('HEAD -> ', ''), type: 'head' }
+      }
+      if (label.startsWith('tag: ')) {
+        return { label: label.replace('tag: ', ''), type: 'tag' }
+      }
+      if (label.startsWith('stash')) {
+        return { label, type: 'stash' }
+      }
+      if (label.includes('/')) {
+        return { label, type: 'remote' }
+      }
+      return { label, type: 'branch' }
+    })
+    .slice(0, 4)
+}
+
+function graphLaneX(lane: number) {
+  return graphLanePadding + lane * graphLaneGap
+}
+
+function graphLineColor(lane: number) {
+  return graphPalette[lane % graphPalette.length]
+}
+
+function graphConnectorPath(fromLane: number, toLane: number) {
+  const fromX = graphLaneX(fromLane)
+  const toX = graphLaneX(toLane)
+  const midY = graphCenterY + 8
+  return `M ${fromX} ${graphCenterY} C ${fromX} ${midY}, ${toX} ${midY}, ${toX} ${graphRowHeight}`
+}
+
 interface URLState {
   repoID?: number
   tab: 'docs' | 'history' | 'runs'
@@ -773,7 +988,8 @@ function updateURL(options: { clearVersion?: boolean } = {}) {
   params.set('repo', String(selectedRepo.value.id))
   if (tab.value !== 'docs') params.set('tab', tab.value)
   params.set('view', viewMode.value)
-  if (viewMode.value === 'branch' && selectedBranch.value) params.set('branch', selectedBranch.value)
+  const branch = tab.value === 'history' ? historyBranch.value : selectedBranch.value
+  if ((viewMode.value === 'branch' || tab.value === 'history') && branch) params.set('branch', branch)
   if (currentDir.value !== searchResultDir) params.set('dir', currentDir.value)
   const versionID = options.clearVersion ? 0 : fileContent.value?.version_id
   if (versionID) params.set('version', String(versionID))
@@ -838,6 +1054,25 @@ function formatTime(value?: string) {
 function shortSha(value?: string) {
   if (!value) return '-'
   return value.slice(0, 12)
+}
+
+function shortCommit(value?: string) {
+  if (!value) return '-'
+  return value.slice(0, 8)
+}
+
+function formatHistoryTime(value?: string) {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).replace(',', '')
 }
 
 function formatBytes(value?: number) {
