@@ -55,6 +55,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/repos", s.handleRepos)
 	mux.HandleFunc("/api/repos/", s.handleRepoSubroutes)
+	mux.HandleFunc("/api/webhooks/github/secret", s.handleGitHubWebhookSecret)
 	mux.HandleFunc("/api/webhooks/github/", s.handleGitHubWebhook)
 	mux.Handle("/", s.webHandler())
 	return recoverMiddleware(mux)
@@ -208,6 +209,18 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request, repoID int64
 		return
 	}
 	writeJSON(w, http.StatusOK, run)
+}
+
+func (s *Server) handleGitHubWebhookSecret(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	secret := s.cfg.GitHubWebhookSecret
+	writeJSON(w, http.StatusOK, map[string]any{
+		"configured": secret != "",
+		"secret":     secret,
+	})
 }
 
 func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {

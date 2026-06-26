@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -91,6 +92,44 @@ func TestGitHubWebhookIgnoresUnsupportedEvents(t *testing.T) {
 	}
 }
 
+func TestGitHubWebhookSecretConfigured(t *testing.T) {
+	server := &Server{cfg: Config{GitHubWebhookSecret: "secret"}}
+	recorder := getGitHubWebhookSecret(t, server)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var response struct {
+		Configured bool   `json:"configured"`
+		Secret     string `json:"secret"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !response.Configured || response.Secret != "secret" {
+		t.Fatalf("response = %+v, want configured secret", response)
+	}
+}
+
+func TestGitHubWebhookSecretEmpty(t *testing.T) {
+	server := &Server{}
+	recorder := getGitHubWebhookSecret(t, server)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var response struct {
+		Configured bool   `json:"configured"`
+		Secret     string `json:"secret"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Configured || response.Secret != "" {
+		t.Fatalf("response = %+v, want unconfigured empty secret", response)
+	}
+}
+
 func TestGitHubWebhookPushCreatesScanRun(t *testing.T) {
 	requireGit(t)
 
@@ -157,6 +196,14 @@ func postGitHubWebhook(t *testing.T, server *Server, repoID int64, event string,
 	}
 	recorder := httptest.NewRecorder()
 	server.handleGitHubWebhook(recorder, req)
+	return recorder
+}
+
+func getGitHubWebhookSecret(t *testing.T, server *Server) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/webhooks/github/secret", nil)
+	recorder := httptest.NewRecorder()
+	server.handleGitHubWebhookSecret(recorder, req)
 	return recorder
 }
 

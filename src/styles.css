@@ -205,6 +205,34 @@ a {
   overflow-wrap: anywhere;
 }
 
+.webhook-url .secret-value {
+  border-color: #b8c6b5;
+  background: #ffffff;
+}
+
+.secret-missing {
+  color: #8b251b;
+  font-size: 12px;
+}
+
+.mini-command {
+  border: 1px solid #c9d2c6;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #213028;
+  min-height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.mini-command:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
 .topbar-actions {
   display: flex;
   gap: 8px;

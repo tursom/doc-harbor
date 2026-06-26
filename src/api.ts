@@ -79,6 +79,9 @@ export const api = {
   },
   async scanRuns(repoID: number) {
     return request<{ items: ScanRun[] }>(`/api/repos/${repoID}/scan-runs`)
+  },
+  async githubWebhookSecret() {
+    return request<{ configured: boolean; secret: string }>('/api/webhooks/github/secret')
   }
 }
 

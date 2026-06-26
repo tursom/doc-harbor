@@ -128,6 +128,8 @@ GITHUB_WEBHOOK_SECRET=your-random-secret docker compose up --build -d
 
 Webhook 会校验 `X-Hub-Signature-256` 的 HMAC-SHA256 签名。`ping` 事件用于 GitHub 测试；`push` 事件会异步触发扫描并立即返回 `202 Accepted`，扫描记录的触发类型为 `github_webhook`；其他事件会返回 ignored，不触发扫描。
 
+仓库页面的 GitHub Webhook 行提供“显示 Secret”按钮，会明文显示当前部署环境中的共享 `GITHUB_WEBHOOK_SECRET`，用于复制到 GitHub Webhook 配置。DocHarbor 本身不维护用户权限，这个入口需要继续依赖 Pangolin 或其他外层访问控制保护。
+
 本地可以用下面的方式构造签名验证：
 
 ```bash

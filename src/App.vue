@@ -36,10 +36,18 @@
         <div class="topbar-summary">
           <h2>{{ selectedRepo?.name || '仓库配置' }}</h2>
           <p v-if="selectedRepo">{{ selectedRepo.repo_url }}</p>
-          <p v-if="githubWebhookURL" class="webhook-url">
+          <div v-if="githubWebhookURL" class="webhook-url">
             <span>GitHub Webhook</span>
             <code>{{ githubWebhookURL }}</code>
-          </p>
+            <button class="mini-command" type="button" :disabled="webhookSecretLoading" @click="toggleWebhookSecret">
+              {{ webhookSecretVisible ? '隐藏 Secret' : '显示 Secret' }}
+            </button>
+            <button v-if="webhookSecretVisible && webhookSecret" class="mini-command" type="button" @click="copyWebhookSecret">
+              复制 Secret
+            </button>
+            <code v-if="webhookSecretVisible && webhookSecret" class="secret-value">{{ webhookSecret }}</code>
+            <span v-if="webhookSecretVisible && !webhookSecret" class="secret-missing">未配置 GITHUB_WEBHOOK_SECRET</span>
+          </div>
           <p v-if="!selectedRepo">配置 Git 仓库后开始同步和扫描文档</p>
         </div>
         <div class="topbar-actions">
@@ -372,6 +380,9 @@ const currentDir = ref('.')
 const searchText = ref('')
 const error = ref('')
 const busy = ref(false)
+const webhookSecret = ref('')
+const webhookSecretVisible = ref(false)
+const webhookSecretLoading = ref(false)
 const showRepoForm = ref(false)
 const editingRepo = ref<Repository | null>(null)
 
@@ -478,6 +489,7 @@ async function loadAll() {
 
 async function selectRepo(repo: Repository, options: { state?: URLState; syncURL?: boolean } = {}) {
   selectedRepo.value = repo
+  resetWebhookSecret()
   fileContent.value = null
   selectedFile.value = null
   docEvents.value = []
@@ -658,6 +670,40 @@ async function withBusy(fn: () => Promise<void>) {
   } finally {
     busy.value = false
   }
+}
+
+async function toggleWebhookSecret() {
+  if (webhookSecretVisible.value) {
+    resetWebhookSecret()
+    return
+  }
+  webhookSecretLoading.value = true
+  error.value = ''
+  try {
+    const response = await api.githubWebhookSecret()
+    webhookSecret.value = response.configured ? response.secret : ''
+    webhookSecretVisible.value = true
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    webhookSecretLoading.value = false
+  }
+}
+
+async function copyWebhookSecret() {
+  if (!webhookSecret.value) return
+  error.value = ''
+  try {
+    await navigator.clipboard.writeText(webhookSecret.value)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+function resetWebhookSecret() {
+  webhookSecret.value = ''
+  webhookSecretVisible.value = false
+  webhookSecretLoading.value = false
 }
 
 function resetForm() {
