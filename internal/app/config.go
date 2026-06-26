@@ -20,6 +20,7 @@ type Config struct {
 	AllowLocalGit         bool
 	GitCommandTimeout     time.Duration
 	SchedulerPollInterval time.Duration
+	GitHubWebhookSecret   string
 }
 
 func LoadConfig() Config {
@@ -43,6 +44,7 @@ func LoadConfig() Config {
 		AllowLocalGit:         boolEnv("ALLOW_LOCAL_GIT", false),
 		GitCommandTimeout:     secondsEnv("GIT_COMMAND_TIMEOUT", 120),
 		SchedulerPollInterval: secondsEnv("SCHEDULER_POLL_INTERVAL", 60),
+		GitHubWebhookSecret:   env("GITHUB_WEBHOOK_SECRET", ""),
 	}
 }
 

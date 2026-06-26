@@ -19,12 +19,20 @@ func errBadRequest(message string) error {
 	return appError{Status: http.StatusBadRequest, Message: message}
 }
 
+func errUnauthorized(message string) error {
+	return appError{Status: http.StatusUnauthorized, Message: message}
+}
+
 func errNotFound(message string) error {
 	return appError{Status: http.StatusNotFound, Message: message}
 }
 
 func errConflict(message string) error {
 	return appError{Status: http.StatusConflict, Message: message}
+}
+
+func errUnavailable(message string) error {
+	return appError{Status: http.StatusServiceUnavailable, Message: message}
 }
 
 func errInternal(message string) error {

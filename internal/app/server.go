@@ -2,10 +2,15 @@ package app
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -13,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Server struct {
@@ -49,6 +55,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/repos", s.handleRepos)
 	mux.HandleFunc("/api/repos/", s.handleRepoSubroutes)
+	mux.HandleFunc("/api/webhooks/github/", s.handleGitHubWebhook)
 	mux.Handle("/", s.webHandler())
 	return recoverMiddleware(mux)
 }
@@ -201,6 +208,106 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request, repoID int64
 		return
 	}
 	writeJSON(w, http.StatusOK, run)
+}
+
+func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cfg.GitHubWebhookSecret == "" {
+		writeError(w, errUnavailable("github webhook secret is not configured"))
+		return
+	}
+
+	parts := splitPath(strings.TrimPrefix(r.URL.Path, "/api/webhooks/github/"))
+	if len(parts) != 1 {
+		writeError(w, errNotFound("not found"))
+		return
+	}
+	repoID, err := parseID(parts[0])
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
+	if err != nil {
+		writeError(w, errBadRequest("invalid request body: "+err.Error()))
+		return
+	}
+	defer r.Body.Close()
+
+	if !verifyGitHubSignature(s.cfg.GitHubWebhookSecret, body, r.Header.Get("X-Hub-Signature-256")) {
+		writeError(w, errUnauthorized("invalid github webhook signature"))
+		return
+	}
+
+	event := strings.TrimSpace(r.Header.Get("X-GitHub-Event"))
+	deliveryID := strings.TrimSpace(r.Header.Get("X-GitHub-Delivery"))
+	switch event {
+	case "ping":
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"event":   "ping",
+			"repo_id": repoID,
+		})
+	case "push":
+		repo, err := getRepository(r.Context(), s.db, repoID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if !repo.Enabled {
+			writeError(w, errBadRequest("repository disabled"))
+			return
+		}
+		go s.runGitHubWebhookScan(repoID, deliveryID)
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"accepted": true,
+			"event":    "push",
+			"repo_id":  repoID,
+		})
+	default:
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"accepted": true,
+			"ignored":  true,
+			"event":    event,
+			"repo_id":  repoID,
+		})
+	}
+}
+
+func (s *Server) runGitHubWebhookScan(repoID int64, deliveryID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	if _, err := s.scanner.Scan(ctx, repoID, "github_webhook"); err != nil {
+		if isAppErrorStatus(err, http.StatusConflict) {
+			log.Printf("github webhook scan skipped: repo_id=%d delivery=%s error=%v", repoID, deliveryID, err)
+			return
+		}
+		log.Printf("github webhook scan failed: repo_id=%d delivery=%s error=%v", repoID, deliveryID, err)
+	}
+}
+
+func verifyGitHubSignature(secret string, body []byte, signature string) bool {
+	const prefix = "sha256="
+	if secret == "" || !strings.HasPrefix(signature, prefix) {
+		return false
+	}
+	got, err := hex.DecodeString(strings.TrimPrefix(signature, prefix))
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	return hmac.Equal(mac.Sum(nil), got)
+}
+
+func isAppErrorStatus(err error, status int) bool {
+	var appErr appError
+	return errors.As(err, &appErr) && appErr.Status == status
 }
 
 func (s *Server) handleScanRuns(w http.ResponseWriter, r *http.Request, repoID int64) {

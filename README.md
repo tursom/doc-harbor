@@ -61,6 +61,7 @@ WEB_DIR=./dist go run ./cmd/doc-harbor
 | `MAX_PREVIEW_FILE_SIZE` | `2097152` | 默认 Markdown 预览大小限制 |
 | `ALLOWED_GIT_HOSTS` | 空 | 逗号分隔 Git host 白名单，空表示不限制 |
 | `ALLOW_LOCAL_GIT` | `0` | 是否允许本地路径或 `file://` 仓库 |
+| `GITHUB_WEBHOOK_SECRET` | 空 | GitHub Webhook 共享 secret，空时 webhook 入口不可用 |
 
 私有仓库凭据不写入数据库。数据库中只保存凭据引用字段，实际密钥通过容器挂载或主机环境提供。
 
@@ -90,6 +91,56 @@ https://your-user:your-token@git.example.com
 ```
 
 `credentials/` 默认忽略真实凭据文件，只保留说明文件。
+
+## GitHub Webhook
+
+DocHarbor 提供固定前缀的 GitHub Webhook 入口：
+
+```text
+POST /api/webhooks/github/{repoID}
+```
+
+`{repoID}` 是 DocHarbor 仓库 ID，每个仓库使用独立 URL。例如：
+
+```text
+https://docs.example.com/api/webhooks/github/1
+```
+
+配置步骤：
+
+1. 为服务设置共享 secret：
+
+```bash
+GITHUB_WEBHOOK_SECRET=your-random-secret docker compose up --build -d
+```
+
+1. 在 GitHub 仓库 `Settings -> Webhooks` 新增 webhook：
+   - Payload URL：`https://<你的域名>/api/webhooks/github/<repoID>`
+   - Content type：`application/json`
+   - Secret：与 `GITHUB_WEBHOOK_SECRET` 一致
+   - Events：选择 `Just the push event`
+
+1. 如果服务放在 Pangolin 保护域名后，建议为 webhook 放行白名单路径：
+
+```text
+/api/webhooks/github/*
+```
+
+Webhook 会校验 `X-Hub-Signature-256` 的 HMAC-SHA256 签名。`ping` 事件用于 GitHub 测试；`push` 事件会异步触发扫描并立即返回 `202 Accepted`，扫描记录的触发类型为 `github_webhook`；其他事件会返回 ignored，不触发扫描。
+
+本地可以用下面的方式构造签名验证：
+
+```bash
+body='{"zen":"Keep it logically awesome."}'
+secret='your-random-secret'
+sig="sha256=$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$secret" -hex | awk '{print $2}')"
+curl -i \
+  -H "X-GitHub-Event: ping" \
+  -H "X-Hub-Signature-256: $sig" \
+  -H "Content-Type: application/json" \
+  --data "$body" \
+  http://127.0.0.1:14220/api/webhooks/github/1
+```
 
 ## Docker
 

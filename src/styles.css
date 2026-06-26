@@ -176,6 +176,35 @@ a {
   font-size: 22px;
 }
 
+.topbar-summary {
+  min-width: 0;
+}
+
+.webhook-url {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.webhook-url span {
+  color: #41544a;
+  font-weight: 700;
+}
+
+.webhook-url code {
+  max-width: 100%;
+  border: 1px solid #dce3d8;
+  border-radius: 6px;
+  background: #eef3e9;
+  color: #20382c;
+  padding: 3px 6px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .topbar-actions {
   display: flex;
   gap: 8px;

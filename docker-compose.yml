@@ -12,6 +12,7 @@ services:
       NETRC: /credentials/.netrc
       GIT_CONFIG_GLOBAL: /root/.gitconfig
       GIT_CREDENTIAL_STORE: /root/.git-credentials
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
     volumes:
       - ./data:/data
       - ~/.ssh:/root/.ssh:ro

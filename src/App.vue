@@ -33,10 +33,14 @@
 
     <section class="workspace">
       <header class="topbar">
-        <div>
+        <div class="topbar-summary">
           <h2>{{ selectedRepo?.name || '仓库配置' }}</h2>
           <p v-if="selectedRepo">{{ selectedRepo.repo_url }}</p>
-          <p v-else>配置 Git 仓库后开始同步和扫描文档</p>
+          <p v-if="githubWebhookURL" class="webhook-url">
+            <span>GitHub Webhook</span>
+            <code>{{ githubWebhookURL }}</code>
+          </p>
+          <p v-if="!selectedRepo">配置 Git 仓库后开始同步和扫描文档</p>
         </div>
         <div class="topbar-actions">
           <button v-if="selectedRepo" class="icon-button" type="button" title="刷新列表" @click="loadAll">
@@ -397,6 +401,10 @@ const breadcrumbs = computed(() => {
 })
 
 const canGoParent = computed(() => currentDir.value !== '.' && currentDir.value !== searchResultDir)
+
+const githubWebhookURL = computed(() =>
+  selectedRepo.value ? `${window.location.origin}/api/webhooks/github/${selectedRepo.value.id}` : ''
+)
 
 const renderedHtml = computed(() => {
   if (!fileContent.value?.content) return ''
