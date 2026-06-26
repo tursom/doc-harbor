@@ -1,0 +1,20 @@
+services:
+  doc-harbor:
+    build: .
+    ports:
+      - "14220:14220"
+    environment:
+      DATA_DIR: /data
+      HTTP_ADDR: :14220
+      WEB_DIR: /app/web/dist
+      ALLOW_LOCAL_GIT: "0"
+      ALLOWED_GIT_HOSTS: ""
+      NETRC: /credentials/.netrc
+      GIT_CONFIG_GLOBAL: /root/.gitconfig
+      GIT_CREDENTIAL_STORE: /root/.git-credentials
+    volumes:
+      - ./data:/data
+      - ~/.ssh:/root/.ssh:ro
+      - ./credentials:/credentials:ro
+      - ~/.git-credentials:/root/.git-credentials:ro
+      - ~/.gitconfig:/root/.gitconfig:ro

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="DocHarbor">
+  <rect width="64" height="64" rx="12" fill="#20382c"/>
+  <path d="M15 44h34v5H15z" fill="#d8f36b"/>
+  <path d="M18 42c2.7-8.4 7.3-14.8 14-19.2 6.7 4.4 11.3 10.8 14 19.2H18z" fill="#f8fbf4"/>
+  <path d="M25 19h14c2.2 0 4 1.8 4 4v18H21V23c0-2.2 1.8-4 4-4z" fill="#ffffff"/>
+  <path d="M26 26h12M26 32h12M26 38h8" stroke="#20382c" stroke-width="3" stroke-linecap="round"/>
+  <path d="M32 13v30" stroke="#2f7d61" stroke-width="4" stroke-linecap="round"/>
+  <path d="M24 44c1.7-4.2 4.3-7.5 8-10 3.7 2.5 6.3 5.8 8 10H24z" fill="#2f7d61"/>
+</svg>

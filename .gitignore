@@ -1,0 +1,12 @@
+data/
+dist/
+web/dist/
+node_modules/
+credentials/*
+!credentials/.gitignore
+!credentials/README.md
+*.db
+*.db-shm
+*.db-wal
+doc-harbor
+.DS_Store

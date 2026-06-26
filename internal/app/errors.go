@@ -1,0 +1,47 @@
+package app
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+)
+
+type appError struct {
+	Status  int
+	Message string
+}
+
+func (e appError) Error() string {
+	return e.Message
+}
+
+func errBadRequest(message string) error {
+	return appError{Status: http.StatusBadRequest, Message: message}
+}
+
+func errNotFound(message string) error {
+	return appError{Status: http.StatusNotFound, Message: message}
+}
+
+func errConflict(message string) error {
+	return appError{Status: http.StatusConflict, Message: message}
+}
+
+func errInternal(message string) error {
+	return appError{Status: http.StatusInternalServerError, Message: message}
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, err error) {
+	var appErr appError
+	if errors.As(err, &appErr) {
+		writeJSON(w, appErr.Status, map[string]any{"error": appErr.Message})
+		return
+	}
+	writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+}
