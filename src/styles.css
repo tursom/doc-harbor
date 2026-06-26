@@ -323,26 +323,48 @@ textarea {
 }
 
 .crumbs {
-  height: 44px;
+  min-height: 44px;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 12px;
+  padding: 6px 12px;
   border-bottom: 1px solid #dce3d8;
   color: #506257;
   font-size: 13px;
+  flex-wrap: wrap;
 }
 
 .crumbs button {
   border: 0;
   background: transparent;
   color: #20382c;
-  padding: 0;
+  min-height: 28px;
+  padding: 0 3px;
   font-weight: 700;
 }
 
+.crumbs button:disabled {
+  color: #97a397;
+  cursor: default;
+}
+
+.parent-dir {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 4px;
+}
+
+.breadcrumb-trail {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
 .file-list {
-  max-height: calc(100vh - 220px);
+  max-height: calc(100vh - 232px);
   overflow: auto;
   padding: 6px;
 }

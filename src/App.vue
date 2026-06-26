@@ -123,15 +123,15 @@
 
       <section v-else class="work-grid">
         <nav class="tabs">
-          <button :class="{ active: tab === 'docs' }" type="button" @click="tab = 'docs'">
+          <button :class="{ active: tab === 'docs' }" type="button" @click="switchTab('docs')">
             <BookOpen :size="16" />
             文档
           </button>
-          <button :class="{ active: tab === 'history' }" type="button" @click="tab = 'history'; loadHistory()">
+          <button :class="{ active: tab === 'history' }" type="button" @click="switchTab('history')">
             <GitBranch :size="16" />
             历史
           </button>
-          <button :class="{ active: tab === 'runs' }" type="button" @click="tab = 'runs'; loadScanRuns()">
+          <button :class="{ active: tab === 'runs' }" type="button" @click="switchTab('runs')">
             <ListChecks :size="16" />
             扫描
           </button>
@@ -143,7 +143,7 @@
               <button :class="{ active: viewMode === 'latest' }" type="button" @click="switchView('latest')">智能最新</button>
               <button :class="{ active: viewMode === 'branch' }" type="button" @click="switchView('branch')">按分支</button>
             </div>
-            <select v-model="selectedBranch" :disabled="viewMode !== 'branch'" @change="loadFiles('.')">
+            <select v-model="selectedBranch" :disabled="viewMode !== 'branch'" @change="loadBranchFiles">
               <option v-for="branch in branches" :key="branch.ref_name" :value="branch.ref_name">{{ branch.ref_name }}</option>
             </select>
             <div class="search-box">
@@ -155,8 +155,21 @@
           <div class="doc-layout">
             <aside class="file-pane">
               <div class="crumbs">
-                <button type="button" @click="loadFiles('.')">根目录</button>
-                <span v-if="currentDir !== '.'">/ {{ currentDir }}</span>
+                <button class="parent-dir" type="button" :disabled="!canGoParent" title="返回上一级" @click="goParent">
+                  <ChevronLeft :size="15" />
+                  上一级
+                </button>
+                <nav class="breadcrumb-trail" aria-label="目录路径">
+                  <button type="button" @click="loadFiles('.')">根目录</button>
+                  <template v-for="crumb in breadcrumbs" :key="crumb.path">
+                    <span>/</span>
+                    <button type="button" @click="loadFiles(crumb.path)">{{ crumb.label }}</button>
+                  </template>
+                  <template v-if="currentDir === searchResultDir">
+                    <span>/</span>
+                    <span>搜索结果</span>
+                  </template>
+                </nav>
               </div>
               <div class="file-list">
                 <button
@@ -316,6 +329,7 @@
 import DOMPurify from 'dompurify'
 import {
   BookOpen,
+  ChevronLeft,
   Download,
   FileDown,
   FileText,
@@ -332,7 +346,7 @@ import {
 } from 'lucide-vue-next'
 import { marked } from 'marked'
 import mermaid from 'mermaid'
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, downloadURL } from './api'
 import type { CommitDetail, CommitSummary, FileContent, FileEntry, PathEvent, RepoRef, Repository, ScanRun } from './types'
 
@@ -370,6 +384,19 @@ const latestIncludeText = ref('*')
 const latestExcludeText = ref('archive/*, tmp/*, dependabot/*')
 const branchPriorityText = ref('main, master, release/*, develop, feature/*')
 const scanPathsText = ref('.')
+const searchResultDir = '搜索结果'
+let applyingURLState = false
+
+const breadcrumbs = computed(() => {
+  if (currentDir.value === '.' || currentDir.value === searchResultDir) return []
+  const parts = currentDir.value.split('/').filter(Boolean)
+  return parts.map((label, index) => ({
+    label,
+    path: parts.slice(0, index + 1).join('/')
+  }))
+})
+
+const canGoParent = computed(() => currentDir.value !== '.' && currentDir.value !== searchResultDir)
 
 const renderedHtml = computed(() => {
   if (!fileContent.value?.content) return ''
@@ -388,16 +415,52 @@ watch(renderedHtml, async () => {
 })
 
 onMounted(async () => {
-  mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'default' })
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: 'strict',
+    theme: 'default',
+    htmlLabels: false,
+    themeVariables: {
+      actorBkg: '#1f2937',
+      actorBorder: '#38bdf8',
+      actorLineColor: '#38bdf8',
+      actorTextColor: '#f8fafc',
+      activationBkgColor: '#e0f2fe',
+      activationBorderColor: '#0ea5e9',
+      labelBoxBkgColor: '#ffffff',
+      labelBoxBorderColor: '#94a3b8',
+      labelTextColor: '#1f2937',
+      loopTextColor: '#1f2937',
+      noteBkgColor: '#fff7ed',
+      noteBorderColor: '#fb923c',
+      noteTextColor: '#1f2937',
+      signalColor: '#64748b',
+      signalTextColor: '#1f2937',
+      sequenceNumberColor: '#ffffff'
+    }
+  })
   await loadAll()
+  window.addEventListener('popstate', applyURLState)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('popstate', applyURLState)
 })
 
 async function loadAll() {
   await withBusy(async () => {
     const response = await api.repos()
     repos.value = response.items
-    if (!selectedRepo.value && repos.value.length) {
-      await selectRepo(repos.value[0])
+    if (!repos.value.length) return
+    if (applyingURLState) {
+      const refreshed = selectedRepo.value ? repos.value.find((repo) => repo.id === selectedRepo.value?.id) : null
+      if (refreshed) selectedRepo.value = refreshed
+      return
+    }
+    const urlState = readURLState()
+    const urlRepo = urlState.repoID ? repos.value.find((repo) => repo.id === urlState.repoID) : null
+    if (!selectedRepo.value) {
+      await selectRepo(urlRepo || repos.value[0], { state: urlState, syncURL: !urlRepo })
     } else if (selectedRepo.value) {
       const refreshed = repos.value.find((repo) => repo.id === selectedRepo.value?.id)
       if (refreshed) selectedRepo.value = refreshed
@@ -405,13 +468,28 @@ async function loadAll() {
   })
 }
 
-async function selectRepo(repo: Repository) {
+async function selectRepo(repo: Repository, options: { state?: URLState; syncURL?: boolean } = {}) {
   selectedRepo.value = repo
   fileContent.value = null
   selectedFile.value = null
   docEvents.value = []
   await loadBranches()
-  await loadFiles('.')
+  const state = options.state
+  if (state) {
+    tab.value = state.tab
+    viewMode.value = state.view
+    if (state.branch && branches.value.some((branch) => branch.ref_name === state.branch)) {
+      selectedBranch.value = state.branch
+      historyBranch.value = state.branch
+    }
+  }
+  await loadFiles(state?.dir || '.', { syncURL: false })
+  if (state?.versionID) {
+    await openVersion(state.versionID, { syncURL: false })
+  }
+  if (tab.value === 'history') await loadHistory()
+  if (tab.value === 'runs') await loadScanRuns()
+  if (options.syncURL !== false) updateURL()
 }
 
 async function loadBranches() {
@@ -423,13 +501,22 @@ async function loadBranches() {
   historyBranch.value = selectedBranch.value
 }
 
-async function loadFiles(dir: string) {
+async function loadFiles(dir: string, options: { syncURL?: boolean } = {}) {
   if (!selectedRepo.value) return
   currentDir.value = dir
+  selectedFile.value = null
+  fileContent.value = null
+  docEvents.value = []
   const params: Record<string, string> = { view: viewMode.value, dir }
   if (viewMode.value === 'branch') params.branch = selectedBranch.value
   const response = await api.files(selectedRepo.value.id, params)
   files.value = response.items
+  if (dir !== searchResultDir) searchText.value = ''
+  if (options.syncURL !== false) updateURL({ clearVersion: true })
+}
+
+async function loadBranchFiles() {
+  await loadFiles('.')
 }
 
 async function runSearch() {
@@ -437,9 +524,13 @@ async function runSearch() {
     await loadFiles(currentDir.value)
     return
   }
+  selectedFile.value = null
+  fileContent.value = null
+  docEvents.value = []
   const response = await api.search(selectedRepo.value.id, searchText.value.trim())
   files.value = response.items
-  currentDir.value = '搜索结果'
+  currentDir.value = searchResultDir
+  updateURL({ clearVersion: true })
 }
 
 async function switchView(mode: 'latest' | 'branch') {
@@ -447,12 +538,19 @@ async function switchView(mode: 'latest' | 'branch') {
   await loadFiles('.')
 }
 
-async function openFile(entry: FileEntry) {
+async function openFile(entry: FileEntry, options: { syncURL?: boolean } = {}) {
   if (!selectedRepo.value || !entry.version_id) return
   selectedFile.value = entry
-  const content = await api.content(selectedRepo.value.id, entry.version_id)
+  await openVersion(entry.version_id, options)
+}
+
+async function openVersion(versionID: number, options: { syncURL?: boolean } = {}) {
+  if (!selectedRepo.value) return
+  const content = await api.content(selectedRepo.value.id, versionID)
   fileContent.value = content
+  selectedFile.value = files.value.find((entry) => entry.kind === 'file' && entry.version_id === versionID) || selectedFile.value
   await loadDocHistory(content.document_id)
+  if (options.syncURL !== false) updateURL()
 }
 
 async function loadDocHistory(documentID: number) {
@@ -466,8 +564,21 @@ async function scanSelected() {
   await withBusy(async () => {
     await api.scanRepo(selectedRepo.value!.id)
     await loadAll()
-    await loadFiles(currentDir.value === '搜索结果' ? '.' : currentDir.value)
+    await loadFiles(currentDir.value === searchResultDir ? '.' : currentDir.value)
   })
+}
+
+async function switchTab(nextTab: 'docs' | 'history' | 'runs') {
+  tab.value = nextTab
+  updateURL()
+  if (nextTab === 'history') await loadHistory()
+  if (nextTab === 'runs') await loadScanRuns()
+}
+
+async function goParent() {
+  if (!canGoParent.value) return
+  const parent = parentDir(currentDir.value)
+  await loadFiles(parent)
 }
 
 function editSelected() {
@@ -564,6 +675,66 @@ function splitList(value: string) {
     .filter(Boolean)
 }
 
+interface URLState {
+  repoID?: number
+  tab: 'docs' | 'history' | 'runs'
+  view: 'latest' | 'branch'
+  branch: string
+  dir: string
+  versionID?: number
+}
+
+function readURLState(): URLState {
+  const params = new URLSearchParams(window.location.search)
+  const tabParam = params.get('tab')
+  const viewParam = params.get('view')
+  const repoID = Number(params.get('repo') || 0)
+  const versionID = Number(params.get('version') || 0)
+  return {
+    repoID: repoID > 0 ? repoID : undefined,
+    tab: tabParam === 'history' || tabParam === 'runs' ? tabParam : 'docs',
+    view: viewParam === 'branch' ? 'branch' : 'latest',
+    branch: params.get('branch') || '',
+    dir: params.get('dir') || '.',
+    versionID: versionID > 0 ? versionID : undefined
+  }
+}
+
+async function applyURLState() {
+  if (!repos.value.length) return
+  applyingURLState = true
+  try {
+    const state = readURLState()
+    const repo = state.repoID ? repos.value.find((item) => item.id === state.repoID) : selectedRepo.value || repos.value[0]
+    if (!repo) return
+    await selectRepo(repo, { state, syncURL: false })
+  } finally {
+    applyingURLState = false
+  }
+}
+
+function updateURL(options: { clearVersion?: boolean } = {}) {
+  if (applyingURLState || !selectedRepo.value) return
+  const params = new URLSearchParams()
+  params.set('repo', String(selectedRepo.value.id))
+  if (tab.value !== 'docs') params.set('tab', tab.value)
+  params.set('view', viewMode.value)
+  if (viewMode.value === 'branch' && selectedBranch.value) params.set('branch', selectedBranch.value)
+  if (currentDir.value !== searchResultDir) params.set('dir', currentDir.value)
+  const versionID = options.clearVersion ? 0 : fileContent.value?.version_id
+  if (versionID) params.set('version', String(versionID))
+  const nextURL = `${window.location.pathname}?${params.toString()}${window.location.hash}`
+  if (nextURL !== `${window.location.pathname}${window.location.search}${window.location.hash}`) {
+    window.history.pushState(null, '', nextURL)
+  }
+}
+
+function parentDir(path: string) {
+  const parts = path.split('/').filter(Boolean)
+  parts.pop()
+  return parts.length ? parts.join('/') : '.'
+}
+
 async function renderMermaid() {
   const blocks = document.querySelectorAll<HTMLElement>('.markdown-body code.language-mermaid')
   let index = 0
@@ -575,7 +746,7 @@ async function renderMermaid() {
       const result = await mermaid.render(`doc-harbor-mermaid-${Date.now()}-${index++}`, source)
       const wrapper = document.createElement('div')
       wrapper.className = 'mermaid-render'
-      wrapper.innerHTML = DOMPurify.sanitize(result.svg)
+      wrapper.innerHTML = sanitizeMermaidSVG(result.svg)
       pre.replaceWith(wrapper)
     } catch (err) {
       pre.classList.add('mermaid-error')
@@ -585,6 +756,22 @@ async function renderMermaid() {
       pre.appendChild(note)
     }
   }
+}
+
+function sanitizeMermaidSVG(svg: string) {
+  return DOMPurify.sanitize(svg, {
+    USE_PROFILES: { svg: true, svgFilters: true },
+    ADD_TAGS: ['marker'],
+    ADD_ATTR: [
+      'alignment-baseline',
+      'dominant-baseline',
+      'marker-end',
+      'marker-start',
+      'text-anchor',
+      'viewBox',
+      'xlink:href'
+    ]
+  })
 }
 
 function formatTime(value?: string) {
