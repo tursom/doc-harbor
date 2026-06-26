@@ -1,5 +1,6 @@
 services:
   doc-harbor:
+    image: ghcr.io/tursom/doc-harbor:latest
     build: .
     ports:
       - "14220:14220"
