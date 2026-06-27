@@ -331,70 +331,30 @@ func listFiles(ctx context.Context, db *sql.DB, repoID int64, view, branch, dir 
 	if view == "" {
 		view = "latest"
 	}
-
-	var rows *sql.Rows
-	var err error
 	if view == "branch" {
 		if branch == "" {
 			return nil, errBadRequest("branch is required")
 		}
-		rows, err = db.QueryContext(ctx, `SELECT id, repo_id, document_id, branch, head_commit_sha, scan_path, file_path,
-			previous_path, dir_path, file_name, extension, mime_type, file_size, blob_sha, status, title, previewable,
-			download_enabled, last_commit_sha, last_commit_time, delete_commit_sha, delete_commit_time, rename_score,
-			participates_latest, created_at, updated_at
-			FROM doc_versions
-			WHERE repo_id = ? AND branch = ? AND status IN ('active','renamed','moved') AND dir_path = ?
-			ORDER BY file_name`, repoID, branch, dir)
-	} else {
-		rows, err = db.QueryContext(ctx, `SELECT v.id, v.repo_id, v.document_id, v.branch, v.head_commit_sha, v.scan_path, v.file_path,
+		return listBranchFiles(ctx, db, repoID, branch, dir)
+	}
+	return listLatestFiles(ctx, db, repoID, dir)
+}
+
+func listLatestFiles(ctx context.Context, db *sql.DB, repoID int64, dir string) ([]FileEntry, error) {
+	scanPaths, err := currentScanPaths(ctx, db, repoID)
+	if err != nil {
+		return nil, err
+	}
+	pathFilter, pathArgs := scanPathSQLFilter("l.file_path", scanPaths)
+	args := append([]any{repoID, dir}, pathArgs...)
+	rows, err := db.QueryContext(ctx, `SELECT v.id, v.repo_id, v.document_id, v.branch, v.head_commit_sha, v.scan_path, v.file_path,
 			v.previous_path, v.dir_path, v.file_name, v.extension, v.mime_type, v.file_size, v.blob_sha, v.status, v.title, v.previewable,
 			v.download_enabled, v.last_commit_sha, v.last_commit_time, v.delete_commit_sha, v.delete_commit_time, v.rename_score,
 			v.participates_latest, v.created_at, v.updated_at, l.source_branch, l.source_commit_sha, l.selection_reason
 			FROM doc_latest l
 			JOIN doc_versions v ON v.id = l.version_id
-			WHERE l.repo_id = ? AND l.dir_path = ?
-			ORDER BY l.file_name`, repoID, dir)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	entries := []FileEntry{}
-	for rows.Next() {
-		v, err := scanDocVersion(rows)
-		if err != nil {
-			if view == "latest" {
-				var sourceBranch, sourceCommit, reason string
-				// Re-scan latest rows with appended fields when the basic scanner consumed only base columns.
-				_ = sourceBranch
-				_ = sourceCommit
-				_ = reason
-			}
-			return nil, err
-		}
-		entry := versionFileEntry(v)
-		if view == "latest" {
-			entry.SourceBranch = v.Branch
-			entry.SourceCommitSHA = v.HeadCommitSHA
-		}
-		entries = append(entries, entry)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return withDirectories(ctx, db, repoID, view, branch, dir, entries)
-}
-
-func listLatestFiles(ctx context.Context, db *sql.DB, repoID int64, dir string) ([]FileEntry, error) {
-	rows, err := db.QueryContext(ctx, `SELECT v.id, v.repo_id, v.document_id, v.branch, v.head_commit_sha, v.scan_path, v.file_path,
-		v.previous_path, v.dir_path, v.file_name, v.extension, v.mime_type, v.file_size, v.blob_sha, v.status, v.title, v.previewable,
-		v.download_enabled, v.last_commit_sha, v.last_commit_time, v.delete_commit_sha, v.delete_commit_time, v.rename_score,
-		v.participates_latest, v.created_at, v.updated_at, l.source_branch, l.source_commit_sha, l.selection_reason
-		FROM doc_latest l
-		JOIN doc_versions v ON v.id = l.version_id
-		WHERE l.repo_id = ? AND l.dir_path = ?
-		ORDER BY l.file_name`, repoID, dir)
+			WHERE l.repo_id = ? AND l.dir_path = ? AND `+pathFilter+`
+			ORDER BY l.file_name`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -423,13 +383,19 @@ func listLatestFiles(ctx context.Context, db *sql.DB, repoID int64, dir string) 
 }
 
 func listBranchFiles(ctx context.Context, db *sql.DB, repoID int64, branch, dir string) ([]FileEntry, error) {
+	scanPaths, err := currentScanPaths(ctx, db, repoID)
+	if err != nil {
+		return nil, err
+	}
+	pathFilter, pathArgs := scanPathSQLFilter("file_path", scanPaths)
+	args := append([]any{repoID, branch, dir}, pathArgs...)
 	rows, err := db.QueryContext(ctx, `SELECT id, repo_id, document_id, branch, head_commit_sha, scan_path, file_path,
-		previous_path, dir_path, file_name, extension, mime_type, file_size, blob_sha, status, title, previewable,
-		download_enabled, last_commit_sha, last_commit_time, delete_commit_sha, delete_commit_time, rename_score,
-		participates_latest, created_at, updated_at
-		FROM doc_versions
-		WHERE repo_id = ? AND branch = ? AND status IN ('active','renamed','moved') AND dir_path = ?
-		ORDER BY file_name`, repoID, branch, dir)
+			previous_path, dir_path, file_name, extension, mime_type, file_size, blob_sha, status, title, previewable,
+			download_enabled, last_commit_sha, last_commit_time, delete_commit_sha, delete_commit_time, rename_score,
+			participates_latest, created_at, updated_at
+			FROM doc_versions
+			WHERE repo_id = ? AND branch = ? AND status IN ('active','renamed','moved') AND dir_path = ? AND `+pathFilter+`
+			ORDER BY file_name`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -478,7 +444,11 @@ func versionFileEntry(v DocVersion) FileEntry {
 }
 
 func withDirectories(ctx context.Context, db *sql.DB, repoID int64, view, branch, dir string, entries []FileEntry) ([]FileEntry, error) {
-	dirs, err := childDirectories(ctx, db, repoID, view, branch, dir)
+	scanPaths, err := currentScanPaths(ctx, db, repoID)
+	if err != nil {
+		return nil, err
+	}
+	dirs, err := childDirectories(ctx, db, repoID, view, branch, dir, scanPaths)
 	if err != nil {
 		return nil, err
 	}
@@ -486,7 +456,12 @@ func withDirectories(ctx context.Context, db *sql.DB, repoID int64, view, branch
 	for _, child := range dirs {
 		out = append(out, FileEntry{Kind: "dir", Name: baseName(child), Path: child})
 	}
-	out = append(out, entries...)
+	for _, entry := range entries {
+		if entry.Kind == "file" && !fileVisibleInScanPaths(entry.Path, scanPaths) {
+			continue
+		}
+		out = append(out, entry)
+	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Kind != out[j].Kind {
 			return out[i].Kind == "dir"
@@ -496,14 +471,18 @@ func withDirectories(ctx context.Context, db *sql.DB, repoID int64, view, branch
 	return out, nil
 }
 
-func childDirectories(ctx context.Context, db *sql.DB, repoID int64, view, branch, dir string) ([]string, error) {
+func childDirectories(ctx context.Context, db *sql.DB, repoID int64, view, branch, dir string, scanPaths []ScanPath) ([]string, error) {
 	var rows *sql.Rows
 	var err error
 	if view == "branch" {
+		pathFilter, pathArgs := scanPathSQLFilter("file_path", scanPaths)
+		args := append([]any{repoID, branch}, pathArgs...)
 		rows, err = db.QueryContext(ctx, `SELECT DISTINCT dir_path FROM doc_versions
-			WHERE repo_id = ? AND branch = ? AND status IN ('active','renamed','moved')`, repoID, branch)
+			WHERE repo_id = ? AND branch = ? AND status IN ('active','renamed','moved') AND `+pathFilter, args...)
 	} else {
-		rows, err = db.QueryContext(ctx, `SELECT DISTINCT dir_path FROM doc_latest WHERE repo_id = ?`, repoID)
+		pathFilter, pathArgs := scanPathSQLFilter("file_path", scanPaths)
+		args := append([]any{repoID}, pathArgs...)
+		rows, err = db.QueryContext(ctx, `SELECT DISTINCT dir_path FROM doc_latest WHERE repo_id = ? AND `+pathFilter, args...)
 	}
 	if err != nil {
 		return nil, err
@@ -557,16 +536,23 @@ func searchDocuments(ctx context.Context, db *sql.DB, repoID int64, q string, li
 	if q == "" {
 		return nil, nil
 	}
+	scanPaths, err := currentScanPaths(ctx, db, repoID)
+	if err != nil {
+		return nil, err
+	}
 	like := "%" + q + "%"
+	pathFilter, pathArgs := scanPathSQLFilter("l.file_path", scanPaths)
+	args := append([]any{repoID}, pathArgs...)
+	args = append(args, like, like, limit)
 	rows, err := db.QueryContext(ctx, `SELECT v.id, v.repo_id, v.document_id, v.branch, v.head_commit_sha, v.scan_path, v.file_path,
-		v.previous_path, v.dir_path, v.file_name, v.extension, v.mime_type, v.file_size, v.blob_sha, v.status, v.title, v.previewable,
-		v.download_enabled, v.last_commit_sha, v.last_commit_time, v.delete_commit_sha, v.delete_commit_time, v.rename_score,
-		v.participates_latest, v.created_at, v.updated_at, l.source_branch, l.source_commit_sha, l.selection_reason
-		FROM doc_latest l
-		JOIN doc_versions v ON v.id = l.version_id
-		WHERE l.repo_id = ? AND (v.file_path LIKE ? OR v.title LIKE ?)
-		ORDER BY v.last_commit_time DESC
-		LIMIT ?`, repoID, like, like, limit)
+			v.previous_path, v.dir_path, v.file_name, v.extension, v.mime_type, v.file_size, v.blob_sha, v.status, v.title, v.previewable,
+			v.download_enabled, v.last_commit_sha, v.last_commit_time, v.delete_commit_sha, v.delete_commit_time, v.rename_score,
+			v.participates_latest, v.created_at, v.updated_at, l.source_branch, l.source_commit_sha, l.selection_reason
+			FROM doc_latest l
+			JOIN doc_versions v ON v.id = l.version_id
+			WHERE l.repo_id = ? AND `+pathFilter+` AND (v.file_path LIKE ? OR v.title LIKE ?)
+			ORDER BY v.last_commit_time DESC
+			LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -613,19 +599,27 @@ func docHistory(ctx context.Context, db *sql.DB, repoID, documentID int64) (map[
 func treeForView(ctx context.Context, db *sql.DB, repoID int64, view, branch string) ([]FileEntry, error) {
 	var rows *sql.Rows
 	var err error
+	scanPaths, err := currentScanPaths(ctx, db, repoID)
+	if err != nil {
+		return nil, err
+	}
 	if view == "branch" {
 		if branch == "" {
 			return nil, errBadRequest("branch is required")
 		}
+		pathFilter, pathArgs := scanPathSQLFilter("file_path", scanPaths)
+		args := append([]any{repoID, branch}, pathArgs...)
 		rows, err = db.QueryContext(ctx, `SELECT file_path, document_id, id, title, extension, file_size, status,
-			branch, head_commit_sha, last_commit_time, previewable, download_enabled
-			FROM doc_versions WHERE repo_id = ? AND branch = ? AND status IN ('active','renamed','moved')
-			ORDER BY file_path`, repoID, branch)
+				branch, head_commit_sha, last_commit_time, previewable, download_enabled
+				FROM doc_versions WHERE repo_id = ? AND branch = ? AND status IN ('active','renamed','moved')
+				AND `+pathFilter+` ORDER BY file_path`, args...)
 	} else {
+		pathFilter, pathArgs := scanPathSQLFilter("l.file_path", scanPaths)
+		args := append([]any{repoID}, pathArgs...)
 		rows, err = db.QueryContext(ctx, `SELECT l.file_path, v.document_id, v.id, v.title, v.extension, v.file_size, v.status,
-			l.source_branch, l.source_commit_sha, l.last_commit_time, v.previewable, v.download_enabled
-			FROM doc_latest l JOIN doc_versions v ON v.id = l.version_id
-			WHERE l.repo_id = ? ORDER BY l.file_path`, repoID)
+				l.source_branch, l.source_commit_sha, l.last_commit_time, v.previewable, v.download_enabled
+				FROM doc_latest l JOIN doc_versions v ON v.id = l.version_id
+				WHERE l.repo_id = ? AND `+pathFilter+` ORDER BY l.file_path`, args...)
 	}
 	if err != nil {
 		return nil, err
@@ -646,6 +640,58 @@ func treeForView(ctx context.Context, db *sql.DB, repoID int64, view, branch str
 		entries = append(entries, entry)
 	}
 	return entries, rows.Err()
+}
+
+func currentScanPaths(ctx context.Context, db *sql.DB, repoID int64) ([]ScanPath, error) {
+	scanPaths, err := listScanPaths(ctx, db, repoID, true)
+	if err != nil {
+		return nil, err
+	}
+	if len(scanPaths) == 0 {
+		scanPaths = []ScanPath{{RepoID: repoID, Path: ".", Enabled: true}}
+	}
+	return scanPaths, nil
+}
+
+func scanPathSQLFilter(column string, scanPaths []ScanPath) (string, []any) {
+	clauses := make([]string, 0, len(scanPaths))
+	args := make([]any, 0, len(scanPaths)*2)
+	for _, scanPath := range scanPaths {
+		p := normalizeRepoPath(scanPath.Path)
+		if p == "" {
+			continue
+		}
+		if p == "." {
+			return "1=1", nil
+		}
+		clauses = append(clauses, fmt.Sprintf("(%s = ? OR %s LIKE ?)", column, column))
+		args = append(args, p, strings.TrimSuffix(p, "/")+"/%")
+	}
+	if len(clauses) == 0 {
+		return "1=0", nil
+	}
+	return "(" + strings.Join(clauses, " OR ") + ")", args
+}
+
+func fileVisibleInScanPaths(filePath string, scanPaths []ScanPath) bool {
+	for _, scanPath := range scanPaths {
+		if scanPathContains(scanPath.Path, filePath) {
+			return true
+		}
+	}
+	return false
+}
+
+func filterCommitChanges(changes []CommitFileChange, scanPaths []ScanPath) []CommitFileChange {
+	filtered := changes[:0]
+	for _, change := range changes {
+		if fileVisibleInScanPaths(change.Path, scanPaths) ||
+			fileVisibleInScanPaths(change.OldPath, scanPaths) ||
+			fileVisibleInScanPaths(change.NewPath, scanPaths) {
+			filtered = append(filtered, change)
+		}
+	}
+	return filtered
 }
 
 func buildDocKey(scanPath, filePath string) string {

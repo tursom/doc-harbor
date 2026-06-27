@@ -772,6 +772,9 @@ async function saveRepo() {
     editingRepo.value = null
     resetForm()
     await loadAll()
+    if (selectedRepo.value) {
+      await selectRepo(selectedRepo.value)
+    }
   })
 }
 

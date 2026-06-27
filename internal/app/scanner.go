@@ -127,7 +127,7 @@ func (s *Scanner) scanBranch(ctx context.Context, repo Repository, ref gitRef, s
 	stat := branchScanStat{Head: ref.CommitSHA}
 	repoPath := s.git.repoPath(repo.ID)
 	oldRef, _ := getRepoRef(ctx, s.db, repo.ID, "branch", ref.Name)
-	if oldRef != nil && oldRef.CommitSHA == ref.CommitSHA {
+	if oldRef != nil && oldRef.CommitSHA == ref.CommitSHA && !scanPathsChangedSince(scanPaths, oldRef.LastScannedAt) {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return stat, err
@@ -476,6 +476,34 @@ func (s *Scanner) scanEnabled(ctx context.Context, trigger string) {
 			log.Printf("scheduled scan repo %d: %v", repo.ID, err)
 		}
 	}
+}
+
+func scanPathsChangedSince(scanPaths []ScanPath, lastScannedAt string) bool {
+	lastScannedAt = strings.TrimSpace(lastScannedAt)
+	if lastScannedAt == "" {
+		return true
+	}
+	lastScan, err := time.Parse(timeLayout, lastScannedAt)
+	if err != nil {
+		return true
+	}
+	for _, scanPath := range scanPaths {
+		updatedAt := strings.TrimSpace(scanPath.UpdatedAt)
+		if updatedAt == "" {
+			return true
+		}
+		updated, err := time.Parse(timeLayout, updatedAt)
+		if err != nil {
+			if updatedAt >= lastScannedAt {
+				return true
+			}
+			continue
+		}
+		if !updated.Before(lastScan) {
+			return true
+		}
+	}
+	return false
 }
 
 func scanPathContains(scanPath, filePath string) bool {

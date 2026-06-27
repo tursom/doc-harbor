@@ -584,6 +584,12 @@ func (s *Server) handleCommits(w http.ResponseWriter, r *http.Request, repoID in
 		writeError(w, err)
 		return
 	}
+	scanPaths, err := currentScanPaths(r.Context(), s.db, repoID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	files = filterCommitChanges(files, scanPaths)
 	writeJSON(w, http.StatusOK, CommitDetail{CommitSummary: summary, Files: files})
 }
 
