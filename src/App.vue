@@ -613,7 +613,8 @@ async function selectRepo(repo: Repository, options: { state?: URLState; syncURL
     }
     historyBranch.value = state.branch && branches.value.some((branch) => branch.ref_name === state.branch) ? state.branch : ''
   }
-  await loadFiles(state?.dir || '.', { syncURL: false })
+  const initialDir = state?.dir !== undefined ? state.dir : repoEntryDir(repo)
+  await loadFiles(initialDir, { syncURL: false })
   if (requestID !== repoSelectionRequest) return
   if (state?.versionID) {
     await openVersion(state.versionID, { syncURL: false })
@@ -657,7 +658,7 @@ async function loadFiles(dir: string, options: { syncURL?: boolean } = {}) {
 }
 
 async function loadBranchFiles() {
-  await loadFiles('.')
+  await loadFiles(repoEntryDir(selectedRepo.value))
 }
 
 async function runSearch() {
@@ -681,7 +682,7 @@ async function runSearch() {
 
 async function switchView(mode: 'latest' | 'branch') {
   viewMode.value = mode
-  await loadFiles('.')
+  await loadFiles(repoEntryDir(selectedRepo.value))
 }
 
 async function openFile(entry: FileEntry, options: { syncURL?: boolean } = {}) {
@@ -1076,7 +1077,7 @@ interface URLState {
   tab: 'docs' | 'history' | 'runs'
   view: 'latest' | 'branch'
   branch: string
-  dir: string
+  dir?: string
   versionID?: number
 }
 
@@ -1086,12 +1087,13 @@ function readURLState(): URLState {
   const viewParam = params.get('view')
   const repoID = Number(params.get('repo') || 0)
   const versionID = Number(params.get('version') || 0)
+  const dirParam = params.get('dir')
   return {
     repoID: repoID > 0 ? repoID : undefined,
     tab: tabParam === 'history' || tabParam === 'runs' ? tabParam : 'docs',
     view: viewParam === 'branch' ? 'branch' : 'latest',
     branch: params.get('branch') || '',
-    dir: params.get('dir') || '.',
+    dir: dirParam === null ? undefined : dirParam || '.',
     versionID: versionID > 0 ? versionID : undefined
   }
 }
@@ -1130,6 +1132,21 @@ function parentDir(path: string) {
   const parts = path.split('/').filter(Boolean)
   parts.pop()
   return parts.length ? parts.join('/') : '.'
+}
+
+function repoEntryDir(repo: Repository | null | undefined) {
+  const enabledDirs = (repo?.scan_paths || [])
+    .filter((scanPath) => scanPath.enabled)
+    .map((scanPath) => normalizeBrowserDir(scanPath.path))
+  if (enabledDirs.length === 1 && enabledDirs[0] !== '.') {
+    return enabledDirs[0]
+  }
+  return '.'
+}
+
+function normalizeBrowserDir(value: string) {
+  const cleaned = value.trim().replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '')
+  return cleaned || '.'
 }
 
 async function renderMermaid() {
