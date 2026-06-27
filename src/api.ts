@@ -89,10 +89,10 @@ export function downloadURL(repoID: number, versionID: number) {
   return `/api/repos/${repoID}/versions/${versionID}/download`
 }
 
-export function blobURL(repoID: number, commit: string, filePath: string) {
+export function blobURL(repoID: number, commit: string, filePath: string, inline = true) {
   return `/api/repos/${repoID}/blob/download?${new URLSearchParams({
     commit_sha: commit,
     path: filePath,
-    inline: '1'
+    inline: inline ? '1' : '0'
   })}`
 }

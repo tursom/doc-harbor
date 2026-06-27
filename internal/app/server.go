@@ -627,7 +627,11 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request, repoID int64
 	}
 	if download {
 		w.Header().Set("Content-Type", mimeType(filePath))
-		w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFileName(filePath)+`"`)
+		disposition := "attachment"
+		if r.URL.Query().Get("inline") == "1" {
+			disposition = "inline"
+		}
+		w.Header().Set("Content-Disposition", disposition+`; filename="`+sanitizeFileName(filePath)+`"`)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
 		return

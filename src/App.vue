@@ -418,7 +418,7 @@ import {
 import { marked } from 'marked'
 import mermaid from 'mermaid'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { api, downloadURL } from './api'
+import { api, blobURL, downloadURL } from './api'
 import type { CommitDetail, CommitSummary, FileContent, FileEntry, PathEvent, RepoRef, Repository, ScanRun } from './types'
 
 const repos = ref<Repository[]>([])
@@ -507,12 +507,24 @@ const graphWidth = computed(() => {
 
 const renderedHtml = computed(() => {
   if (!fileContent.value?.content) return ''
+  const renderer = new marked.Renderer()
+  renderer.image = ({ href, title, text }) => {
+    const src = resolveMarkdownResourceURL(href)
+    const titleAttr = title ? ` title="${escapeAttr(title)}"` : ''
+    return `<img src="${escapeAttr(src)}" alt="${escapeAttr(text || '')}"${titleAttr}>`
+  }
+  renderer.link = ({ href, title, text }) => {
+    const target = resolveMarkdownLinkURL(href)
+    const titleAttr = title ? ` title="${escapeAttr(title)}"` : ''
+    return `<a href="${escapeAttr(target)}"${titleAttr}>${text}</a>`
+  }
   const html = marked.parse(fileContent.value.content, {
-    async: false
+    async: false,
+    renderer
   }) as string
   return DOMPurify.sanitize(html, {
     ADD_TAGS: ['svg', 'path', 'g', 'marker', 'defs', 'linearGradient', 'stop', 'rect', 'circle', 'line', 'polyline', 'polygon', 'text', 'tspan'],
-    ADD_ATTR: ['viewBox', 'd', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'points', 'marker-end', 'stroke', 'fill', 'transform', 'class', 'style']
+    ADD_ATTR: ['viewBox', 'd', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'points', 'marker-end', 'stroke', 'fill', 'transform', 'class', 'style', 'target', 'rel']
   })
 })
 
@@ -942,6 +954,59 @@ function graphConnectorPath(fromLane: number, toLane: number) {
   const toX = graphLaneX(toLane)
   const midY = graphCenterY + 8
   return `M ${fromX} ${graphCenterY} C ${fromX} ${midY}, ${toX} ${midY}, ${toX} ${graphRowHeight}`
+}
+
+function resolveMarkdownResourceURL(href: string) {
+  const current = fileContent.value
+  if (!current || isExternalMarkdownURL(href)) return href
+  const resolved = resolveRepoRelativePath(current.file_path, href)
+  return blobURL(current.repo_id, current.source_commit_sha, resolved, true)
+}
+
+function resolveMarkdownLinkURL(href: string) {
+  if (isExternalMarkdownURL(href)) return href
+  const current = fileContent.value
+  if (!current) return href
+  const [pathPart, suffix] = splitMarkdownURLSuffix(href)
+  if (!pathPart) return href
+  const resolved = resolveRepoRelativePath(current.file_path, pathPart)
+  return blobURL(current.repo_id, current.source_commit_sha, resolved, false) + suffix
+}
+
+function isExternalMarkdownURL(href = '') {
+  return /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(href)
+}
+
+function splitMarkdownURLSuffix(href: string) {
+  const hashIndex = href.indexOf('#')
+  const queryIndex = href.indexOf('?')
+  const indexes = [hashIndex, queryIndex].filter((index) => index >= 0)
+  if (!indexes.length) return [href, ''] as const
+  const splitAt = Math.min(...indexes)
+  return [href.slice(0, splitAt), href.slice(splitAt)] as const
+}
+
+function resolveRepoRelativePath(currentFilePath: string, href: string) {
+  const [pathPart] = splitMarkdownURLSuffix(href)
+  const baseDir = currentFilePath.split('/').slice(0, -1)
+  const parts = pathPart.startsWith('/') ? [] : [...baseDir]
+  for (const part of pathPart.split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') {
+      parts.pop()
+      continue
+    }
+    parts.push(part)
+  }
+  return parts.join('/')
+}
+
+function escapeAttr(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
 }
 
 interface URLState {
