@@ -460,6 +460,10 @@ const branchPriorityText = ref('main, master, release/*, develop, feature/*')
 const scanPathsText = ref('.')
 const searchResultDir = '搜索结果'
 let applyingURLState = false
+let repoSelectionRequest = 0
+let fileListRequest = 0
+let fileOpenRequest = 0
+let historyRequest = 0
 
 const breadcrumbs = computed(() => {
   if (currentDir.value === '.' || currentDir.value === searchResultDir) return []
@@ -511,7 +515,7 @@ const renderedHtml = computed(() => {
   renderer.image = ({ href, title, text }) => {
     const src = resolveMarkdownResourceURL(href)
     const titleAttr = title ? ` title="${escapeAttr(title)}"` : ''
-    return `<img src="${escapeAttr(src)}" alt="${escapeAttr(text || '')}"${titleAttr}>`
+    return `<img data-doc-harbor-src="${escapeAttr(src)}" alt="${escapeAttr(text || '')}"${titleAttr}>`
   }
   renderer.link = ({ href, title, text }) => {
     const target = resolveMarkdownLinkURL(href)
@@ -524,12 +528,13 @@ const renderedHtml = computed(() => {
   }) as string
   return DOMPurify.sanitize(html, {
     ADD_TAGS: ['svg', 'path', 'g', 'marker', 'defs', 'linearGradient', 'stop', 'rect', 'circle', 'line', 'polyline', 'polygon', 'text', 'tspan'],
-    ADD_ATTR: ['viewBox', 'd', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'points', 'marker-end', 'stroke', 'fill', 'transform', 'class', 'style', 'target', 'rel']
+    ADD_ATTR: ['data-doc-harbor-src', 'viewBox', 'd', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'points', 'marker-end', 'stroke', 'fill', 'transform', 'class', 'style', 'target', 'rel']
   })
 })
 
 watch(renderedHtml, async () => {
   await nextTick()
+  armMarkdownImageRetries()
   renderMermaid()
 })
 
@@ -588,12 +593,17 @@ async function loadAll() {
 }
 
 async function selectRepo(repo: Repository, options: { state?: URLState; syncURL?: boolean } = {}) {
+  const requestID = ++repoSelectionRequest
+  fileListRequest++
+  fileOpenRequest++
+  historyRequest++
   selectedRepo.value = repo
   resetWebhookSecret()
   fileContent.value = null
   selectedFile.value = null
   docEvents.value = []
   await loadBranches()
+  if (requestID !== repoSelectionRequest) return
   const state = options.state
   if (state) {
     tab.value = state.tab
@@ -604,17 +614,23 @@ async function selectRepo(repo: Repository, options: { state?: URLState; syncURL
     historyBranch.value = state.branch && branches.value.some((branch) => branch.ref_name === state.branch) ? state.branch : ''
   }
   await loadFiles(state?.dir || '.', { syncURL: false })
+  if (requestID !== repoSelectionRequest) return
   if (state?.versionID) {
     await openVersion(state.versionID, { syncURL: false })
+    if (requestID !== repoSelectionRequest) return
   }
   if (tab.value === 'history') await loadHistory()
+  if (requestID !== repoSelectionRequest) return
   if (tab.value === 'runs') await loadScanRuns()
+  if (requestID !== repoSelectionRequest) return
   if (options.syncURL !== false) updateURL()
 }
 
 async function loadBranches() {
   if (!selectedRepo.value) return
-  const response = await api.branches(selectedRepo.value.id)
+  const repoID = selectedRepo.value.id
+  const response = await api.branches(repoID)
+  if (selectedRepo.value?.id !== repoID) return
   branches.value = response.items
   const defaultBranch = selectedRepo.value.default_branch
   selectedBranch.value = branches.value.find((branch) => branch.ref_name === defaultBranch)?.ref_name || branches.value[0]?.ref_name || ''
@@ -623,13 +639,18 @@ async function loadBranches() {
 
 async function loadFiles(dir: string, options: { syncURL?: boolean } = {}) {
   if (!selectedRepo.value) return
+  const requestID = ++fileListRequest
+  const repoID = selectedRepo.value.id
+  fileOpenRequest++
+  historyRequest++
   currentDir.value = dir
   selectedFile.value = null
   fileContent.value = null
   docEvents.value = []
   const params: Record<string, string> = { view: viewMode.value, dir }
   if (viewMode.value === 'branch') params.branch = selectedBranch.value
-  const response = await api.files(selectedRepo.value.id, params)
+  const response = await api.files(repoID, params)
+  if (requestID !== fileListRequest || selectedRepo.value?.id !== repoID) return
   files.value = response.items
   if (dir !== searchResultDir) searchText.value = ''
   if (options.syncURL !== false) updateURL({ clearVersion: true })
@@ -644,10 +665,15 @@ async function runSearch() {
     await loadFiles(currentDir.value)
     return
   }
+  const requestID = ++fileListRequest
+  const repoID = selectedRepo.value.id
+  fileOpenRequest++
+  historyRequest++
   selectedFile.value = null
   fileContent.value = null
   docEvents.value = []
-  const response = await api.search(selectedRepo.value.id, searchText.value.trim())
+  const response = await api.search(repoID, searchText.value.trim())
+  if (requestID !== fileListRequest || selectedRepo.value?.id !== repoID) return
   files.value = response.items
   currentDir.value = searchResultDir
   updateURL({ clearVersion: true })
@@ -666,16 +692,23 @@ async function openFile(entry: FileEntry, options: { syncURL?: boolean } = {}) {
 
 async function openVersion(versionID: number, options: { syncURL?: boolean } = {}) {
   if (!selectedRepo.value) return
-  const content = await api.content(selectedRepo.value.id, versionID)
+  const requestID = ++fileOpenRequest
+  const repoID = selectedRepo.value.id
+  const content = await api.content(repoID, versionID)
+  if (requestID !== fileOpenRequest || selectedRepo.value?.id !== repoID) return
   fileContent.value = content
   selectedFile.value = files.value.find((entry) => entry.kind === 'file' && entry.version_id === versionID) || selectedFile.value
   await loadDocHistory(content.document_id)
+  if (requestID !== fileOpenRequest || selectedRepo.value?.id !== repoID) return
   if (options.syncURL !== false) updateURL()
 }
 
 async function loadDocHistory(documentID: number) {
   if (!selectedRepo.value) return
-  const history = await api.docHistory(selectedRepo.value.id, documentID)
+  const requestID = ++historyRequest
+  const repoID = selectedRepo.value.id
+  const history = await api.docHistory(repoID, documentID)
+  if (requestID !== historyRequest || selectedRepo.value?.id !== repoID || fileContent.value?.document_id !== documentID) return
   docEvents.value = Array.isArray(history.events) ? history.events : []
 }
 
@@ -999,6 +1032,32 @@ function resolveRepoRelativePath(currentFilePath: string, href: string) {
     parts.push(part)
   }
   return parts.join('/')
+}
+
+function armMarkdownImageRetries() {
+  const images = document.querySelectorAll<HTMLImageElement>('.markdown-body img')
+  for (const image of images) {
+    const source = image.dataset.docHarborSrc || image.getAttribute('src') || ''
+    if (!source) continue
+    image.dataset.retryCount = '0'
+    image.addEventListener(
+      'error',
+      () => {
+        const retryCount = Number(image.dataset.retryCount || '0')
+        if (retryCount >= 1) return
+        image.dataset.retryCount = String(retryCount + 1)
+        const retryURL = new URL(source, window.location.href)
+        retryURL.searchParams.set('_retry', String(Date.now()))
+        window.setTimeout(() => {
+          image.src = retryURL.toString()
+        }, 120)
+      },
+      { once: true }
+    )
+    if (image.getAttribute('src') !== source) {
+      image.src = source
+    }
+  }
 }
 
 function escapeAttr(value: string) {
