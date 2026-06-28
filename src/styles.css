@@ -17,6 +17,10 @@ body {
   min-height: 100vh;
 }
 
+#app {
+  min-height: 100vh;
+}
+
 button,
 input,
 select,
@@ -37,6 +41,22 @@ a {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
   min-height: 100vh;
+}
+
+.app-shell.ai-mode {
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-shell.ai-mode .sidebar {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-shell.ai-mode .repo-list {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .sidebar {
@@ -184,6 +204,17 @@ a {
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+
+.app-shell.ai-mode .workspace {
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-shell.ai-mode .topbar,
+.app-shell.ai-mode .alert {
+  flex: 0 0 auto;
 }
 
 .topbar {
@@ -365,6 +396,13 @@ a {
   min-height: calc(100vh - 136px);
 }
 
+.app-shell.ai-mode .ai-panel {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .ai-sidebar,
 .ai-chat,
 .ai-evidence,
@@ -380,6 +418,18 @@ a {
 .ai-evidence {
   padding: 12px;
   overflow: auto;
+}
+
+.app-shell.ai-mode .ai-sidebar,
+.app-shell.ai-mode .ai-chat,
+.app-shell.ai-mode .ai-evidence {
+  min-height: 0;
+}
+
+.app-shell.ai-mode .ai-sidebar,
+.app-shell.ai-mode .message-list,
+.app-shell.ai-mode .ai-evidence {
+  overscroll-behavior: contain;
 }
 
 .ai-sidebar-head,
@@ -476,11 +526,12 @@ a {
 .ai-chat {
   min-width: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   overflow: hidden;
 }
 
 .ai-status-line {
+  grid-row: 1;
   min-height: 44px;
   border-bottom: 1px solid #dce3d8;
   padding: 8px 12px;
@@ -493,6 +544,7 @@ a {
 }
 
 .inline-alert {
+  grid-row: 2;
   border-bottom: 1px solid #dce3d8;
   padding: 9px 12px;
   display: flex;
@@ -509,6 +561,7 @@ a {
 }
 
 .message-list {
+  grid-row: 3;
   min-height: 0;
   overflow: auto;
   padding: 12px;
@@ -538,9 +591,18 @@ a {
   margin-bottom: 8px;
 }
 
+.message header small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .message-content {
   line-height: 1.62;
   color: #17201a;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .message-notice {
@@ -561,6 +623,7 @@ a {
 }
 
 .message-content pre {
+  max-width: 100%;
   overflow: auto;
   background: #17201a;
   color: #f8fbf4;
@@ -569,7 +632,10 @@ a {
 }
 
 .message-content table {
+  display: block;
   width: 100%;
+  max-width: 100%;
+  overflow: auto;
   border-collapse: collapse;
 }
 
@@ -581,6 +647,7 @@ a {
 }
 
 .ai-composer {
+  grid-row: 4;
   border-top: 1px solid #dce3d8;
   padding: 12px;
   display: grid;
@@ -1292,8 +1359,24 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .app-shell.ai-mode {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .app-shell.ai-mode .workspace {
+    height: 100%;
+    min-height: 0;
+  }
+
   .sidebar {
     min-height: auto;
+  }
+
+  .app-shell.ai-mode .sidebar {
+    max-height: 28vh;
+    overflow: auto;
+    padding: 12px;
+    gap: 10px;
   }
 
   .repo-list {
@@ -1301,11 +1384,20 @@ textarea {
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   }
 
+  .app-shell.ai-mode .repo-list {
+    max-height: 96px;
+    overflow: auto;
+  }
+
   .doc-layout,
   .history-layout,
   .ai-panel,
   .detail-split {
     grid-template-columns: 1fr;
+  }
+
+  .app-shell.ai-mode .ai-panel {
+    grid-template-rows: minmax(88px, 0.7fr) minmax(0, 2fr) minmax(88px, 0.9fr);
   }
 
   .file-list {
@@ -1332,6 +1424,19 @@ textarea {
 
   .search-box {
     min-width: 100%;
+  }
+
+  .app-shell.ai-mode .sidebar {
+    max-height: 24vh;
+  }
+
+  .app-shell.ai-mode .topbar {
+    padding: 12px;
+  }
+
+  .app-shell.ai-mode .ai-panel {
+    grid-template-rows: minmax(76px, 0.6fr) minmax(0, 2.1fr) minmax(76px, 0.8fr);
+    gap: 10px;
   }
 
   .form-grid,

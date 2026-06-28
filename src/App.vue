@@ -1,5 +1,5 @@
 <template>
-  <main class="app-shell">
+  <main class="app-shell" :class="{ 'ai-mode': tab === 'ai' }">
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark" aria-hidden="true">
