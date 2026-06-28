@@ -2,7 +2,7 @@
 
 DocHarbor 是一个独立的 Git 文档浏览服务。系统按仓库配置 clone bare mirror，扫描指定目录下的文档文件，提供智能最新视图、按分支浏览、Markdown/Mermaid 预览、单文件下载、Git 历史和扫描记录。
 
-需求来源见 [DocHarbor 产品需求与设计文档](doc/DocHarbor产品需求与设计文档.md)。完整操作说明见 [DocHarbor 使用手册](doc/DocHarbor使用手册.md)。
+需求来源见 [DocHarbor 产品需求与设计文档](doc/DocHarbor产品需求与设计文档.md)。完整操作说明见 [DocHarbor 使用手册](doc/DocHarbor使用手册.md)。AI 问答扩展设计见 [DocHarbor AI 问答功能设计文档](doc/DocHarbor%20AI问答功能设计文档.md)。
 
 ## 功能范围
 
@@ -64,6 +64,8 @@ WEB_DIR=./dist go run ./cmd/doc-harbor
 | `GITHUB_WEBHOOK_SECRET` | 空 | GitHub Webhook 共享 secret，空时 webhook 入口不可用 |
 
 私有仓库凭据不写入数据库。数据库中只保存凭据引用字段，实际密钥通过容器挂载或主机环境提供。
+
+AI provider API key 通过前端 AI 配置页录入。DocHarbor 会在 `DATA_DIR/secrets/ai-master.key` 自动生成本机加密主密钥，并随数据目录持久化；不需要额外配置环境变量。
 
 SSH 仓库可以使用默认挂载的 `~/.ssh`，也可以把项目专用 deploy key 放到 `credentials/ssh/` 后自行在 `credentials/.gitconfig` 中配置 `core.sshCommand`。
 

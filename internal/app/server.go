@@ -55,6 +55,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/repos", s.handleRepos)
 	mux.HandleFunc("/api/repos/", s.handleRepoSubroutes)
+	mux.HandleFunc("/api/ai", s.handleAIRoot)
+	mux.HandleFunc("/api/ai/", s.handleAISubroutes)
 	mux.HandleFunc("/api/webhooks/github/secret", s.handleGitHubWebhookSecret)
 	mux.HandleFunc("/api/webhooks/github/", s.handleGitHubWebhook)
 	mux.Handle("/", s.webHandler())

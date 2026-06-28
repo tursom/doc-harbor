@@ -152,3 +152,264 @@ export interface CommitFileChange {
 export interface CommitDetail extends CommitSummary {
   files: CommitFileChange[]
 }
+
+export interface AIProvider {
+  provider_key: string
+  name: string
+  priority: number
+  provider_type: string
+  base_url: string
+  api_key_secret_id: number
+  model: string
+  cost_tier: string
+  request_timeout_seconds: number
+  max_rpm: number
+  secret_configured?: boolean
+  secret_last4?: string
+  secret_fingerprint?: string
+}
+
+export interface AIRouting {
+  default_task_class: string
+  task_classes: Record<string, { providers: string[]; fallback_task_class: string }>
+  escalation: Record<string, string>
+}
+
+export interface AIConfigData {
+  enabled: boolean
+  viewer: { header_candidates: string[] }
+  history: { retention_days: number }
+  chat: {
+    timeout_seconds: number
+    max_context_chunks: number
+    routing: AIRouting
+    providers: AIProvider[]
+  }
+  indexing: {
+    default_scan_roots: string[]
+    exclude_globs: string[]
+    max_file_size: number
+  }
+  memory: {
+    enabled: boolean
+    use: boolean
+    generate: boolean
+    review_required: boolean
+    max_context_items: number
+    min_confidence: number
+    retention_days: number
+  }
+}
+
+export interface AIConfigVersion {
+  id: number
+  version: number
+  status: string
+  config_hash: string
+  config: AIConfigData
+  secret_refs: number[]
+  validation_status: string
+  validation_report_json: string
+  created_by_viewer: string
+  published_by_viewer: string
+  created_at: string
+  updated_at: string
+  published_at: string
+  superseded_at: string
+  error_message: string
+}
+
+export interface AISecret {
+  id: number
+  name: string
+  secret_type: string
+  fingerprint: string
+  last4: string
+  created_at: string
+  updated_at: string
+}
+
+export type AISettingsStatus = 'not_configured' | 'ready_to_test' | 'ready_disabled' | 'enabled' | 'error'
+export type AICostTier = 'low' | 'medium' | 'high'
+
+export interface AISettingsRouteProvider {
+  provider_key: string
+  name: string
+  model: string
+  priority: number
+}
+
+export interface AISettingsProviderSummary {
+  provider_key: string
+  name: string
+  provider_type: string
+  base_url: string
+  model: string
+  api_key_configured: boolean
+  api_key_last4?: string
+  is_default: boolean
+  route_order: number
+  usable: boolean
+  last_test_status?: 'pass' | 'fail' | 'not_run'
+  last_test_message?: string
+  timeout_seconds: number
+  request_timeout_seconds?: number
+  max_rpm: number
+  priority: number
+  cost_tier: AICostTier
+}
+
+export interface AIProviderTestSummary {
+  status: 'pass' | 'fail'
+  message: string
+  tested_at?: string
+  latency_ms: number
+}
+
+export interface AISettingsSummary {
+  enabled: boolean
+  status: AISettingsStatus
+  default_provider_key: string
+  default_provider_name: string
+  default_model: string
+  route_provider_keys: string[]
+  route_providers: AISettingsRouteProvider[]
+  active_route_provider_keys: string[]
+  has_unapplied_changes: boolean
+  encryption_ready: boolean
+  editable_status?: string
+  last_test?: AIProviderTestSummary
+  providers: AISettingsProviderSummary[]
+}
+
+export interface AISettingsForm {
+  provider_key: string
+  name: string
+  base_url: string
+  model: string
+  api_key: string
+  timeout_seconds: number
+  max_rpm: number
+  priority: number
+  cost_tier: AICostTier
+}
+
+export interface AIProviderTestResult {
+  status: 'pass' | 'fail'
+  message: string
+  model: string
+  latency_ms: number
+  safe_error?: string
+}
+
+export interface APIErrorPayload {
+  error?: { code?: string; message?: string; detail?: string }
+  fields?: Record<string, string>
+  provider_errors?: Record<string, string>
+  settings?: AISettingsSummary
+}
+
+export interface AINotice {
+  type: 'ai_disabled' | 'provider_error' | 'no_evidence'
+  message: string
+}
+
+export interface AIQuestionScope {
+  repo_mode: string
+  repo_ids: number[]
+  source_mode: string
+  file_types: string[]
+  current_file?: {
+    repo_id: number
+    version_id: number
+    branch: string
+    commit_sha: string
+    file_path: string
+  }
+}
+
+export interface AISession {
+  id: number
+  title: string
+  viewer_key: string
+  scope_json: string
+  created_at: string
+  updated_at: string
+  archived_at: string
+}
+
+export interface AIMessage {
+  id: number
+  session_id: number
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  model: string
+  provider_name: string
+  model_route_json: string
+  prompt_tokens: number
+  completion_tokens: number
+  latency_ms: number
+  status: string
+  error_message: string
+  created_at: string
+}
+
+export interface AIServiceCandidate {
+  id: number
+  run_id: number
+  message_id: number
+  repo_id: number
+  repo_name?: string
+  service_name: string
+  matched_terms: string[]
+  confidence: string
+  reason: string
+  score: number
+  evidence_count: number
+  created_at: string
+}
+
+export interface AIMessageCitation {
+  id: number
+  message_id: number
+  repo_id: number
+  repo_name?: string
+  version_id: number
+  source_scope: string
+  branch: string
+  commit_sha: string
+  file_path: string
+  line_start: number
+  line_end: number
+  quote_text: string
+  score: number
+  created_at: string
+}
+
+export interface AIAgentRun {
+  id: number
+  session_id: number
+  user_message_id: number
+  assistant_message_id: number
+  status: string
+  current_state: string
+  intent: string
+  service_candidate_count: number
+  evidence_count: number
+  verification_status: string
+  config_version: number
+  config_hash: string
+  model: string
+  provider_name: string
+  started_at: string
+  finished_at: string
+  error_message: string
+}
+
+export interface AIQuestionResult {
+  run: AIAgentRun
+  message: AIMessage
+  service_candidates: AIServiceCandidate[]
+  citations: AIMessageCitation[]
+  notice?: AINotice
+}

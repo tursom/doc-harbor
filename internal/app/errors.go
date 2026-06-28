@@ -11,7 +11,21 @@ type appError struct {
 	Message string
 }
 
+type structuredAppError struct {
+	Status  int
+	Code    string
+	Message string
+	Detail  string
+}
+
 func (e appError) Error() string {
+	return e.Message
+}
+
+func (e structuredAppError) Error() string {
+	if e.Detail != "" {
+		return e.Message + ": " + e.Detail
+	}
 	return e.Message
 }
 
@@ -52,4 +66,27 @@ func writeError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+}
+
+func writeStructuredError(w http.ResponseWriter, status int, code, message, detail string) {
+	body := map[string]any{
+		"error": map[string]any{
+			"code":    code,
+			"message": message,
+		},
+	}
+	if detail != "" {
+		body["error"].(map[string]any)["detail"] = detail
+	}
+	writeJSON(w, status, body)
+}
+
+func writeFieldErrors(w http.ResponseWriter, fields map[string]string) {
+	writeJSON(w, http.StatusBadRequest, map[string]any{
+		"error": map[string]any{
+			"code":    "validation_failed",
+			"message": "配置不完整",
+		},
+		"fields": fields,
+	})
 }

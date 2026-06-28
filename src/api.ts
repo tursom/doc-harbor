@@ -1,4 +1,15 @@
 import type {
+  AIMessage,
+  AIMessageCitation,
+  AIProviderTestResult,
+  AIQuestionResult,
+  AIQuestionScope,
+  AIServiceCandidate,
+  AISettingsForm,
+  AISettingsProviderSummary,
+  AISettingsSummary,
+  APIErrorPayload,
+  AISession,
   CommitDetail,
   CommitSummary,
   FileContent,
@@ -8,6 +19,26 @@ import type {
   Repository,
   ScanRun
 } from './types'
+
+export class APIRequestError extends Error {
+  status: number
+  code: string
+  detail: string
+  fields: Record<string, string>
+  providerErrors: Record<string, string>
+  settings?: AISettingsSummary
+
+  constructor(status: number, message: string, payload: APIErrorPayload = {}) {
+    super(message)
+    this.name = 'APIRequestError'
+    this.status = status
+    this.code = payload.error?.code || ''
+    this.detail = payload.error?.detail || ''
+    this.fields = payload.fields || {}
+    this.providerErrors = payload.provider_errors || {}
+    this.settings = payload.settings
+  }
+}
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
@@ -19,13 +50,19 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   })
   if (!response.ok) {
     let message = response.statusText
+    let payload: APIErrorPayload = {}
     try {
       const body = await response.json()
-      message = body.error || message
+      if (typeof body.error === 'string') {
+        message = body.error
+      } else {
+        payload = body
+        message = body.error?.message || message
+      }
     } catch {
       // keep status text
     }
-    throw new Error(message)
+    throw new APIRequestError(response.status, message, payload)
   }
   if (response.status === 204) {
     return undefined as T
@@ -82,6 +119,82 @@ export const api = {
   },
   async githubWebhookSecret() {
     return request<{ configured: boolean; secret: string }>('/api/webhooks/github/secret')
+  },
+  async aiSettings() {
+    return request<AISettingsSummary>('/api/ai/settings')
+  },
+  async saveAIDefaultProvider(payload: AISettingsForm & { enable: boolean }) {
+    return request<{
+      enabled: boolean
+      provider: AISettingsProviderSummary
+      settings: AISettingsSummary
+      message: string
+    }>('/api/ai/settings/default-provider', { method: 'PUT', body: JSON.stringify(payload) })
+  },
+  async testAIProvider(payload: Partial<AISettingsForm>) {
+    return request<AIProviderTestResult>('/api/ai/providers/test', {
+      method: 'POST',
+      body: JSON.stringify({
+        provider_key: payload.provider_key || '',
+        name: payload.name || '',
+        base_url: payload.base_url || '',
+        model: payload.model || '',
+        api_key: payload.api_key || '',
+        timeout_seconds: payload.timeout_seconds || 20
+      })
+    })
+  },
+  async setAIEnabled(enabled: boolean) {
+    return request<{ settings: AISettingsSummary }>('/api/ai/settings/enabled', {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled })
+    })
+  },
+  async applyAISettings(payload: { enabled?: boolean; test_policy?: 'default_only' | 'changed_routable' | 'all_routable' } = {}) {
+    return request<{ enabled: boolean; settings: AISettingsSummary; message: string }>('/api/ai/settings/apply', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    })
+  },
+  async createAIProvider(payload: Partial<AISettingsForm> & { test_before_save?: boolean }) {
+    return request<{
+      provider: AISettingsProviderSummary
+      settings: AISettingsSummary
+      message: string
+    }>('/api/ai/providers', { method: 'POST', body: JSON.stringify(payload) })
+  },
+  async updateAIProvider(providerKey: string, payload: Partial<AISettingsForm> & { make_default?: boolean; test_before_save?: boolean }) {
+    return request<{
+      provider: AISettingsProviderSummary
+      settings: AISettingsSummary
+      message: string
+    }>(`/api/ai/providers/${providerKey}`, { method: 'PATCH', body: JSON.stringify(payload) })
+  },
+  async deleteAIProvider(providerKey: string, replacementProviderKey = '') {
+    const query = replacementProviderKey ? `?${new URLSearchParams({ replacement_provider_key: replacementProviderKey })}` : ''
+    return request<{ deleted_provider_key: string; settings: AISettingsSummary; message: string }>(`/api/ai/providers/${providerKey}${query}`, {
+      method: 'DELETE'
+    })
+  },
+  async aiSessions(params: Record<string, string> = {}) {
+    const query = new URLSearchParams(params)
+    return request<{ items: AISession[] }>(`/api/ai/sessions${query.toString() ? `?${query}` : ''}`)
+  },
+  async createAISession(payload: { title: string; scope: AIQuestionScope }) {
+    return request<AISession>('/api/ai/sessions', { method: 'POST', body: JSON.stringify(payload) })
+  },
+  async aiMessages(sessionID: number) {
+    return request<{
+      items: AIMessage[]
+      service_candidates: AIServiceCandidate[]
+      citations: AIMessageCitation[]
+    }>(`/api/ai/sessions/${sessionID}/messages`)
+  },
+  async askAI(sessionID: number, question: string, scope: AIQuestionScope) {
+    return request<AIQuestionResult>(`/api/ai/sessions/${sessionID}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ question, scope_override: scope })
+    })
   }
 }
 

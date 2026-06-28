@@ -358,6 +358,8 @@ docker pull ghcr.io/tursom/doc-harbor:latest
 | `ALLOW_LOCAL_GIT` | `0` | 是否允许本地路径或 `file://` 仓库 |
 | `GITHUB_WEBHOOK_SECRET` | 空 | GitHub Webhook 共享 secret |
 
+AI provider API key 通过前端 AI 配置页录入。DocHarbor 会在 `DATA_DIR/secrets/ai-master.key` 自动生成本机加密主密钥，并随数据目录持久化；不需要额外配置环境变量。
+
 ### 13.3 数据和凭据挂载
 
 Compose 默认挂载：
