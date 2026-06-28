@@ -295,7 +295,7 @@ func TestAIRoutedModelFailoverRecordsAttemptOrder(t *testing.T) {
 	}
 	cfg.Chat.Routing = buildDefaultRouting(ctx, server.db, cfg.Chat.Providers)
 
-	result, err := server.callRoutedAIModel(ctx, cfg, "哪些服务处理订单？", aiRetrievalResult{})
+	result, err := server.callRoutedAIModel(ctx, cfg, "哪些模块处理请求？", aiRetrievalResult{})
 	if err != nil {
 		t.Fatalf("call routed model: %v", err)
 	}
@@ -401,18 +401,18 @@ func TestAIRetrievalUsesSmartLatestDocsAcrossBranches(t *testing.T) {
 	server := newWebhookTestServer(t)
 	ctx := context.Background()
 	sourceRepo := createTestGitRepo(t)
-	writeScanPathTestFile(t, sourceRepo, "doc/sgps-openapi.md", "# SGPS 开放平台对接文档\n\n已开放接口：createOrder、getDetail。\n")
+	writeScanPathTestFile(t, sourceRepo, "doc/api-reference.md", "# API reference\n\nPublished endpoints: createRecord, getDetail.\n")
 	runTestGit(t, sourceRepo, "add", ".")
-	runTestGit(t, sourceRepo, "commit", "-m", "main sgps docs")
+	runTestGit(t, sourceRepo, "commit", "-m", "main api docs")
 	runTestGit(t, sourceRepo, "checkout", "-b", "dev")
-	writeScanPathTestFile(t, sourceRepo, "doc/integration/商家对接文档.md", "# 元游猫 通用商户对接文档\n\n元游猫通用商户支持 API 对接型和平台内人工型。\n\n商户调用接口：/api/game-trade-server/third-party/query-order-detail、/api/game-trade-server/third-party/query-order-list、/api/game-trade-server/third-party/get-friend-links、/api/game-trade-server/third-party/shipping-callback、/api/game-trade-server/third-party/delivery-failed。\n\n元游猫会向商户 notify_url 推单，并使用 query_url 主动查询订单状态。\n")
-	writeScanPathTestFile(t, sourceRepo, "doc/integration/通用商户对接系统设计.md", "# 通用商户对接系统设计\n\n通用商户是游戏服务的第三方接入形态，包含推单、回调、查询和退款通知。\n")
+	writeScanPathTestFile(t, sourceRepo, "doc/integration/external-adapter.md", "# External adapter API\n\nThe alpha module supports API-based and dashboard-based adapters.\n\nAdapter endpoints: /api/alpha/external/query-detail, /api/alpha/external/query-list, /api/alpha/external/get-links, /api/alpha/external/status-callback, /api/alpha/external/delivery-failed.\n\nThe module pushes events to notify_url and reads current status from query_url.\n")
+	writeScanPathTestFile(t, sourceRepo, "doc/integration/adapter-design.md", "# Adapter design\n\nExternal adapters include push, callback, query, and status notification flows.\n")
 	runTestGit(t, sourceRepo, "add", ".")
-	runTestGit(t, sourceRepo, "commit", "-m", "dev general merchant docs")
+	runTestGit(t, sourceRepo, "commit", "-m", "dev adapter docs")
 
 	repo, err := createRepository(ctx, server.db, Repository{
-		Name:                  "游戏服务后端",
-		Slug:                  "go-game-trade-serve",
+		Name:                  "alpha-module",
+		Slug:                  "alpha-module",
 		RepoURL:               sourceRepo,
 		DefaultBranch:         "main",
 		TrackedBranches:       []string{"*"},
@@ -429,7 +429,7 @@ func TestAIRetrievalUsesSmartLatestDocsAcrossBranches(t *testing.T) {
 
 	cfg := defaultAIConfig()
 	cfg.Chat.MaxContextChunks = 8
-	retrieval, err := server.retrieveAIEvidence(ctx, "你好，游戏服务支持哪些第三方接入接口？", AIQuestionScope{
+	retrieval, err := server.retrieveAIEvidence(ctx, "alpha module supports which external adapter APIs?", AIQuestionScope{
 		RepoMode:   "global",
 		SourceMode: "smart_latest_with_branch_candidates",
 	}, cfg)
@@ -437,31 +437,199 @@ func TestAIRetrievalUsesSmartLatestDocsAcrossBranches(t *testing.T) {
 		t.Fatalf("retrieve evidence: %v", err)
 	}
 
-	var foundGeneralMerchant bool
+	var foundAdapterDoc bool
 	for _, evidence := range retrieval.Evidence {
-		if evidence.Citation.FilePath == "doc/integration/商家对接文档.md" &&
+		if evidence.Citation.FilePath == "doc/integration/external-adapter.md" &&
 			evidence.Citation.Branch == "dev" &&
 			evidence.Citation.SourceScope == "smart_latest" {
-			foundGeneralMerchant = true
-			if !strings.Contains(evidence.Content, "query-order-detail") || !strings.Contains(evidence.Content, "notify_url") {
-				t.Fatalf("general merchant evidence missing API details:\n%s", evidence.Content)
+			foundAdapterDoc = true
+			if !strings.Contains(evidence.Content, "query-detail") || !strings.Contains(evidence.Content, "notify_url") {
+				t.Fatalf("adapter evidence missing API details:\n%s", evidence.Content)
 			}
 		}
 	}
-	if !foundGeneralMerchant {
-		t.Fatalf("smart latest evidence did not include dev general merchant docs: %+v", retrieval.Evidence)
+	if !foundAdapterDoc {
+		t.Fatalf("smart latest evidence did not include dev adapter docs: %+v", retrieval.Evidence)
 	}
 }
 
-func TestAIQueryTermsKeepChineseIntegrationPhrases(t *testing.T) {
-	terms := strings.Join(aiQueryTerms("你好，游戏服务支持哪些第三方接入接口？"), ",")
-	for _, want := range []string{"游戏服务", "第三方", "接入", "接口", "商家对接", "通用商户"} {
+func TestAIQueryTermsDeriveChinesePhrasesWithoutBusinessDictionary(t *testing.T) {
+	terms := strings.Join(aiQueryTerms("你好，认证模块支持哪些外部接入接口？"), ",")
+	for _, want := range []string{"认证模块", "外部", "接入", "接口"} {
 		if !strings.Contains(terms, want) {
 			t.Fatalf("terms %q missing %q", terms, want)
 		}
 	}
 	if strings.Contains(terms, ",游,") || strings.Contains(terms, ",戏,") {
 		t.Fatalf("terms should not rely on noisy single-character matches: %q", terms)
+	}
+}
+
+func TestAIQueryTermsSplitsMixedChineseAndIdentifierTokens(t *testing.T) {
+	terms := strings.Join(aiQueryTerms("alpha模块签发的token格式是什么样的？"), ",")
+	for _, want := range []string{"alpha", "签发", "token", "格式"} {
+		if !strings.Contains(terms, want) {
+			t.Fatalf("terms %q missing %q", terms, want)
+		}
+	}
+}
+
+func TestAIFollowUpQuestionUsesPreviousTokenContext(t *testing.T) {
+	requireGit(t)
+
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	primaryRepoDir := createTestGitRepo(t)
+	writeScanPathTestFile(t, primaryRepoDir, "src/security/session_token.ts", `export interface SessionTokenPayload {
+  user_id: number
+  create_time: number
+  expire: number
+  password: string
+  type: null
+}
+
+export function signUserToken(user) {
+  const payload: SessionTokenPayload = {
+    user_id: user.id,
+    create_time: Math.floor(Date.now() / 1000),
+    expire: Math.floor(Date.now() / 1000) + 30 * 24 * 3600,
+    password: user.password,
+    type: null,
+  }
+  return jwt.sign(payload, privateKey)
+}
+`)
+	runTestGit(t, primaryRepoDir, "add", ".")
+	runTestGit(t, primaryRepoDir, "commit", "-m", "add token utility")
+	primaryCommit := strings.TrimSpace(runTestGitOutput(t, primaryRepoDir, "rev-parse", "HEAD"))
+	primaryRepo, err := createRepository(ctx, server.db, Repository{
+		Name:                  "alpha-module",
+		Slug:                  "alpha-module",
+		RepoURL:               primaryRepoDir,
+		DefaultBranch:         "main",
+		TrackedBranches:       []string{"main"},
+		LatestIncludeBranches: []string{"main"},
+		ScanPaths:             []ScanPath{{Path: ".", Enabled: true}},
+		Enabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("create primary repository: %v", err)
+	}
+	if _, err := server.scanner.Scan(ctx, primaryRepo.ID, "manual"); err != nil {
+		t.Fatalf("scan primary repository: %v", err)
+	}
+
+	secondaryRepoDir := createTestGitRepo(t)
+	writeScanPathTestFile(t, secondaryRepoDir, "doc/structures.md", "# Structure notes\n\nWidgetConfig structure, HTTP response envelope, and sorting result structure.\n")
+	runTestGit(t, secondaryRepoDir, "add", ".")
+	runTestGit(t, secondaryRepoDir, "commit", "-m", "add unrelated structures")
+	secondaryRepo, err := createRepository(ctx, server.db, Repository{
+		Name:                  "beta-module",
+		Slug:                  "beta-module",
+		RepoURL:               secondaryRepoDir,
+		DefaultBranch:         "main",
+		TrackedBranches:       []string{"main"},
+		LatestIncludeBranches: []string{"main"},
+		ScanPaths:             []ScanPath{{Path: ".", Enabled: true}},
+		Enabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("create secondary repository: %v", err)
+	}
+	if _, err := server.scanner.Scan(ctx, secondaryRepo.ID, "manual"); err != nil {
+		t.Fatalf("scan secondary repository: %v", err)
+	}
+
+	session, err := createAISession(ctx, server.db, "token format", "", AIQuestionScope{RepoMode: "global"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := insertAIMessage(ctx, server.db, AIMessage{
+		SessionID: session.ID,
+		Role:      "user",
+		Content:   "alpha module 签发的 token 格式是什么样的？",
+	}); err != nil {
+		t.Fatalf("insert previous user message: %v", err)
+	}
+	assistantMsg, err := insertAIMessage(ctx, server.db, AIMessage{
+		SessionID: session.ID,
+		Role:      "assistant",
+		Content:   "alpha module token 定义在 src/security/session_token.ts，包含 user_id、create_time、expire、password、type。",
+	})
+	if err != nil {
+		t.Fatalf("insert previous assistant message: %v", err)
+	}
+	if _, err := insertAICitation(ctx, server.db, AIMessageCitation{
+		MessageID:   assistantMsg.ID,
+		RepoID:      primaryRepo.ID,
+		SourceScope: "smart_latest",
+		Branch:      "main",
+		CommitSHA:   primaryCommit,
+		FilePath:    "src/security/session_guard.ts",
+		LineStart:   1,
+		LineEnd:     20,
+		QuoteText:   "guard checks old token",
+		Score:       200,
+	}); err != nil {
+		t.Fatalf("insert previous unrelated citation: %v", err)
+	}
+	if _, err := insertAICitation(ctx, server.db, AIMessageCitation{
+		MessageID:   assistantMsg.ID,
+		RepoID:      primaryRepo.ID,
+		SourceScope: "smart_latest",
+		Branch:      "main",
+		CommitSHA:   primaryCommit,
+		FilePath:    "src/security/session_token.ts",
+		LineStart:   1,
+		LineEnd:     18,
+		QuoteText:   "SessionTokenPayload user_id create_time expire password type",
+		Score:       100,
+	}); err != nil {
+		t.Fatalf("insert previous citation: %v", err)
+	}
+
+	prepared, err := server.prepareAIQuestion(ctx, session.ID, "能给我详细的结构说明吗？", AIQuestionScope{
+		RepoMode:   "global",
+		SourceMode: "smart_latest_with_branch_candidates",
+		FileTypes:  []string{"all"},
+	})
+	if err != nil {
+		t.Fatalf("prepare follow-up question: %v", err)
+	}
+	if !prepared.Conversation.FollowUp {
+		t.Fatal("expected follow-up context")
+	}
+	if prepared.Scope.RepoMode != "follow_up_context" || len(prepared.Scope.RepoIDs) != 1 || prepared.Scope.RepoIDs[0] != primaryRepo.ID {
+		t.Fatalf("prepared scope = %+v, want previous primary repo only", prepared.Scope)
+	}
+	if strings.Join(prepared.Conversation.PreviousCitationPaths, ",") != "src/security/session_token.ts" {
+		t.Fatalf("prepared citation paths = %+v, want token path mentioned by previous answer", prepared.Conversation.PreviousCitationPaths)
+	}
+
+	cfg := defaultAIConfig()
+	cfg.Chat.MaxContextChunks = 8
+	retrieval, err := server.retrieveAIEvidence(ctx, prepared.SearchQuestion, prepared.Scope, cfg)
+	if err != nil {
+		t.Fatalf("retrieve follow-up evidence: %v", err)
+	}
+	applyAIConversationContext(&retrieval, prepared)
+	var foundTokenFile bool
+	for _, evidence := range retrieval.Evidence {
+		if evidence.Citation.RepoID == secondaryRepo.ID {
+			t.Fatalf("follow-up retrieval should not drift to unrelated secondary repo: %+v", evidence.Citation)
+		}
+		if evidence.Citation.FilePath == "src/security/session_token.ts" &&
+			strings.Contains(evidence.Content, "SessionTokenPayload") &&
+			strings.Contains(evidence.Content, "create_time") {
+			foundTokenFile = true
+		}
+	}
+	if !foundTokenFile {
+		t.Fatalf("follow-up retrieval did not include user token evidence: %+v", retrieval.Evidence)
+	}
+	messages := buildAIChatMessages("能给我详细的结构说明吗？", retrieval)
+	if !strings.Contains(messages[1].Content, "上一轮用户问题") || !strings.Contains(messages[1].Content, "src/security/session_token.ts") {
+		t.Fatalf("model prompt missing follow-up context: %s", messages[1].Content)
 	}
 }
 
