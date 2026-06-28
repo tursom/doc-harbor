@@ -448,13 +448,17 @@
               <button class="mini-command" type="button" :disabled="aiBusy" @click="loadAIPage">重试</button>
             </div>
 
-            <div class="message-list">
+            <div ref="messageListRef" class="message-list">
               <article v-for="message in aiMessages" :key="message.id" class="message" :class="message.role">
                 <header>
                   <span>{{ message.role === 'user' ? '提问' : '回答' }}</span>
                   <small v-if="message.provider_name">{{ message.provider_name }} · {{ message.model }}</small>
                 </header>
                 <div v-if="messageNotice(message)" class="message-notice">{{ messageNotice(message)?.message }}</div>
+                <div v-if="messageStatusLabel(message)" class="message-state" :class="message.status">
+                  <span>{{ messageStatusLabel(message) }}</span>
+                  <small v-if="message.error_message">{{ message.error_message }}</small>
+                </div>
                 <div class="message-content" v-html="renderMessageMarkdown(message.content)"></div>
               </article>
               <div v-if="!aiMessages.length" class="empty-preview">
@@ -489,6 +493,21 @@
           </section>
 
           <aside class="ai-evidence">
+            <div class="section-title-row">
+              <h3>证据链</h3>
+              <span v-if="aiBusy" class="status running">生成中</span>
+            </div>
+            <div class="evidence-chain">
+              <div v-for="item in aiEvidenceChain" :key="item.id" class="chain-row" :class="[item.kind, item.status]">
+                <div>
+                  <strong>{{ item.title }}</strong>
+                  <small v-if="item.meta">{{ item.meta }}</small>
+                </div>
+                <p>{{ item.detail }}</p>
+              </div>
+            </div>
+            <p v-if="!aiEvidenceChain.length" class="muted">发送问题后展示检索、路由尝试和证据召回状态。</p>
+
             <h3>候选服务</h3>
             <div v-for="candidate in aiCandidates" :key="`${candidate.repo_id}:${candidate.service_name}`" class="candidate-row">
               <strong>{{ candidate.service_name }}</strong>
@@ -737,6 +756,7 @@ import type {
   AISettingsForm,
   AISettingsProviderSummary,
   AISettingsSummary,
+  AIStreamEvent,
   AISession,
   CommitDetail,
   CommitSummary,
@@ -749,6 +769,14 @@ import type {
 } from './types'
 
 type AppTab = 'docs' | 'history' | 'runs' | 'ai' | 'ai-config'
+type AIEvidenceChainItem = {
+  id: string
+  kind: 'stage' | 'provider'
+  title: string
+  detail: string
+  status: string
+  meta?: string
+}
 
 const repos = ref<Repository[]>([])
 const selectedRepo = ref<Repository | null>(null)
@@ -776,6 +804,7 @@ const editingRepo = ref<Repository | null>(null)
 const aiSessions = ref<AISession[]>([])
 const selectedAISession = ref<AISession | null>(null)
 const aiMessages = ref<AIMessage[]>([])
+const messageListRef = ref<HTMLElement | null>(null)
 const aiQuestion = ref('')
 const aiScopeMode = ref<'global' | 'current_repo' | 'current_file'>('global')
 const aiIncludeBranchCandidates = ref(true)
@@ -783,6 +812,7 @@ const aiBusy = ref(false)
 const aiPageError = ref('')
 const aiCandidates = ref<AIServiceCandidate[]>([])
 const aiCitations = ref<AIMessageCitation[]>([])
+const aiEvidenceChain = ref<AIEvidenceChainItem[]>([])
 const aiMessageNotices = ref<Record<number, AINotice>>({})
 const aiSettings = ref<AISettingsSummary | null>(null)
 const aiSettingsForm = ref<AISettingsForm>(defaultAISettingsForm())
@@ -817,6 +847,7 @@ let repoSelectionRequest = 0
 let fileListRequest = 0
 let fileOpenRequest = 0
 let historyRequest = 0
+let aiStreamSequence = 0
 
 interface AIProviderPreset {
   key: string
@@ -1361,11 +1392,13 @@ async function loadAIPage() {
         aiMessages.value = []
         aiCandidates.value = []
         aiCitations.value = []
+        aiEvidenceChain.value = []
       }
     } else {
       aiMessages.value = []
       aiCandidates.value = []
       aiCitations.value = []
+      aiEvidenceChain.value = []
     }
   } catch (err) {
     aiPageError.value = err instanceof Error ? err.message : String(err)
@@ -1385,6 +1418,7 @@ async function createNewAISession(options: { manageBusy?: boolean } = {}) {
     aiMessages.value = []
     aiCandidates.value = []
     aiCitations.value = []
+    aiEvidenceChain.value = []
     return session
   } catch (err) {
     aiPageError.value = err instanceof Error ? err.message : String(err)
@@ -1402,6 +1436,7 @@ async function selectAISession(session: AISession) {
   selectedAISession.value = session
   aiCandidates.value = []
   aiCitations.value = []
+  aiEvidenceChain.value = []
   await loadAIMessages()
 }
 
@@ -1410,6 +1445,7 @@ async function loadAIMessages() {
     aiMessages.value = []
     aiCandidates.value = []
     aiCitations.value = []
+    aiEvidenceChain.value = []
     return
   }
   const response = await api.aiMessages(selectedAISession.value.id)
@@ -1419,7 +1455,7 @@ async function loadAIMessages() {
 }
 
 async function sendAIQuestion() {
-  if (!aiQuestion.value.trim()) return
+  if (!aiQuestion.value.trim() || aiBusy.value) return
   aiBusy.value = true
   aiPageError.value = ''
   try {
@@ -1428,19 +1464,188 @@ async function sendAIQuestion() {
     }
     if (!selectedAISession.value) return
     const question = aiQuestion.value.trim()
-    const result = await api.askAI(selectedAISession.value.id, question, buildAIScope())
     aiQuestion.value = ''
-    aiCandidates.value = result.service_candidates
-    aiCitations.value = result.citations
-    if (result.notice && result.message?.id) {
-      aiMessageNotices.value[result.message.id] = result.notice
-    }
-    await loadAIMessages()
-    await loadAIPage()
+    aiCandidates.value = []
+    aiCitations.value = []
+    aiEvidenceChain.value = []
+    await api.streamAI(selectedAISession.value.id, question, buildAIScope(), handleAIStreamEvent)
+    await refreshAISessions()
   } catch (err) {
     aiPageError.value = err instanceof Error ? err.message : String(err)
   } finally {
     aiBusy.value = false
+  }
+}
+
+async function handleAIStreamEvent(event: AIStreamEvent) {
+  switch (event.type) {
+    case 'user_message':
+      upsertAIMessage(event.message)
+      addEvidenceChainItem({
+        kind: 'stage',
+        title: '问题已入库',
+        detail: '用户问题已保存到当前会话。',
+        status: 'success'
+      })
+      break
+    case 'run_started':
+      upsertAIMessage(event.assistant_message)
+      addEvidenceChainItem({
+        kind: 'stage',
+        title: '运行已开始',
+        detail: `run #${event.run.id} 已创建，等待检索和模型路由。`,
+        status: 'running'
+      })
+      break
+    case 'stage':
+      addEvidenceChainItem({
+        kind: 'stage',
+        title: aiStageTitle(event.stage),
+        detail: event.message,
+        status: event.status,
+        meta: [event.candidate_count ? `候选 ${event.candidate_count}` : '', event.evidence_count ? `引用 ${event.evidence_count}` : '']
+          .filter(Boolean)
+          .join(' · ')
+      })
+      break
+    case 'service_candidates':
+      aiCandidates.value = event.items || []
+      break
+    case 'citations':
+      aiCitations.value = event.items || []
+      break
+    case 'provider_attempt':
+      addEvidenceChainItem({
+        kind: 'provider',
+        title: event.provider || event.provider_key,
+        detail: event.error ? `${aiStreamStatusLabel(event.status)}：${event.error}` : aiStreamStatusLabel(event.status),
+        status: event.status,
+        meta: `${event.model || '-'} · 优先级 ${event.priority}`
+      })
+      break
+    case 'answer_delta':
+      appendAIAnswerDelta(event.message_id, event.delta)
+      break
+    case 'message_done':
+      upsertAIMessage(event.message)
+      aiCandidates.value = event.service_candidates || []
+      aiCitations.value = event.citations || []
+      if (event.notice && event.message?.id) {
+        aiMessageNotices.value[event.message.id] = event.notice
+      }
+      addEvidenceChainItem({
+        kind: 'stage',
+        title: '回答完成',
+        detail: `答案已保存，输入 ${event.usage?.prompt_tokens || 0} tokens，输出 ${event.usage?.completion_tokens || 0} tokens。`,
+        status: 'success'
+      })
+      break
+    case 'error':
+      if (event.assistant_message) {
+        upsertAIMessage(event.assistant_message)
+      } else if (event.partial_message_id) {
+        const message = aiMessages.value.find((item) => item.id === event.partial_message_id)
+        if (message) {
+          message.status = message.content ? 'partial' : 'failed'
+          message.error_message = event.message
+        }
+      }
+      aiPageError.value = event.message
+      addEvidenceChainItem({
+        kind: 'stage',
+        title: '流式回答中断',
+        detail: event.message,
+        status: 'failed'
+      })
+      break
+    case 'done':
+      break
+  }
+  await scrollAIToBottom()
+}
+
+function upsertAIMessage(message: AIMessage) {
+  const index = aiMessages.value.findIndex((item) => item.id === message.id)
+  if (index >= 0) {
+    aiMessages.value[index] = message
+  } else {
+    aiMessages.value.push(message)
+  }
+}
+
+function appendAIAnswerDelta(messageID: number, delta: string) {
+  let message = aiMessages.value.find((item) => item.id === messageID)
+  if (!message) {
+    message = {
+      id: messageID,
+      session_id: selectedAISession.value?.id || 0,
+      role: 'assistant',
+      content: '',
+      model: '',
+      provider_name: '',
+      model_route_json: '',
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      latency_ms: 0,
+      status: 'streaming',
+      error_message: '',
+      created_at: ''
+    }
+    aiMessages.value.push(message)
+  }
+  message.content += delta
+  message.status = 'streaming'
+}
+
+function addEvidenceChainItem(item: Omit<AIEvidenceChainItem, 'id'>) {
+  aiStreamSequence += 1
+  aiEvidenceChain.value.push({ id: `${Date.now()}:${aiStreamSequence}`, ...item })
+}
+
+async function scrollAIToBottom() {
+  await nextTick()
+  if (messageListRef.value) {
+    messageListRef.value.scrollTop = messageListRef.value.scrollHeight
+  }
+}
+
+async function refreshAISessions() {
+  const response = await api.aiSessions({ limit: '50' })
+  aiSessions.value = response.items || []
+  if (selectedAISession.value) {
+    const refreshed = aiSessions.value.find((session) => session.id === selectedAISession.value?.id)
+    if (refreshed) selectedAISession.value = refreshed
+  }
+}
+
+function aiStageTitle(stage: string) {
+  switch (stage) {
+    case 'retrieve_smart_latest':
+      return '检索与证据召回'
+    case 'model_call':
+      return '模型调用'
+    case 'verify_answer':
+      return '答案校验'
+    default:
+      return stage || '阶段状态'
+  }
+}
+
+function aiStreamStatusLabel(status: string) {
+  switch (status) {
+    case 'started':
+      return '开始尝试'
+    case 'running':
+      return '进行中'
+    case 'succeeded':
+    case 'success':
+      return '成功'
+    case 'failed':
+      return '失败'
+    case 'skipped':
+      return '跳过'
+    default:
+      return status || '状态更新'
   }
 }
 
@@ -1766,6 +1971,20 @@ function messageNotice(message: AIMessage): AINotice | null {
     return null
   }
   return null
+}
+
+function messageStatusLabel(message: AIMessage) {
+  if (message.role !== 'assistant') return ''
+  switch (message.status) {
+    case 'streaming':
+      return '正在生成回答'
+    case 'partial':
+      return '回答中断，已保存部分内容'
+    case 'failed':
+      return '回答失败'
+    default:
+      return ''
+  }
 }
 
 function repoName(repoID: number) {

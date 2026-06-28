@@ -616,6 +616,37 @@ a {
   font-weight: 700;
 }
 
+.message-state {
+  border: 1px solid #e6d9ac;
+  background: #fff8dc;
+  color: #6f510d;
+  border-radius: 7px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  display: grid;
+  gap: 3px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.message-state small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #775a16;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.message-state.failed {
+  border-color: #efc8c0;
+  background: #fff0ed;
+  color: #8b251b;
+}
+
+.message-state.failed small {
+  color: #8b251b;
+}
+
 .message-content p,
 .message-content ul,
 .message-content table {
@@ -686,6 +717,71 @@ a {
 
 .inline-check input {
   min-height: auto;
+}
+
+.evidence-chain {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.chain-row {
+  border-left: 3px solid #c9d2c6;
+  background: #ffffff;
+  padding: 8px 9px;
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.chain-row.provider {
+  border-left-color: #8aa0b8;
+}
+
+.chain-row.success,
+.chain-row.succeeded {
+  border-left-color: #7caf64;
+}
+
+.chain-row.failed {
+  border-left-color: #c76455;
+}
+
+.chain-row.running,
+.chain-row.started {
+  border-left-color: #d6a63d;
+}
+
+.chain-row div {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chain-row strong,
+.chain-row small,
+.chain-row p {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chain-row strong {
+  color: #25352d;
+  font-size: 13px;
+}
+
+.chain-row small {
+  color: #6b7d70;
+  font-size: 12px;
+  text-align: right;
+}
+
+.chain-row p {
+  margin: 0;
+  color: #4b6053;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .candidate-row {

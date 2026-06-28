@@ -395,6 +395,131 @@ func TestAIMessagesResponseIncludesPersistedEvidencePanelData(t *testing.T) {
 	}
 }
 
+func TestAIQuestionStreamEndpointPersistsDeltasAndProviderFailover(t *testing.T) {
+	requireGit(t)
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	createAIStreamEvidenceRepo(t, server)
+	failingProvider := newAIStreamHTTPErrorTestServer(t, http.StatusTooManyRequests, `{"error":"rate limit sk-test-stream-leak-12345678"}`)
+	successProvider := newAIStreamModelTestServer(t, []string{"第一段", "第二段"}, true)
+	installAIStreamConfig(t, server, []AIProvider{
+		newAIStreamProvider(t, server, "deepseek-main", "DeepSeek", failingProvider.URL, "deepseek-v4-flash", "sk-test-first-stream-1234", 10),
+		newAIStreamProvider(t, server, "openai-main", "OpenAI", successProvider.URL, "gpt-4.1-mini", "sk-test-second-stream-5678", 20),
+	})
+	session, err := createAISession(ctx, server.db, "新的 AI 问答", "", AIQuestionScope{RepoMode: "global"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	recorder := doJSON(t, server, http.MethodPost, "/api/ai/sessions/"+strconv.FormatInt(session.ID, 10)+"/messages/stream", map[string]any{
+		"question":       "Hello README",
+		"scope_override": AIQuestionScope{RepoMode: "global"},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, event := range []string{"event: user_message", "event: run_started", "event: stage", "event: provider_attempt", "event: answer_delta", "event: message_done", "event: done"} {
+		if !strings.Contains(body, event) {
+			t.Fatalf("stream body missing %s: %s", event, body)
+		}
+	}
+	if !strings.Contains(body, `"provider_key":"deepseek-main"`) || !strings.Contains(body, `"status":"failed"`) {
+		t.Fatalf("stream body missing failed first provider: %s", body)
+	}
+	if !strings.Contains(body, `"provider_key":"openai-main"`) || !strings.Contains(body, `"status":"succeeded"`) {
+		t.Fatalf("stream body missing successful failover provider: %s", body)
+	}
+	if strings.Contains(body, "sk-test") {
+		t.Fatalf("stream response leaked API key: %s", body)
+	}
+	var content, status, provider, model string
+	if err := server.db.QueryRowContext(ctx, `SELECT content, status, provider_name, model
+		FROM ai_messages WHERE session_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1`, session.ID).
+		Scan(&content, &status, &provider, &model); err != nil {
+		t.Fatalf("load assistant message: %v", err)
+	}
+	if content != "第一段第二段" || status != "success" || provider != "OpenAI" || model != "gpt-4.1-mini" {
+		t.Fatalf("assistant message = content=%q status=%q provider=%q model=%q", content, status, provider, model)
+	}
+}
+
+func TestAIQuestionStreamProviderFailureAfterDeltaSavesPartialWithoutFailover(t *testing.T) {
+	requireGit(t)
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	createAIStreamEvidenceRepo(t, server)
+	partialProvider := newAIStreamBrokenAfterDeltaTestServer(t, "部分回答")
+	unusedProvider := newAIStreamModelTestServer(t, []string{"不应出现"}, true)
+	installAIStreamConfig(t, server, []AIProvider{
+		newAIStreamProvider(t, server, "deepseek-main", "DeepSeek", partialProvider.URL, "deepseek-v4-flash", "sk-test-partial-stream-1234", 10),
+		newAIStreamProvider(t, server, "openai-main", "OpenAI", unusedProvider.URL, "gpt-4.1-mini", "sk-test-unused-stream-5678", 20),
+	})
+	session, err := createAISession(ctx, server.db, "新的 AI 问答", "", AIQuestionScope{RepoMode: "global"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	recorder := doJSON(t, server, http.MethodPost, "/api/ai/sessions/"+strconv.FormatInt(session.ID, 10)+"/messages/stream", map[string]any{
+		"question":       "Hello README",
+		"scope_override": AIQuestionScope{RepoMode: "global"},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "event: error") || !strings.Contains(body, `"partial_message_id"`) {
+		t.Fatalf("stream body missing partial error event: %s", body)
+	}
+	if strings.Contains(body, `"provider_key":"openai-main"`) || strings.Contains(body, "不应出现") {
+		t.Fatalf("stream should not fail over after first delta: %s", body)
+	}
+	var content, status, errorMessage string
+	if err := server.db.QueryRowContext(ctx, `SELECT content, status, error_message
+		FROM ai_messages WHERE session_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1`, session.ID).
+		Scan(&content, &status, &errorMessage); err != nil {
+		t.Fatalf("load assistant message: %v", err)
+	}
+	if content != "部分回答" || status != "partial" || errorMessage == "" {
+		t.Fatalf("assistant partial message = content=%q status=%q error=%q", content, status, errorMessage)
+	}
+}
+
+func TestAIQuestionStreamContextCancelSavesPartial(t *testing.T) {
+	requireGit(t)
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	createAIStreamEvidenceRepo(t, server)
+	modelServer := newAIStreamModelTestServer(t, []string{"取消前", "取消后"}, true)
+	installAIStreamConfig(t, server, []AIProvider{
+		newAIStreamProvider(t, server, "deepseek-main", "DeepSeek", modelServer.URL, "deepseek-v4-flash", "sk-test-cancel-stream-1234", 10),
+	})
+	session, err := createAISession(ctx, server.db, "新的 AI 问答", "", AIQuestionScope{RepoMode: "global"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	streamCtx, cancel := context.WithCancel(ctx)
+	err = server.askAIQuestionStream(streamCtx, session.ID, "Hello README", AIQuestionScope{RepoMode: "global"}, "test", func(event string, data any) error {
+		if event == "answer_delta" {
+			cancel()
+			return streamCtx.Err()
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected canceled stream error")
+	}
+	var content, status, errorMessage string
+	if err := server.db.QueryRowContext(ctx, `SELECT content, status, error_message
+		FROM ai_messages WHERE session_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1`, session.ID).
+		Scan(&content, &status, &errorMessage); err != nil {
+		t.Fatalf("load assistant message: %v", err)
+	}
+	if content != "取消前" || status != "partial" || errorMessage == "" {
+		t.Fatalf("assistant canceled partial = content=%q status=%q error=%q", content, status, errorMessage)
+	}
+}
+
 func newAIModelTestServer(t *testing.T, status int, responseBody string) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -441,6 +566,149 @@ func newAIAnswerModelTestServer(t *testing.T, status int, responseBody string) *
 	}))
 	t.Cleanup(server.Close)
 	return server
+}
+
+func newAIStreamModelTestServer(t *testing.T, chunks []string, includeUsage bool) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requireAIStreamRequest(t, r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, chunk := range chunks {
+			_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"` + chunk + `"}}]}` + "\n\n"))
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}
+		if includeUsage {
+			_, _ = w.Write([]byte(`data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4}}` + "\n\n"))
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func newAIStreamHTTPErrorTestServer(t *testing.T, status int, responseBody string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requireAIStreamRequest(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(responseBody))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func newAIStreamBrokenAfterDeltaTestServer(t *testing.T, firstChunk string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requireAIStreamRequest(t, r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"` + firstChunk + `"}}]}` + "\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_, _ = w.Write([]byte("data: {broken-json\n\n"))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func requireAIStreamRequest(t *testing.T, r *http.Request) {
+	t.Helper()
+	if r.URL.Path != "/chat/completions" {
+		t.Fatalf("path = %s, want /chat/completions", r.URL.Path)
+	}
+	if r.Method != http.MethodPost {
+		t.Fatalf("method = %s, want POST", r.Method)
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode model request: %v", err)
+	}
+	if payload["stream"] != true {
+		t.Fatalf("stream = %v, want true", payload["stream"])
+	}
+	if payload["model"] == "" {
+		t.Fatalf("model is required in stream request")
+	}
+}
+
+func createAIStreamEvidenceRepo(t *testing.T, server *Server) Repository {
+	t.Helper()
+	ctx := context.Background()
+	sourceRepo := createTestGitRepo(t)
+	repo, err := createRepository(ctx, server.db, Repository{
+		Name:                  "stream-docs",
+		Slug:                  "stream-docs",
+		RepoURL:               sourceRepo,
+		DefaultBranch:         "main",
+		TrackedBranches:       []string{"main"},
+		LatestIncludeBranches: []string{"main"},
+		ScanPaths:             []ScanPath{{Path: ".", Enabled: true}},
+		Enabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("create repository: %v", err)
+	}
+	if _, err := server.scanner.Scan(ctx, repo.ID, "manual"); err != nil {
+		t.Fatalf("scan repository: %v", err)
+	}
+	return repo
+}
+
+func newAIStreamProvider(t *testing.T, server *Server, key, name, baseURL, model, apiKey string, priority int) AIProvider {
+	t.Helper()
+	secret, err := server.createOrUpdateAISecret(context.Background(), 0, aiSecretRequest{Name: key + "-api-key", SecretType: "api_key", Value: apiKey}, "test")
+	if err != nil {
+		t.Fatalf("create secret: %v", err)
+	}
+	return AIProvider{
+		ProviderKey:           key,
+		Name:                  name,
+		Priority:              priority,
+		ProviderType:          "openai_compatible",
+		BaseURL:               baseURL,
+		Model:                 model,
+		APIKeySecretID:        secret.ID,
+		CostTier:              "medium",
+		RequestTimeoutSeconds: 5,
+		MaxRPM:                60,
+	}
+}
+
+func installAIStreamConfig(t *testing.T, server *Server, providers []AIProvider) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := ensureActiveAIConfig(ctx, server.db); err != nil {
+		t.Fatalf("ensure active config: %v", err)
+	}
+	cfg := defaultAIConfig()
+	cfg.Enabled = true
+	cfg.Chat.Providers = providers
+	cfg.Chat.Routing = buildDefaultRouting(ctx, server.db, cfg.Chat.Providers)
+	cfg = normalizeAIConfig(cfg)
+	raw, hash, err := aiConfigJSONAndHash(cfg)
+	if err != nil {
+		t.Fatalf("config json: %v", err)
+	}
+	now := nowString()
+	if _, err := server.db.ExecContext(ctx, `UPDATE ai_config_versions SET status = 'superseded', superseded_at = ?, updated_at = ?
+		WHERE status = 'active'`, now, now); err != nil {
+		t.Fatalf("supersede active config: %v", err)
+	}
+	var maxVersion int
+	if err := server.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM ai_config_versions`).Scan(&maxVersion); err != nil {
+		t.Fatalf("max config version: %v", err)
+	}
+	if _, err := server.db.ExecContext(ctx, `INSERT INTO ai_config_versions
+		(version, status, config_hash, config_json, secret_refs_json, validation_status, validation_report_json,
+		 created_at, updated_at, published_at)
+		VALUES (?, 'active', ?, ?, ?, 'pass', ?, ?, ?, ?)`,
+		maxVersion+1, hash, raw, encodeJSON(aiSecretRefs(cfg)), `{"ok":true}`, now, now, now); err != nil {
+		t.Fatalf("insert active config: %v", err)
+	}
 }
 
 func doJSON(t *testing.T, server *Server, method, path string, body any) *httptest.ResponseRecorder {

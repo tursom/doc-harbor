@@ -413,3 +413,44 @@ export interface AIQuestionResult {
   citations: AIMessageCitation[]
   notice?: AINotice
 }
+
+export interface AIStreamStageEvent {
+  type: 'stage'
+  stage: string
+  status: string
+  message: string
+  evidence_count?: number
+  candidate_count?: number
+}
+
+export interface AIStreamProviderAttemptEvent {
+  type: 'provider_attempt'
+  attempt: number
+  task_class?: string
+  provider_key: string
+  provider: string
+  model: string
+  priority: number
+  status: string
+  error?: string
+}
+
+export type AIStreamEvent =
+  | { type: 'user_message'; message: AIMessage }
+  | { type: 'run_started'; run: AIAgentRun; assistant_message: AIMessage }
+  | AIStreamStageEvent
+  | { type: 'service_candidates'; items: AIServiceCandidate[] }
+  | { type: 'citations'; items: AIMessageCitation[] }
+  | AIStreamProviderAttemptEvent
+  | { type: 'answer_delta'; message_id: number; delta: string }
+  | {
+      type: 'message_done'
+      run: AIAgentRun
+      message: AIMessage
+      service_candidates: AIServiceCandidate[]
+      citations: AIMessageCitation[]
+      notice?: AINotice
+      usage?: { prompt_tokens: number; completion_tokens: number }
+    }
+  | { type: 'error'; message: string; partial_message_id?: number; assistant_message?: AIMessage }
+  | { type: 'done'; ok?: boolean }

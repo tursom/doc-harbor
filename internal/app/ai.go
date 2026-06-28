@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/aes"
@@ -202,6 +203,37 @@ type aiMessagesResponse struct {
 	Citations         []AIMessageCitation  `json:"citations"`
 }
 
+type aiStreamStageEvent struct {
+	Stage          string `json:"stage"`
+	Status         string `json:"status"`
+	Message        string `json:"message"`
+	EvidenceCount  int    `json:"evidence_count,omitempty"`
+	CandidateCount int    `json:"candidate_count,omitempty"`
+}
+
+type aiStreamProviderAttemptEvent struct {
+	Attempt     int    `json:"attempt"`
+	TaskClass   string `json:"task_class,omitempty"`
+	ProviderKey string `json:"provider_key"`
+	Provider    string `json:"provider"`
+	Model       string `json:"model"`
+	Priority    int    `json:"priority"`
+	Status      string `json:"status"`
+	Error       string `json:"error,omitempty"`
+}
+
+type aiStreamAnswerDeltaEvent struct {
+	MessageID int64  `json:"message_id"`
+	Delta     string `json:"delta"`
+}
+
+type aiStreamEmitFunc func(event string, data any) error
+
+type aiStreamModelCallbacks struct {
+	ProviderAttempt func(aiStreamProviderAttemptEvent) error
+	AnswerDelta     func(delta string) error
+}
+
 type aiRetrievalResult struct {
 	Intent            string
 	Scope             AIQuestionScope
@@ -251,11 +283,20 @@ func (e aiRouteError) Error() string {
 	return e.Message
 }
 
+type aiStreamPartialError struct {
+	Message string
+}
+
+func (e aiStreamPartialError) Error() string {
+	return e.Message
+}
+
 type aiChatCompletionRequest struct {
 	Model       string          `json:"model"`
 	Messages    []aiChatMessage `json:"messages"`
 	Temperature float64         `json:"temperature"`
 	MaxTokens   int             `json:"max_tokens,omitempty"`
+	Stream      bool            `json:"stream,omitempty"`
 }
 
 type aiChatMessage struct {
@@ -271,6 +312,25 @@ type aiChatCompletionResponse struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 	} `json:"usage"`
+}
+
+type aiChatCompletionStreamChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
+}
+
+type aiChatCompletionStreamResult struct {
+	Content          string
+	PromptTokens     int
+	CompletionTokens int
 }
 
 func defaultAIConfig() AIConfigData {
@@ -2196,6 +2256,14 @@ func (s *Server) handleAISessions(w http.ResponseWriter, r *http.Request, parts 
 		writeError(w, errNotFound("not found"))
 		return
 	}
+	if len(parts) == 3 && parts[2] == "stream" {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleAIMessageStream(w, r, sessionID)
+		return
+	}
 	if len(parts) == 2 {
 		switch r.Method {
 		case http.MethodGet:
@@ -2241,6 +2309,48 @@ func (s *Server) handleAISessions(w http.ResponseWriter, r *http.Request, parts 
 		return
 	}
 	writeError(w, errNotFound("not found"))
+}
+
+func (s *Server) handleAIMessageStream(w http.ResponseWriter, r *http.Request, sessionID int64) {
+	var req aiAskRequest
+	if err := decodeBody(r.Body, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, errInternal("streaming is not supported"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	streamOK := true
+	emit := func(event string, data any) error {
+		if event == "error" {
+			streamOK = false
+		}
+		return writeSSE(w, flusher, event, data)
+	}
+	if err := s.askAIQuestionStream(r.Context(), sessionID, strings.TrimSpace(req.Question), req.ScopeOverride, s.viewerKey(r), emit); err != nil {
+		streamOK = false
+		_ = emit("error", map[string]any{"message": sanitizeProviderError(err.Error())})
+	}
+	_ = emit("done", map[string]any{"ok": streamOK})
+}
+
+func writeSSE(w http.ResponseWriter, flusher http.Flusher, event string, data any) error {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, raw); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
 }
 
 func (s *Server) handleAIRuns(w http.ResponseWriter, r *http.Request, parts []string) {
@@ -2943,6 +3053,18 @@ func insertAIMessage(ctx context.Context, db execer, msg AIMessage) (AIMessage, 
 	return msg, nil
 }
 
+func updateAIMessage(ctx context.Context, db execer, msg AIMessage) error {
+	if msg.Status == "" {
+		msg.Status = "success"
+	}
+	_, err := db.ExecContext(ctx, `UPDATE ai_messages SET content = ?, model = ?, provider_name = ?,
+		model_route_json = ?, prompt_tokens = ?, completion_tokens = ?, latency_ms = ?, status = ?, error_message = ?
+		WHERE id = ?`,
+		msg.Content, msg.Model, msg.ProviderName, msg.ModelRouteJSON, msg.PromptTokens, msg.CompletionTokens,
+		msg.LatencyMS, msg.Status, msg.ErrorMessage, msg.ID)
+	return err
+}
+
 type execer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
@@ -3109,6 +3231,390 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 	_, _ = s.db.ExecContext(ctx, `UPDATE ai_sessions SET title = CASE WHEN title = '新的 AI 问答' THEN ? ELSE title END,
 		updated_at = ? WHERE id = ?`, aiTitleFromQuestion(question), nowString(), sessionID)
 	return aiQuestionResult{Run: run, Message: assistantMsg, ServiceCandidates: candidates, Citations: citations, Notice: notice}, nil
+}
+
+func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, question string, scope AIQuestionScope, viewer string, emit aiStreamEmitFunc) (err error) {
+	if question == "" {
+		return errBadRequest("question is required")
+	}
+	session, err := getAISession(ctx, s.db, sessionID)
+	if err != nil {
+		return err
+	}
+	if scope.RepoMode == "" && session.ScopeJSON != "" {
+		_ = json.Unmarshal([]byte(session.ScopeJSON), &scope)
+	}
+	scope = normalizeAIScope(scope)
+	if scope.CurrentFile != nil && scope.CurrentFile.RepoID > 0 && len(scope.RepoIDs) == 0 {
+		scope.RepoIDs = []int64{scope.CurrentFile.RepoID}
+		if scope.RepoMode == "" || scope.RepoMode == "global" {
+			scope.RepoMode = "current_file"
+		}
+	}
+	active, err := ensureActiveAIConfig(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	start := time.Now()
+	userMsg, err := insertAIMessage(ctx, s.db, AIMessage{SessionID: sessionID, Role: "user", Content: question})
+	if err != nil {
+		return err
+	}
+	if err := emit("user_message", map[string]any{"message": userMsg}); err != nil {
+		return err
+	}
+	run, err := createAIRun(ctx, s.db, sessionID, userMsg.ID, active, scope)
+	if err != nil {
+		return err
+	}
+	assistantMsg, err := insertAIMessage(ctx, s.db, AIMessage{SessionID: sessionID, Role: "assistant", Status: "streaming"})
+	if err != nil {
+		return err
+	}
+	currentState := "queued"
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		message := "stream interrupted"
+		if err != nil {
+			message = sanitizeProviderError(err.Error())
+		}
+		status := "failed"
+		if strings.TrimSpace(assistantMsg.Content) != "" {
+			status = "partial"
+		}
+		persistCtx, cancel := aiPersistenceContext(ctx)
+		defer cancel()
+		assistantMsg.Status = status
+		assistantMsg.ErrorMessage = message
+		_ = updateAIMessage(persistCtx, s.db, assistantMsg)
+		_ = finishAIRun(persistCtx, s.db, run.ID, AIAgentRun{
+			AssistantMessageID:   assistantMsg.ID,
+			Status:               "failed",
+			CurrentState:         currentState,
+			ScopeJSON:            encodeJSON(scope),
+			Model:                assistantMsg.Model,
+			ProviderName:         assistantMsg.ProviderName,
+			ProviderFailoverJSON: run.ProviderFailoverJSON,
+			ModelRouteJSON:       assistantMsg.ModelRouteJSON,
+			FinishedAt:           nowString(),
+			ErrorMessage:         message,
+		})
+	}()
+	if err := insertAIStep(ctx, s.db, AIAgentStep{
+		RunID:     run.ID,
+		AgentName: "coordinator",
+		StepType:  "checkpoint",
+		Status:    "success",
+		InputJSON: encodeJSON(map[string]any{"question": truncate(question, 500), "viewer": viewer}),
+		OutputJSON: encodeJSON(map[string]any{
+			"scope":      scope,
+			"task_class": active.Config.Chat.Routing.DefaultTaskClass,
+		}),
+		CreatedAt:  run.StartedAt,
+		FinishedAt: nowString(),
+	}); err != nil {
+		return err
+	}
+	if err := emit("run_started", map[string]any{"run": run, "assistant_message": assistantMsg}); err != nil {
+		return err
+	}
+
+	currentState = "retrieve_smart_latest"
+	if err := emit("stage", aiStreamStageEvent{Stage: currentState, Status: "running", Message: "检索候选服务和引用证据"}); err != nil {
+		return err
+	}
+	retrieval, err := s.retrieveAIEvidence(ctx, question, scope, active.Config)
+	if err != nil {
+		safeErr := sanitizeProviderError(err.Error())
+		assistantMsg.Status = "failed"
+		assistantMsg.ErrorMessage = safeErr
+		persistCtx, cancel := aiPersistenceContext(ctx)
+		_ = updateAIMessage(persistCtx, s.db, assistantMsg)
+		_ = finishAIRun(persistCtx, s.db, run.ID, AIAgentRun{
+			AssistantMessageID: assistantMsg.ID,
+			Status:             "failed",
+			CurrentState:       currentState,
+			ScopeJSON:          encodeJSON(scope),
+			FinishedAt:         nowString(),
+			ErrorMessage:       safeErr,
+		})
+		cancel()
+		completed = true
+		_ = emit("error", map[string]any{"message": safeErr, "partial_message_id": assistantMsg.ID, "assistant_message": assistantMsg})
+		return nil
+	}
+	if err := insertAIStep(ctx, s.db, AIAgentStep{
+		RunID:      run.ID,
+		AgentName:  "retrieval",
+		StepType:   "tool_call",
+		Status:     "success",
+		ToolName:   "search_code_evidence",
+		InputJSON:  encodeJSON(map[string]any{"source_mode": retrieval.Scope.SourceMode, "repo_ids": retrieval.Scope.RepoIDs}),
+		OutputJSON: encodeJSON(map[string]any{"evidence_count": len(retrieval.Evidence), "service_candidate_count": len(retrieval.ServiceCandidates)}),
+		CreatedAt:  nowString(),
+		FinishedAt: nowString(),
+	}); err != nil {
+		return err
+	}
+	if err := emit("stage", aiStreamStageEvent{
+		Stage:          currentState,
+		Status:         "success",
+		Message:        "证据召回完成",
+		EvidenceCount:  len(retrieval.Evidence),
+		CandidateCount: len(retrieval.ServiceCandidates),
+	}); err != nil {
+		return err
+	}
+
+	citations := make([]AIMessageCitation, 0, len(retrieval.Evidence))
+	for _, evidence := range retrieval.Evidence {
+		citation := evidence.Citation
+		citation.MessageID = assistantMsg.ID
+		inserted, err := insertAICitation(ctx, s.db, citation)
+		if err != nil {
+			return err
+		}
+		citations = append(citations, inserted)
+	}
+	candidates := make([]AIServiceCandidate, 0, len(retrieval.ServiceCandidates))
+	for _, candidate := range retrieval.ServiceCandidates {
+		candidate.RunID = run.ID
+		candidate.MessageID = assistantMsg.ID
+		inserted, err := insertAIServiceCandidate(ctx, s.db, candidate)
+		if err != nil {
+			return err
+		}
+		candidates = append(candidates, inserted)
+	}
+	if err := emit("service_candidates", map[string]any{"items": candidates}); err != nil {
+		return err
+	}
+	if err := emit("citations", map[string]any{"items": citations}); err != nil {
+		return err
+	}
+
+	var modelResult aiModelResult
+	currentState = "model_call"
+	lastPersistAt := time.Now()
+	lastPersistLen := 0
+	persistStreaming := func(force bool) error {
+		if !force && len(assistantMsg.Content)-lastPersistLen < 512 && time.Since(lastPersistAt) < 500*time.Millisecond {
+			return nil
+		}
+		assistantMsg.Status = "streaming"
+		if err := updateAIMessage(ctx, s.db, assistantMsg); err != nil {
+			return err
+		}
+		lastPersistAt = time.Now()
+		lastPersistLen = len(assistantMsg.Content)
+		return nil
+	}
+	emitFullAnswer := func(result aiModelResult) error {
+		assistantMsg.Content = result.Content
+		if err := persistStreaming(true); err != nil {
+			return err
+		}
+		return emit("answer_delta", aiStreamAnswerDeltaEvent{MessageID: assistantMsg.ID, Delta: result.Content})
+	}
+	if len(retrieval.Evidence) == 0 {
+		modelResult = aiModelResult{
+			Content:      localNoEvidenceAnswer(question),
+			ProviderName: "local-retrieval",
+			Model:        "none",
+			ModelRouteJSON: encodeJSON(map[string]any{
+				"mode":   "local",
+				"reason": "no_evidence",
+			}),
+			LatencyMS: int(time.Since(start).Milliseconds()),
+		}
+		if err := emit("stage", aiStreamStageEvent{Stage: currentState, Status: "skipped", Message: "未找到证据，返回本地检索说明"}); err != nil {
+			return err
+		}
+		if err := emitFullAnswer(modelResult); err != nil {
+			return err
+		}
+	} else if !active.Config.Enabled {
+		modelResult = aiModelResult{
+			Content:        localEvidenceAnswer(question, retrieval, false),
+			ProviderName:   "local-retrieval",
+			Model:          "none",
+			ModelRouteJSON: encodeJSON(map[string]any{"mode": "local", "reason": "ai_disabled"}),
+			LatencyMS:      int(time.Since(start).Milliseconds()),
+		}
+		if err := emit("stage", aiStreamStageEvent{Stage: currentState, Status: "skipped", Message: "AI 未启用，返回本地证据摘要"}); err != nil {
+			return err
+		}
+		if err := emitFullAnswer(modelResult); err != nil {
+			return err
+		}
+	} else {
+		if err := emit("stage", aiStreamStageEvent{Stage: currentState, Status: "running", Message: "调用模型生成回答"}); err != nil {
+			return err
+		}
+		modelResult, err = s.callRoutedAIModelStream(ctx, active.Config, question, retrieval, aiStreamModelCallbacks{
+			ProviderAttempt: func(event aiStreamProviderAttemptEvent) error {
+				if event.Status == "started" {
+					assistantMsg.ProviderName = event.Provider
+					assistantMsg.Model = event.Model
+					assistantMsg.ModelRouteJSON = encodeJSON(map[string]any{
+						"task_class":   event.TaskClass,
+						"provider_key": event.ProviderKey,
+						"provider":     event.Provider,
+						"model":        event.Model,
+					})
+				}
+				return emit("provider_attempt", event)
+			},
+			AnswerDelta: func(delta string) error {
+				assistantMsg.Content += delta
+				if err := persistStreaming(false); err != nil {
+					return err
+				}
+				return emit("answer_delta", aiStreamAnswerDeltaEvent{MessageID: assistantMsg.ID, Delta: delta})
+			},
+		})
+		if err != nil {
+			if ctx.Err() != nil {
+				if strings.TrimSpace(modelResult.Content) != "" {
+					assistantMsg.Content = modelResult.Content
+				}
+				if modelResult.Model != "" {
+					assistantMsg.Model = modelResult.Model
+				}
+				if modelResult.ProviderName != "" {
+					assistantMsg.ProviderName = modelResult.ProviderName
+				}
+				if modelResult.ModelRouteJSON != "" {
+					assistantMsg.ModelRouteJSON = modelResult.ModelRouteJSON
+				}
+				assistantMsg.PromptTokens = modelResult.PromptTokens
+				assistantMsg.CompletionTokens = modelResult.CompletionTokens
+				run.ProviderFailoverJSON = modelResult.FailoverJSON
+				return err
+			}
+			var partial aiStreamPartialError
+			if errors.As(err, &partial) && strings.TrimSpace(modelResult.Content) != "" {
+				safeErr := sanitizeProviderError(partial.Message)
+				assistantMsg.Content = modelResult.Content
+				assistantMsg.Model = modelResult.Model
+				assistantMsg.ProviderName = modelResult.ProviderName
+				assistantMsg.ModelRouteJSON = modelResult.ModelRouteJSON
+				assistantMsg.PromptTokens = modelResult.PromptTokens
+				assistantMsg.CompletionTokens = modelResult.CompletionTokens
+				assistantMsg.LatencyMS = int(time.Since(start).Milliseconds())
+				assistantMsg.Status = "partial"
+				assistantMsg.ErrorMessage = safeErr
+				persistCtx, cancel := aiPersistenceContext(ctx)
+				_ = updateAIMessage(persistCtx, s.db, assistantMsg)
+				_ = finishAIRun(persistCtx, s.db, run.ID, AIAgentRun{
+					AssistantMessageID:    assistantMsg.ID,
+					Status:                "failed",
+					CurrentState:          currentState,
+					Intent:                retrieval.Intent,
+					ScopeJSON:             encodeJSON(retrieval.Scope),
+					RetrievalPlanJSON:     encodeJSON(retrieval.Plan),
+					ServiceCandidateCount: len(candidates),
+					EvidenceCount:         len(citations),
+					CodeEvidenceCount:     countCodeEvidence(citations),
+					VerificationStatus:    "fail",
+					Model:                 modelResult.Model,
+					ProviderName:          modelResult.ProviderName,
+					ProviderFailoverJSON:  modelResult.FailoverJSON,
+					ModelRouteJSON:        modelResult.ModelRouteJSON,
+					FinishedAt:            nowString(),
+					ErrorMessage:          safeErr,
+				})
+				cancel()
+				completed = true
+				_ = emit("error", map[string]any{"message": safeErr, "partial_message_id": assistantMsg.ID, "assistant_message": assistantMsg})
+				return nil
+			}
+			modelResult = aiModelFallbackForError(question, retrieval, start, err)
+			if err := emit("stage", aiStreamStageEvent{Stage: currentState, Status: "failed", Message: "模型调用失败，返回本地证据摘要"}); err != nil {
+				return err
+			}
+			if err := emitFullAnswer(modelResult); err != nil {
+				return err
+			}
+		} else {
+			modelResult.LatencyMS = int(time.Since(start).Milliseconds())
+			assistantMsg.Content = modelResult.Content
+			if err := persistStreaming(true); err != nil {
+				return err
+			}
+		}
+	}
+
+	notice := aiNoticeFromModelResult(modelResult)
+	assistantMsg.Model = modelResult.Model
+	assistantMsg.ProviderName = modelResult.ProviderName
+	assistantMsg.ModelRouteJSON = modelResult.ModelRouteJSON
+	assistantMsg.PromptTokens = modelResult.PromptTokens
+	assistantMsg.CompletionTokens = modelResult.CompletionTokens
+	assistantMsg.LatencyMS = modelResult.LatencyMS
+	assistantMsg.Status = "success"
+	assistantMsg.ErrorMessage = ""
+	if err := updateAIMessage(ctx, s.db, assistantMsg); err != nil {
+		return err
+	}
+	status := "succeeded"
+	verificationStatus := "pass"
+	if len(retrieval.Evidence) == 0 {
+		status = "insufficient_evidence"
+		verificationStatus = "fail"
+	}
+	if err := finishAIRun(ctx, s.db, run.ID, AIAgentRun{
+		AssistantMessageID:    assistantMsg.ID,
+		Status:                status,
+		CurrentState:          "verify_answer",
+		Intent:                retrieval.Intent,
+		ScopeJSON:             encodeJSON(retrieval.Scope),
+		RetrievalPlanJSON:     encodeJSON(retrieval.Plan),
+		ServiceCandidateCount: len(candidates),
+		EvidenceCount:         len(citations),
+		CodeEvidenceCount:     countCodeEvidence(citations),
+		VerificationStatus:    verificationStatus,
+		VerificationReportJSON: encodeJSON(map[string]any{
+			"ok":               verificationStatus == "pass",
+			"citation_count":   len(citations),
+			"local_guardrails": []string{"read_only_tools", "citations_required", "branch_scope_labeled"},
+		}),
+		Model:                modelResult.Model,
+		ProviderName:         modelResult.ProviderName,
+		ProviderFailoverJSON: modelResult.FailoverJSON,
+		ModelRouteJSON:       modelResult.ModelRouteJSON,
+		FinishedAt:           nowString(),
+	}); err != nil {
+		return err
+	}
+	run, _ = getAIRun(ctx, s.db, run.ID)
+	_, _ = s.db.ExecContext(ctx, `UPDATE ai_sessions SET title = CASE WHEN title = '新的 AI 问答' THEN ? ELSE title END,
+		updated_at = ? WHERE id = ?`, aiTitleFromQuestion(question), nowString(), sessionID)
+	if err := emit("message_done", map[string]any{
+		"run":                run,
+		"message":            assistantMsg,
+		"service_candidates": candidates,
+		"citations":          citations,
+		"notice":             notice,
+		"usage": map[string]int{
+			"prompt_tokens":     assistantMsg.PromptTokens,
+			"completion_tokens": assistantMsg.CompletionTokens,
+		},
+	}); err != nil {
+		return err
+	}
+	completed = true
+	return nil
+}
+
+func aiPersistenceContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx.Err() == nil {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(context.Background(), 5*time.Second)
 }
 
 func aiNoticeFromModelResult(result aiModelResult) *AINotice {
@@ -3944,27 +4450,31 @@ func (s *Server) generateAIAnswer(ctx context.Context, cfg AIConfigVersion, ques
 	}
 	result, err := s.callRoutedAIModel(ctx, cfg.Config, question, retrieval)
 	if err != nil {
-		failover := map[string]any{"error": sanitizeProviderError(err.Error())}
-		var routeErr aiRouteError
-		if errors.As(err, &routeErr) {
-			failover = map[string]any{
-				"attempt_order":          routeErr.AttemptOrder,
-				"succeeded_provider_key": "",
-				"error":                  sanitizeProviderError(routeErr.Message),
-				"failures":               routeErr.Failures,
-			}
-		}
-		return aiModelResult{
-			Content:        localEvidenceAnswer(question, retrieval, true),
-			ProviderName:   "local-retrieval",
-			Model:          "none",
-			ModelRouteJSON: encodeJSON(map[string]any{"mode": "local_fallback", "reason": "provider_error"}),
-			LatencyMS:      int(time.Since(start).Milliseconds()),
-			FailoverJSON:   encodeJSON(failover),
-		}
+		return aiModelFallbackForError(question, retrieval, start, err)
 	}
 	result.LatencyMS = int(time.Since(start).Milliseconds())
 	return result
+}
+
+func aiModelFallbackForError(question string, retrieval aiRetrievalResult, start time.Time, err error) aiModelResult {
+	failover := map[string]any{"error": sanitizeProviderError(err.Error())}
+	var routeErr aiRouteError
+	if errors.As(err, &routeErr) {
+		failover = map[string]any{
+			"attempt_order":          routeErr.AttemptOrder,
+			"succeeded_provider_key": "",
+			"error":                  sanitizeProviderError(routeErr.Message),
+			"failures":               routeErr.Failures,
+		}
+	}
+	return aiModelResult{
+		Content:        localEvidenceAnswer(question, retrieval, true),
+		ProviderName:   "local-retrieval",
+		Model:          "none",
+		ModelRouteJSON: encodeJSON(map[string]any{"mode": "local_fallback", "reason": "provider_error"}),
+		LatencyMS:      int(time.Since(start).Milliseconds()),
+		FailoverJSON:   encodeJSON(failover),
+	}
 }
 
 func (s *Server) callRoutedAIModel(ctx context.Context, cfg AIConfigData, question string, retrieval aiRetrievalResult) (aiModelResult, error) {
@@ -4028,6 +4538,167 @@ func (s *Server) callRoutedAIModel(ctx context.Context, cfg AIConfigData, questi
 				ModelRouteJSON:   encodeJSON(map[string]any{"task_class": taskClass, "provider_key": provider.ProviderKey, "provider": aiProviderDisplayName(provider), "model": provider.Model}),
 				PromptTokens:     resp.Usage.PromptTokens,
 				CompletionTokens: resp.Usage.CompletionTokens,
+				FailoverJSON: encodeJSON(map[string]any{
+					"attempt_order":          attemptOrder,
+					"succeeded_provider_key": provider.ProviderKey,
+					"failures":               failures,
+				}),
+			}, nil
+		}
+		taskClass = route.FallbackTaskClass
+	}
+	return aiModelResult{}, aiRouteError{Message: "no AI provider completed successfully", AttemptOrder: attemptOrder, Failures: failures}
+}
+
+func (s *Server) callRoutedAIModelStream(ctx context.Context, cfg AIConfigData, question string, retrieval aiRetrievalResult, callbacks aiStreamModelCallbacks) (aiModelResult, error) {
+	taskClass := cfg.Chat.Routing.DefaultTaskClass
+	if taskClass == "" {
+		taskClass = "standard"
+	}
+	messages := buildAIChatMessages(question, retrieval)
+	failures := []map[string]any{}
+	attemptOrder := []string{}
+	visited := map[string]struct{}{}
+	visitedProviders := map[string]struct{}{}
+	attempt := 0
+	for taskClass != "" {
+		if _, ok := visited[taskClass]; ok {
+			break
+		}
+		visited[taskClass] = struct{}{}
+		route, ok := cfg.Chat.Routing.TaskClasses[taskClass]
+		providers := aiProvidersForRoute(cfg.Chat.Providers, route.Providers)
+		if !ok || len(providers) == 0 {
+			providers = aiProvidersByPriority(cfg.Chat.Providers)
+		}
+		for _, provider := range providers {
+			if _, seen := visitedProviders[provider.ProviderKey]; seen {
+				continue
+			}
+			visitedProviders[provider.ProviderKey] = struct{}{}
+			attempt++
+			attemptOrder = append(attemptOrder, provider.ProviderKey)
+			event := aiStreamProviderAttemptEvent{
+				Attempt:     attempt,
+				TaskClass:   taskClass,
+				ProviderKey: provider.ProviderKey,
+				Provider:    aiProviderDisplayName(provider),
+				Model:       provider.Model,
+				Priority:    provider.Priority,
+				Status:      "started",
+			}
+			if callbacks.ProviderAttempt != nil {
+				if err := callbacks.ProviderAttempt(event); err != nil {
+					return aiModelResult{}, err
+				}
+			}
+			if provider.APIKeySecretID <= 0 {
+				failure := aiProviderFailure(provider, "missing_secret")
+				failures = append(failures, failure)
+				event.Status = "failed"
+				event.Error = "missing_secret"
+				if callbacks.ProviderAttempt != nil {
+					if err := callbacks.ProviderAttempt(event); err != nil {
+						return aiModelResult{}, err
+					}
+				}
+				continue
+			}
+			apiKey, err := s.decryptAISecret(ctx, provider.APIKeySecretID)
+			if err != nil {
+				if errors.Is(ctx.Err(), context.Canceled) {
+					return aiModelResult{}, err
+				}
+				safeErr := sanitizeProviderError(err.Error())
+				failures = append(failures, aiProviderFailure(provider, safeErr))
+				event.Status = "failed"
+				event.Error = safeErr
+				if callbacks.ProviderAttempt != nil {
+					if err := callbacks.ProviderAttempt(event); err != nil {
+						return aiModelResult{}, err
+					}
+				}
+				continue
+			}
+			resp, err := s.callOpenAICompatibleStream(ctx, provider, apiKey, messages, callbacks.AnswerDelta)
+			if err != nil {
+				if errors.Is(ctx.Err(), context.Canceled) {
+					return aiModelResult{
+						Content:      resp.Content,
+						ProviderName: aiProviderDisplayName(provider),
+						Model:        provider.Model,
+						ModelRouteJSON: encodeJSON(map[string]any{
+							"task_class":   taskClass,
+							"provider_key": provider.ProviderKey,
+							"provider":     aiProviderDisplayName(provider),
+							"model":        provider.Model,
+						}),
+						PromptTokens:     resp.PromptTokens,
+						CompletionTokens: resp.CompletionTokens,
+						FailoverJSON: encodeJSON(map[string]any{
+							"attempt_order":          attemptOrder,
+							"succeeded_provider_key": "",
+							"failures":               failures,
+						}),
+					}, err
+				}
+				safeErr := sanitizeProviderError(err.Error())
+				event.Status = "failed"
+				event.Error = safeErr
+				if callbacks.ProviderAttempt != nil {
+					if emitErr := callbacks.ProviderAttempt(event); emitErr != nil {
+						return aiModelResult{}, emitErr
+					}
+				}
+				if strings.TrimSpace(resp.Content) != "" {
+					return aiModelResult{
+						Content:      resp.Content,
+						ProviderName: aiProviderDisplayName(provider),
+						Model:        provider.Model,
+						ModelRouteJSON: encodeJSON(map[string]any{
+							"task_class":   taskClass,
+							"provider_key": provider.ProviderKey,
+							"provider":     aiProviderDisplayName(provider),
+							"model":        provider.Model,
+						}),
+						PromptTokens:     resp.PromptTokens,
+						CompletionTokens: resp.CompletionTokens,
+						FailoverJSON: encodeJSON(map[string]any{
+							"attempt_order":          attemptOrder,
+							"succeeded_provider_key": "",
+							"failures":               append(failures, aiProviderFailure(provider, safeErr)),
+						}),
+					}, aiStreamPartialError{Message: safeErr}
+				}
+				failures = append(failures, aiProviderFailure(provider, safeErr))
+				continue
+			}
+			content := strings.TrimSpace(resp.Content)
+			if content == "" {
+				safeErr := "empty response"
+				failures = append(failures, aiProviderFailure(provider, safeErr))
+				event.Status = "failed"
+				event.Error = safeErr
+				if callbacks.ProviderAttempt != nil {
+					if err := callbacks.ProviderAttempt(event); err != nil {
+						return aiModelResult{}, err
+					}
+				}
+				continue
+			}
+			event.Status = "succeeded"
+			if callbacks.ProviderAttempt != nil {
+				if err := callbacks.ProviderAttempt(event); err != nil {
+					return aiModelResult{}, err
+				}
+			}
+			return aiModelResult{
+				Content:          resp.Content,
+				ProviderName:     aiProviderDisplayName(provider),
+				Model:            provider.Model,
+				ModelRouteJSON:   encodeJSON(map[string]any{"task_class": taskClass, "provider_key": provider.ProviderKey, "provider": aiProviderDisplayName(provider), "model": provider.Model}),
+				PromptTokens:     resp.PromptTokens,
+				CompletionTokens: resp.CompletionTokens,
 				FailoverJSON: encodeJSON(map[string]any{
 					"attempt_order":          attemptOrder,
 					"succeeded_provider_key": provider.ProviderKey,
@@ -4124,6 +4795,84 @@ func (s *Server) callOpenAICompatibleWithOptions(ctx context.Context, provider A
 		return aiChatCompletionResponse{}, err
 	}
 	return parsed, nil
+}
+
+func (s *Server) callOpenAICompatibleStream(ctx context.Context, provider AIProvider, apiKey string, messages []aiChatMessage, onDelta func(string) error) (aiChatCompletionStreamResult, error) {
+	endpoint, err := openAICompatibleChatURL(provider.BaseURL)
+	if err != nil {
+		return aiChatCompletionStreamResult{}, err
+	}
+	payload := aiChatCompletionRequest{Model: provider.Model, Messages: messages, Temperature: 0.2, Stream: true}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return aiChatCompletionStreamResult{}, err
+	}
+	timeout := time.Duration(provider.RequestTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bytes.NewReader(raw))
+	if err != nil {
+		return aiChatCompletionStreamResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return aiChatCompletionStreamResult{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		return aiChatCompletionStreamResult{}, fmt.Errorf("provider returned %d: %s", resp.StatusCode, truncate(string(body), 300))
+	}
+	var result aiChatCompletionStreamResult
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" {
+			continue
+		}
+		if data == "[DONE]" {
+			return result, nil
+		}
+		var chunk aiChatCompletionStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			return result, err
+		}
+		if chunk.Usage.PromptTokens > 0 {
+			result.PromptTokens = chunk.Usage.PromptTokens
+		}
+		if chunk.Usage.CompletionTokens > 0 {
+			result.CompletionTokens = chunk.Usage.CompletionTokens
+		}
+		for _, choice := range chunk.Choices {
+			if choice.Delta.Content == "" {
+				continue
+			}
+			result.Content += choice.Delta.Content
+			if onDelta != nil {
+				if err := onDelta(choice.Delta.Content); err != nil {
+					return result, err
+				}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func (s *Server) testOpenAICompatibleProvider(ctx context.Context, provider AIProvider, apiKey string, timeoutSeconds int) (aiProviderTestSummary, error) {

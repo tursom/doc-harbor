@@ -8,6 +8,7 @@ import type {
   AISettingsForm,
   AISettingsProviderSummary,
   AISettingsSummary,
+  AIStreamEvent,
   APIErrorPayload,
   AISession,
   CommitDetail,
@@ -49,25 +50,48 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     }
   })
   if (!response.ok) {
-    let message = response.statusText
-    let payload: APIErrorPayload = {}
-    try {
-      const body = await response.json()
-      if (typeof body.error === 'string') {
-        message = body.error
-      } else {
-        payload = body
-        message = body.error?.message || message
-      }
-    } catch {
-      // keep status text
-    }
-    throw new APIRequestError(response.status, message, payload)
+    await throwAPIError(response)
   }
   if (response.status === 204) {
     return undefined as T
   }
   return response.json()
+}
+
+async function throwAPIError(response: Response): Promise<never> {
+  let message = response.statusText
+  let payload: APIErrorPayload = {}
+  try {
+    const body = await response.json()
+    if (typeof body.error === 'string') {
+      message = body.error
+    } else {
+      payload = body
+      message = body.error?.message || message
+    }
+  } catch {
+    // keep status text
+  }
+  throw new APIRequestError(response.status, message, payload)
+}
+
+function parseSSEBlock(block: string): AIStreamEvent | null {
+  let event = ''
+  const data: string[] = []
+  for (const rawLine of block.split(/\r?\n/)) {
+    const line = rawLine.trimEnd()
+    if (!line || line.startsWith(':')) continue
+    if (line.startsWith('event:')) {
+      event = line.slice(6).trim()
+      continue
+    }
+    if (line.startsWith('data:')) {
+      data.push(line.slice(5).trimStart())
+    }
+  }
+  if (!event || !data.length) return null
+  const payload = JSON.parse(data.join('\n')) as Record<string, unknown>
+  return { type: event, ...payload } as AIStreamEvent
 }
 
 export const api = {
@@ -195,6 +219,47 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ question, scope_override: scope })
     })
+  },
+  async streamAI(sessionID: number, question: string, scope: AIQuestionScope, onEvent: (event: AIStreamEvent) => void | Promise<void>) {
+    const response = await fetch(`/api/ai/sessions/${sessionID}/messages/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream'
+      },
+      body: JSON.stringify({ question, scope_override: scope })
+    })
+    if (!response.ok) {
+      await throwAPIError(response)
+    }
+    if (!response.body) {
+      throw new Error('stream response body is empty')
+    }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    const dispatch = async (block: string) => {
+      const parsed = parseSSEBlock(block)
+      if (parsed) await onEvent(parsed)
+    }
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const blocks = buffer.split(/\r?\n\r?\n/)
+        buffer = blocks.pop() || ''
+        for (const block of blocks) {
+          await dispatch(block)
+        }
+      }
+      buffer += decoder.decode()
+      if (buffer.trim()) {
+        await dispatch(buffer)
+      }
+    } finally {
+      reader.releaseLock()
+    }
   }
 }
 
