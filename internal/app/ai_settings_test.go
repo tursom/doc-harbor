@@ -395,6 +395,86 @@ func TestAIMessagesResponseIncludesPersistedEvidencePanelData(t *testing.T) {
 	}
 }
 
+func TestAIRetrievalUsesSmartLatestDocsAcrossBranches(t *testing.T) {
+	requireGit(t)
+
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	sourceRepo := createTestGitRepo(t)
+	writeScanPathTestFile(t, sourceRepo, "doc/sgps-openapi.md", "# SGPS 开放平台对接文档\n\n已开放接口：createOrder、getDetail。\n")
+	runTestGit(t, sourceRepo, "add", ".")
+	runTestGit(t, sourceRepo, "commit", "-m", "main sgps docs")
+	runTestGit(t, sourceRepo, "checkout", "-b", "dev")
+	writeScanPathTestFile(t, sourceRepo, "doc/integration/商家对接文档.md", "# 元游猫 通用商户对接文档\n\n元游猫通用商户支持 API 对接型和平台内人工型。\n\n商户调用接口：/api/game-trade-server/third-party/query-order-detail、/api/game-trade-server/third-party/query-order-list、/api/game-trade-server/third-party/get-friend-links、/api/game-trade-server/third-party/shipping-callback、/api/game-trade-server/third-party/delivery-failed。\n\n元游猫会向商户 notify_url 推单，并使用 query_url 主动查询订单状态。\n")
+	writeScanPathTestFile(t, sourceRepo, "doc/integration/通用商户对接系统设计.md", "# 通用商户对接系统设计\n\n通用商户是游戏服务的第三方接入形态，包含推单、回调、查询和退款通知。\n")
+	runTestGit(t, sourceRepo, "add", ".")
+	runTestGit(t, sourceRepo, "commit", "-m", "dev general merchant docs")
+
+	repo, err := createRepository(ctx, server.db, Repository{
+		Name:                  "游戏服务后端",
+		Slug:                  "go-game-trade-serve",
+		RepoURL:               sourceRepo,
+		DefaultBranch:         "main",
+		TrackedBranches:       []string{"*"},
+		LatestIncludeBranches: []string{"*"},
+		ScanPaths:             []ScanPath{{Path: "doc", Enabled: true}},
+		Enabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("create repository: %v", err)
+	}
+	if _, err := server.scanner.Scan(ctx, repo.ID, "manual"); err != nil {
+		t.Fatalf("scan repository: %v", err)
+	}
+
+	cfg := defaultAIConfig()
+	cfg.Chat.MaxContextChunks = 8
+	retrieval, err := server.retrieveAIEvidence(ctx, "你好，游戏服务支持哪些第三方接入接口？", AIQuestionScope{
+		RepoMode:   "global",
+		SourceMode: "smart_latest_with_branch_candidates",
+	}, cfg)
+	if err != nil {
+		t.Fatalf("retrieve evidence: %v", err)
+	}
+
+	var foundGeneralMerchant bool
+	for _, evidence := range retrieval.Evidence {
+		if evidence.Citation.FilePath == "doc/integration/商家对接文档.md" &&
+			evidence.Citation.Branch == "dev" &&
+			evidence.Citation.SourceScope == "smart_latest" {
+			foundGeneralMerchant = true
+			if !strings.Contains(evidence.Content, "query-order-detail") || !strings.Contains(evidence.Content, "notify_url") {
+				t.Fatalf("general merchant evidence missing API details:\n%s", evidence.Content)
+			}
+		}
+	}
+	if !foundGeneralMerchant {
+		t.Fatalf("smart latest evidence did not include dev general merchant docs: %+v", retrieval.Evidence)
+	}
+}
+
+func TestAIQueryTermsKeepChineseIntegrationPhrases(t *testing.T) {
+	terms := strings.Join(aiQueryTerms("你好，游戏服务支持哪些第三方接入接口？"), ",")
+	for _, want := range []string{"游戏服务", "第三方", "接入", "接口", "商家对接", "通用商户"} {
+		if !strings.Contains(terms, want) {
+			t.Fatalf("terms %q missing %q", terms, want)
+		}
+	}
+	if strings.Contains(terms, ",游,") || strings.Contains(terms, ",戏,") {
+		t.Fatalf("terms should not rely on noisy single-character matches: %q", terms)
+	}
+}
+
+func TestAIBranchCandidateFollowsRepositoryBranchRules(t *testing.T) {
+	repo := Repository{TrackedBranches: []string{"*"}, LatestIncludeBranches: []string{"*"}, LatestExcludeBranches: []string{"archive/*"}}
+	if !aiBranchCandidate(repo, RepoRef{RefName: "dev"}) {
+		t.Fatal("dev should be a branch candidate when repository rules include all branches")
+	}
+	if aiBranchCandidate(repo, RepoRef{RefName: "archive/old"}) {
+		t.Fatal("excluded branches should not be branch candidates")
+	}
+}
+
 func TestAIQuestionStreamEndpointPersistsDeltasAndProviderFailover(t *testing.T) {
 	requireGit(t)
 	server := newWebhookTestServer(t)
