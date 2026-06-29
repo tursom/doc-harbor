@@ -883,6 +883,61 @@ a {
   display: block;
 }
 
+.access-token-band {
+  align-items: flex-start;
+}
+
+.access-token-band > div:first-child {
+  min-width: min(100%, 520px);
+  display: grid;
+  gap: 10px;
+}
+
+.access-token-form {
+  display: grid;
+  grid-template-columns: 160px minmax(220px, 1fr);
+  gap: 10px;
+}
+
+.access-token-form label {
+  display: grid;
+  gap: 6px;
+  color: #45584d;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.issued-token {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.issued-token div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.issued-token code {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid #dce3d8;
+  background: #eef4ec;
+  border-radius: 6px;
+  padding: 8px;
+  white-space: nowrap;
+}
+
+.token-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .provider-list.compact .provider-row {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;

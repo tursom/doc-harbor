@@ -338,6 +338,15 @@ export interface AISession {
   archived_at: string
 }
 
+export interface AccessTokenResponse {
+  token: string
+  expires_at: string
+  capabilities: string[]
+  scope: {
+    viewer_key?: string
+  }
+}
+
 export interface AIMessage {
   id: number
   session_id: number

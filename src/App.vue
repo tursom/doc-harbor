@@ -25,6 +25,10 @@
           <SlidersHorizontal :size="16" />
           AI 配置
         </button>
+        <button :class="{ active: tab === 'settings' }" type="button" @click="switchTab('settings')">
+          <Settings :size="16" />
+          系统设置
+        </button>
       </nav>
 
       <div class="repo-list">
@@ -713,6 +717,58 @@
             </div>
           </section>
         </section>
+
+        <section v-if="tab === 'settings'" class="settings-panel">
+          <div class="ai-config-head">
+            <div>
+              <h3>系统设置</h3>
+              <p class="muted">通用访问控制和远程集成</p>
+            </div>
+          </div>
+
+          <div v-if="settingsBanner" class="alert" :class="settingsBanner.type">{{ settingsBanner.message }}</div>
+
+          <section class="config-band access-token-band">
+            <div>
+              <h4>访问 Token</h4>
+              <p class="muted">签发后可调用授权能力，Token 只显示一次。</p>
+              <div class="access-token-form">
+                <label>
+                  有效期秒数
+                  <input v-model.number="accessTokenForm.ttl_seconds" type="number" min="300" max="86400" />
+                </label>
+                <label>
+                  能力
+                  <select v-model="accessTokenForm.capabilities" multiple>
+                    <option value="ai.history.read">AI 历史读取</option>
+                  </select>
+                </label>
+                <label>
+                  Viewer Key 范围
+                  <input v-model.trim="accessTokenForm.viewer_key" placeholder="留空表示不限制 viewer" />
+                </label>
+              </div>
+              <div v-if="issuedAccessToken" class="issued-token">
+                <div>
+                  <span>过期时间</span>
+                  <strong>{{ formatTime(issuedAccessToken.expires_at) }}</strong>
+                  <small>{{ issuedAccessToken.capabilities.join(', ') }}</small>
+                  <small>{{ issuedAccessToken.scope.viewer_key ? `viewer_key: ${issuedAccessToken.scope.viewer_key}` : '不限制 viewer' }}</small>
+                </div>
+                <code>{{ issuedAccessToken.token }}</code>
+              </div>
+            </div>
+            <div class="token-actions">
+              <button class="primary-action" type="button" :disabled="accessTokenBusy" @click="createAccessToken">
+                <ShieldCheck :size="16" />
+                {{ accessTokenBusy ? '签发中' : '签发 Token' }}
+              </button>
+              <button v-if="issuedAccessToken" class="command" type="button" @click="copyAccessToken">
+                复制 Token
+              </button>
+            </div>
+          </section>
+        </section>
       </section>
     </section>
   </main>
@@ -751,6 +807,7 @@ import type {
   AINotice,
   AIMessage,
   AIMessageCitation,
+  AccessTokenResponse,
   AIQuestionScope,
   AIServiceCandidate,
   AISettingsForm,
@@ -768,7 +825,7 @@ import type {
   ScanRun
 } from './types'
 
-type AppTab = 'docs' | 'history' | 'runs' | 'ai' | 'ai-config'
+type AppTab = 'docs' | 'history' | 'runs' | 'ai' | 'ai-config' | 'settings'
 type AIEvidenceChainItem = {
   id: string
   kind: 'stage' | 'provider'
@@ -820,6 +877,7 @@ const aiSelectedPreset = ref('custom')
 const aiFormDirty = ref(false)
 const aiFieldErrors = ref<Record<string, string>>({})
 const aiSettingsBanner = ref<{ type: 'info' | 'success' | 'warning' | 'error'; message: string } | null>(null)
+const settingsBanner = ref<{ type: 'info' | 'success' | 'warning' | 'error'; message: string } | null>(null)
 const aiSettingsLoading = ref(false)
 const aiSaving = ref(false)
 const aiTesting = ref(false)
@@ -827,6 +885,9 @@ const aiEnabling = ref(false)
 const aiDisabling = ref(false)
 const aiApplying = ref(false)
 const aiProviderBusy = ref('')
+const accessTokenBusy = ref(false)
+const accessTokenForm = ref({ ttl_seconds: 3600, capabilities: ['ai.history.read'], viewer_key: '' })
+const issuedAccessToken = ref<AccessTokenResponse | null>(null)
 
 const form = ref<Partial<Repository>>({
   name: '',
@@ -953,12 +1014,14 @@ const isGlobalTab = computed(() => isGlobalTabName(tab.value))
 const workspaceTitle = computed(() => {
   if (tab.value === 'ai') return 'AI 问答'
   if (tab.value === 'ai-config') return 'AI 配置'
+  if (tab.value === 'settings') return '系统设置'
   return selectedRepo.value?.name || '仓库配置'
 })
 
 const workspaceSubtitle = computed(() => {
   if (tab.value === 'ai') return '全局服务发现、代码证据召回和带引用回答'
   if (tab.value === 'ai-config') return '全局供应商、模型和密钥'
+  if (tab.value === 'settings') return '访问 Token 和远程集成'
   return selectedRepo.value?.repo_url || ''
 })
 
@@ -1854,6 +1917,37 @@ async function applyAISettingsChanges() {
   }
 }
 
+async function createAccessToken() {
+  accessTokenBusy.value = true
+  settingsBanner.value = null
+  issuedAccessToken.value = null
+  try {
+    const ttl = Number(accessTokenForm.value.ttl_seconds) || 3600
+    const response = await api.createAccessToken({
+      ttl_seconds: ttl,
+      capabilities: accessTokenForm.value.capabilities,
+      scope: { viewer_key: accessTokenForm.value.viewer_key.trim() || undefined }
+    })
+    issuedAccessToken.value = response
+    settingsBanner.value = { type: 'success', message: '访问 Token 已签发' }
+  } catch (err) {
+    settingsBanner.value = { type: 'error', message: err instanceof Error ? err.message : String(err) }
+  } finally {
+    accessTokenBusy.value = false
+  }
+}
+
+async function copyAccessToken() {
+  if (!issuedAccessToken.value?.token) return
+  settingsBanner.value = null
+  try {
+    await navigator.clipboard.writeText(issuedAccessToken.value.token)
+    settingsBanner.value = { type: 'success', message: 'Token 已复制' }
+  } catch (err) {
+    settingsBanner.value = { type: 'error', message: err instanceof Error ? err.message : String(err) }
+  }
+}
+
 function startNewAIProvider() {
   aiSettingsForm.value = defaultAISettingsForm()
   aiSelectedPreset.value = 'deepseek'
@@ -1997,7 +2091,7 @@ async function loadGlobalTabData(nextTab: AppTab) {
 }
 
 function isGlobalTabName(value: AppTab) {
-  return value === 'ai' || value === 'ai-config'
+  return value === 'ai' || value === 'ai-config' || value === 'settings'
 }
 
 async function withBusy(fn: () => Promise<void>) {
@@ -2285,7 +2379,7 @@ function readURLState(): URLState {
   const dirParam = params.get('dir')
   return {
     repoID: repoID > 0 ? repoID : undefined,
-    tab: tabParam === 'history' || tabParam === 'runs' || tabParam === 'ai' || tabParam === 'ai-config' ? tabParam : 'docs',
+    tab: tabParam === 'history' || tabParam === 'runs' || tabParam === 'ai' || tabParam === 'ai-config' || tabParam === 'settings' ? tabParam : 'docs',
     view: viewParam === 'branch' ? 'branch' : 'latest',
     branch: params.get('branch') || '',
     dir: dirParam === null ? undefined : dirParam || '.',

@@ -67,6 +67,8 @@ WEB_DIR=./dist go run ./cmd/doc-harbor
 
 AI provider API key 通过前端 AI 配置页录入。DocHarbor 会在 `DATA_DIR/secrets/ai-master.key` 自动生成本机加密主密钥，并随数据目录持久化；不需要额外配置环境变量。
 
+通用访问 Token 使用前端页面签发。DocHarbor 会在 `DATA_DIR/secrets/access-token.key` 自动生成 HMAC 签名密钥；密钥丢失或轮换后，已签发但未过期的 Token 会失效。
+
 SSH 仓库可以使用默认挂载的 `~/.ssh`，也可以把项目专用 deploy key 放到 `credentials/ssh/` 后自行在 `credentials/.gitconfig` 中配置 `core.sshCommand`。
 
 HTTP(S) 仓库可以把凭据放在 `credentials/`：
@@ -146,6 +148,52 @@ curl -i \
   http://127.0.0.1:14220/api/webhooks/github/1
 ```
 
+## 通用访问 Token
+
+管理员可以在系统设置页的“访问 Token”区域签发临时 Token。默认有效期为 3600 秒，允许范围为 300 到 86400 秒；Token 使用 `DATA_DIR/secrets/access-token.key` 中的 HMAC-SHA256 密钥签名，密钥丢失或轮换后已签发 Token 会失效。
+
+当前只支持签发 `ai.history.read` 能力，用于远程只读访问 AI 对话历史。`scope.viewer_key` 留空时不限制 viewer，填写后服务端会强制按该 `viewer_key` 收窄支持该 scope 的接口。
+
+签发接口：
+
+```text
+POST /api/tokens
+```
+
+请求示例：
+
+```json
+{
+  "ttl_seconds": 3600,
+  "capabilities": ["ai.history.read"],
+  "scope": {
+    "viewer_key": ""
+  }
+}
+```
+
+响应包含 `token`、`expires_at`、`capabilities` 和 `scope`，其中 `token` 只显示一次。需要临时 Token 鉴权的远程接口统一放在 `/api/access/*` 前缀下，方便网关按前缀放行。远程服务使用带 `ai.history.read` 能力的 Token 调用只读历史 API：
+
+```bash
+curl -H "Authorization: Bearer $ACCESS_TOKEN" \
+  "http://127.0.0.1:14220/api/access/ai/history/sessions?archived=all&limit=50"
+```
+
+列表接口支持分页和过滤：
+
+```text
+GET /api/access/ai/history/sessions?limit=50&cursor=...&q=...&archived=0|1|all&updated_after=2026-06-29T00:00:00Z&updated_before=2026-06-30T00:00:00Z
+```
+
+详情接口返回单个会话、消息、候选服务和引用：
+
+```bash
+curl -H "Authorization: Bearer $ACCESS_TOKEN" \
+  "http://127.0.0.1:14220/api/access/ai/history/sessions/1"
+```
+
+如果 Token 带 `scope.viewer_key` 范围，服务端会强制按该 `viewer_key` 收窄列表和详情；不属于该范围的会话按 `404` 处理。Token 无效或过期返回 `401`，Token 有效但缺少 `ai.history.read` 能力返回 `403`。
+
 ## Docker
 
 ```bash
@@ -157,6 +205,7 @@ docker compose up --build
 ## 安全边界
 
 - API 不维护用户和权限，鉴权交给 Pangolin。
+- 访问 Token 由已受保护的系统设置页签发；签发 API `/api/tokens` 也需要继续依赖 Pangolin 或其他外层访问控制保护，网关只应放行远程 Token 鉴权前缀 `/api/access/*`。
 - Git 命令均通过参数数组调用。
 - 文件下载只通过已索引版本或仓库内规范化路径读取。
 - 默认禁止本地 Git URL，避免任意本机路径 clone。

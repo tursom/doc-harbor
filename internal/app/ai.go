@@ -203,6 +203,23 @@ type aiMessagesResponse struct {
 	Citations         []AIMessageCitation  `json:"citations"`
 }
 
+type aiHistorySessionsResponse struct {
+	Items      []AISession `json:"items"`
+	NextCursor string      `json:"next_cursor,omitempty"`
+}
+
+type aiHistorySessionDetailResponse struct {
+	Session           AISession            `json:"session"`
+	Messages          []AIMessage          `json:"messages"`
+	ServiceCandidates []AIServiceCandidate `json:"service_candidates"`
+	Citations         []AIMessageCitation  `json:"citations"`
+}
+
+type aiHistorySessionCursor struct {
+	UpdatedAt string `json:"updated_at"`
+	ID        int64  `json:"id"`
+}
+
 type aiStreamStageEvent struct {
 	Stage          string `json:"stage"`
 	Status         string `json:"status"`
@@ -2326,6 +2343,54 @@ func (s *Server) handleAISessions(w http.ResponseWriter, r *http.Request, parts 
 	writeError(w, errNotFound("not found"))
 }
 
+func (s *Server) handleAccessAIHistory(w http.ResponseWriter, r *http.Request, payload accessTokenPayload, parts []string) {
+	if !payload.hasCapability(accessTokenCapabilityAIHistoryRead) {
+		writeError(w, errForbidden("access token missing ai.history.read capability"))
+		return
+	}
+	if len(parts) == 1 && parts[0] == "sessions" {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		limit := cleanLimit(r.URL.Query().Get("limit"), 50, 200)
+		resp, err := listAIHistorySessions(r.Context(), s.db, aiHistorySessionQuery{
+			Limit:         limit,
+			Cursor:        r.URL.Query().Get("cursor"),
+			Viewer:        payload.Scope.ViewerKey,
+			Q:             r.URL.Query().Get("q"),
+			Archived:      r.URL.Query().Get("archived"),
+			UpdatedAfter:  r.URL.Query().Get("updated_after"),
+			UpdatedBefore: r.URL.Query().Get("updated_before"),
+		})
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	if len(parts) == 2 && parts[0] == "sessions" {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		sessionID, err := parseID(parts[1])
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		resp, err := getAIHistorySessionDetail(r.Context(), s.db, sessionID, payload.Scope.ViewerKey)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	writeError(w, errNotFound("not found"))
+}
+
 func (s *Server) handleAIMessageStream(w http.ResponseWriter, r *http.Request, sessionID int64) {
 	var req aiAskRequest
 	if err := decodeBody(r.Body, &req); err != nil {
@@ -2955,6 +3020,113 @@ func listAISessions(ctx context.Context, db *sql.DB, limit int, viewer, q, archi
 	return sessions, rows.Err()
 }
 
+type aiHistorySessionQuery struct {
+	Limit         int
+	Cursor        string
+	Viewer        string
+	Q             string
+	Archived      string
+	UpdatedAfter  string
+	UpdatedBefore string
+}
+
+func listAIHistorySessions(ctx context.Context, db *sql.DB, req aiHistorySessionQuery) (aiHistorySessionsResponse, error) {
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	query := `SELECT id, title, viewer_key, scope_json, created_at, updated_at, archived_at FROM ai_sessions WHERE 1=1`
+	args := []any{}
+	if viewer := strings.TrimSpace(req.Viewer); viewer != "" {
+		query += ` AND viewer_key = ?`
+		args = append(args, viewer)
+	}
+	if q := strings.TrimSpace(req.Q); q != "" {
+		query += ` AND title LIKE ?`
+		args = append(args, "%"+q+"%")
+	}
+	switch strings.TrimSpace(req.Archived) {
+	case "1", "true":
+		query += ` AND archived_at <> ''`
+	case "all":
+	default:
+		query += ` AND archived_at = ''`
+	}
+	if updatedAfter := strings.TrimSpace(req.UpdatedAfter); updatedAfter != "" {
+		if _, err := time.Parse(timeLayout, updatedAfter); err != nil {
+			return aiHistorySessionsResponse{}, errBadRequest("updated_after must be RFC3339")
+		}
+		query += ` AND updated_at >= ?`
+		args = append(args, updatedAfter)
+	}
+	if updatedBefore := strings.TrimSpace(req.UpdatedBefore); updatedBefore != "" {
+		if _, err := time.Parse(timeLayout, updatedBefore); err != nil {
+			return aiHistorySessionsResponse{}, errBadRequest("updated_before must be RFC3339")
+		}
+		query += ` AND updated_at <= ?`
+		args = append(args, updatedBefore)
+	}
+	if cursorRaw := strings.TrimSpace(req.Cursor); cursorRaw != "" {
+		cursor, err := decodeAIHistorySessionCursor(cursorRaw)
+		if err != nil {
+			return aiHistorySessionsResponse{}, err
+		}
+		query += ` AND (updated_at < ? OR (updated_at = ? AND id < ?))`
+		args = append(args, cursor.UpdatedAt, cursor.UpdatedAt, cursor.ID)
+	}
+	query += ` ORDER BY updated_at DESC, id DESC LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return aiHistorySessionsResponse{}, err
+	}
+	defer rows.Close()
+	sessions := []AISession{}
+	for rows.Next() {
+		session, err := scanAISession(rows)
+		if err != nil {
+			return aiHistorySessionsResponse{}, err
+		}
+		sessions = append(sessions, session)
+	}
+	if err := rows.Err(); err != nil {
+		return aiHistorySessionsResponse{}, err
+	}
+	resp := aiHistorySessionsResponse{Items: sessions}
+	if len(resp.Items) > limit {
+		last := resp.Items[limit-1]
+		resp.Items = resp.Items[:limit]
+		resp.NextCursor = encodeAIHistorySessionCursor(aiHistorySessionCursor{UpdatedAt: last.UpdatedAt, ID: last.ID})
+	}
+	return resp, nil
+}
+
+func encodeAIHistorySessionCursor(cursor aiHistorySessionCursor) string {
+	raw, err := json.Marshal(cursor)
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func decodeAIHistorySessionCursor(raw string) (aiHistorySessionCursor, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return aiHistorySessionCursor{}, errBadRequest("invalid cursor")
+	}
+	var cursor aiHistorySessionCursor
+	if err := json.Unmarshal(decoded, &cursor); err != nil || cursor.UpdatedAt == "" || cursor.ID <= 0 {
+		return aiHistorySessionCursor{}, errBadRequest("invalid cursor")
+	}
+	if _, err := time.Parse(timeLayout, cursor.UpdatedAt); err != nil {
+		return aiHistorySessionCursor{}, errBadRequest("invalid cursor")
+	}
+	return cursor, nil
+}
+
 func createAISession(ctx context.Context, db *sql.DB, title, viewer string, scope AIQuestionScope) (AISession, error) {
 	title = strings.TrimSpace(title)
 	if title == "" {
@@ -2972,6 +3144,50 @@ func createAISession(ctx context.Context, db *sql.DB, title, viewer string, scop
 		return AISession{}, err
 	}
 	return getAISession(ctx, db, id)
+}
+
+func getAIHistorySession(ctx context.Context, db *sql.DB, id int64, viewer string) (AISession, error) {
+	query := `SELECT id, title, viewer_key, scope_json, created_at, updated_at, archived_at
+		FROM ai_sessions WHERE id = ?`
+	args := []any{id}
+	if viewer = strings.TrimSpace(viewer); viewer != "" {
+		query += ` AND viewer_key = ?`
+		args = append(args, viewer)
+	}
+	row := db.QueryRowContext(ctx, query, args...)
+	session, err := scanAISession(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return AISession{}, errNotFound("ai session not found")
+		}
+		return AISession{}, err
+	}
+	return session, nil
+}
+
+func getAIHistorySessionDetail(ctx context.Context, db *sql.DB, sessionID int64, viewer string) (aiHistorySessionDetailResponse, error) {
+	session, err := getAIHistorySession(ctx, db, sessionID, viewer)
+	if err != nil {
+		return aiHistorySessionDetailResponse{}, err
+	}
+	messages, err := listAIMessages(ctx, db, session.ID)
+	if err != nil {
+		return aiHistorySessionDetailResponse{}, err
+	}
+	candidates, err := listAIServiceCandidatesForSession(ctx, db, session.ID)
+	if err != nil {
+		return aiHistorySessionDetailResponse{}, err
+	}
+	citations, err := listAICitationsForSession(ctx, db, session.ID)
+	if err != nil {
+		return aiHistorySessionDetailResponse{}, err
+	}
+	return aiHistorySessionDetailResponse{
+		Session:           session,
+		Messages:          messages,
+		ServiceCandidates: candidates,
+		Citations:         citations,
+	}, nil
 }
 
 func getAISession(ctx context.Context, db *sql.DB, id int64) (AISession, error) {

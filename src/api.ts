@@ -1,6 +1,7 @@
 import type {
   AIMessage,
   AIMessageCitation,
+  AccessTokenResponse,
   AIProviderTestResult,
   AIQuestionResult,
   AIQuestionScope,
@@ -198,6 +199,12 @@ export const api = {
     const query = replacementProviderKey ? `?${new URLSearchParams({ replacement_provider_key: replacementProviderKey })}` : ''
     return request<{ deleted_provider_key: string; settings: AISettingsSummary; message: string }>(`/api/ai/providers/${providerKey}${query}`, {
       method: 'DELETE'
+    })
+  },
+  async createAccessToken(payload: { ttl_seconds: number; capabilities: string[]; scope: { viewer_key?: string } }) {
+    return request<AccessTokenResponse>('/api/tokens', {
+      method: 'POST',
+      body: JSON.stringify(payload)
     })
   },
   async aiSessions(params: Record<string, string> = {}) {

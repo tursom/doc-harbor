@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAIProviderTestDoesNotPersistSecret(t *testing.T) {
@@ -392,6 +394,249 @@ func TestAIMessagesResponseIncludesPersistedEvidencePanelData(t *testing.T) {
 	}
 	if !strings.Contains(body, `"repo_name":"go-gateway"`) || !strings.Contains(body, `"file_path":"internal/api/order.go"`) {
 		t.Fatalf("response missing persisted evidence data: %s", body)
+	}
+}
+
+func TestAccessTokenDefaultTTLAndRemoteRead(t *testing.T) {
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	repo, err := createRepository(ctx, server.db, Repository{
+		Name:          "doc-harbor",
+		Slug:          "doc-harbor",
+		RepoURL:       "https://example.test/doc-harbor.git",
+		DefaultBranch: "main",
+		Enabled:       true,
+	})
+	if err != nil {
+		t.Fatalf("create repo: %v", err)
+	}
+	session, err := createAISession(ctx, server.db, "远程历史", "alice@example.com", AIQuestionScope{RepoMode: "global"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := insertAIMessage(ctx, server.db, AIMessage{SessionID: session.ID, Role: "user", Content: "问题"}); err != nil {
+		t.Fatalf("insert user message: %v", err)
+	}
+	assistant, err := insertAIMessage(ctx, server.db, AIMessage{SessionID: session.ID, Role: "assistant", Content: "回答"})
+	if err != nil {
+		t.Fatalf("insert assistant message: %v", err)
+	}
+	run, err := createAIRun(ctx, server.db, session.ID, assistant.ID, AIConfigVersion{
+		Version:    1,
+		Config:     defaultAIConfig(),
+		ConfigHash: "test-config",
+	}, AIQuestionScope{RepoMode: "global"})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if _, err := insertAIServiceCandidate(ctx, server.db, AIServiceCandidate{
+		RunID:         run.ID,
+		MessageID:     assistant.ID,
+		RepoID:        repo.ID,
+		ServiceName:   "doc-harbor",
+		MatchedTerms:  []string{"history"},
+		Confidence:    "high",
+		Score:         9,
+		EvidenceCount: 1,
+	}); err != nil {
+		t.Fatalf("insert candidate: %v", err)
+	}
+	if _, err := insertAICitation(ctx, server.db, AIMessageCitation{
+		MessageID:   assistant.ID,
+		RepoID:      repo.ID,
+		VersionID:   1,
+		SourceScope: "smart_latest",
+		Branch:      "main",
+		CommitSHA:   "abcdef",
+		FilePath:    "README.md",
+		LineStart:   1,
+		LineEnd:     2,
+		QuoteText:   "DocHarbor",
+		Score:       9,
+	}); err != nil {
+		t.Fatalf("insert citation: %v", err)
+	}
+
+	recorder := doJSON(t, server, http.MethodPost, "/api/tokens", map[string]any{
+		"capabilities": []string{accessTokenCapabilityAIHistoryRead},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var issued accessTokenResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &issued); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+	if issued.Token == "" {
+		t.Fatal("token should not be empty")
+	}
+	expiresAt, err := time.Parse(timeLayout, issued.ExpiresAt)
+	if err != nil {
+		t.Fatalf("parse expires_at: %v", err)
+	}
+	if d := time.Until(expiresAt); d < 59*time.Minute || d > 61*time.Minute {
+		t.Fatalf("default ttl duration = %s, want about 1h", d)
+	}
+
+	list := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/history/sessions?archived=all", issued.Token, nil)
+	if list.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want %d; body=%s", list.Code, http.StatusOK, list.Body.String())
+	}
+	if !strings.Contains(list.Body.String(), `"title":"远程历史"`) {
+		t.Fatalf("list response missing session: %s", list.Body.String())
+	}
+	oldListPath := doAuthorizedJSON(t, server, http.MethodGet, "/api/ai/history/sessions?archived=all", issued.Token, nil)
+	if oldListPath.Code != http.StatusNotFound {
+		t.Fatalf("old history path status = %d, want %d; body=%s", oldListPath.Code, http.StatusNotFound, oldListPath.Body.String())
+	}
+	detail := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/history/sessions/"+strconv.FormatInt(session.ID, 10), issued.Token, nil)
+	if detail.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, want %d; body=%s", detail.Code, http.StatusOK, detail.Body.String())
+	}
+	body := detail.Body.String()
+	if !strings.Contains(body, `"messages"`) || !strings.Contains(body, `"service_candidates"`) || !strings.Contains(body, `"citations"`) || strings.Contains(body, "api_key") {
+		t.Fatalf("detail response missing history or leaked secret fields: %s", body)
+	}
+}
+
+func TestAccessTokenRejectsInvalidTTLAndBearer(t *testing.T) {
+	server := newWebhookTestServer(t)
+	for _, ttl := range []int{299, 86401} {
+		recorder := doJSON(t, server, http.MethodPost, "/api/tokens", map[string]any{
+			"ttl_seconds":  ttl,
+			"capabilities": []string{accessTokenCapabilityAIHistoryRead},
+		})
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("ttl %d status = %d, want %d; body=%s", ttl, recorder.Code, http.StatusBadRequest, recorder.Body.String())
+		}
+	}
+	for _, payload := range []map[string]any{
+		{"capabilities": []string{}},
+		{"capabilities": []string{"repo.read"}},
+	} {
+		recorder := doJSON(t, server, http.MethodPost, "/api/tokens", payload)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("invalid capabilities status = %d, want %d; body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+		}
+	}
+	missing := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/history/sessions", "", nil)
+	if missing.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token status = %d, want %d; body=%s", missing.Code, http.StatusUnauthorized, missing.Body.String())
+	}
+	issued := issueAccessTokenForTest(t, server, accessTokenScope{}, time.Hour)
+	tampered := issued[:len(issued)-1] + "x"
+	invalid := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/history/sessions", tampered, nil)
+	if invalid.Code != http.StatusUnauthorized {
+		t.Fatalf("tampered token status = %d, want %d; body=%s", invalid.Code, http.StatusUnauthorized, invalid.Body.String())
+	}
+	expiredPayload := accessTokenPayload{
+		IssuedAt:     time.Now().Add(-2 * time.Hour).Unix(),
+		ExpiresAt:    time.Now().Add(-1 * time.Hour).Unix(),
+		Capabilities: []string{accessTokenCapabilityAIHistoryRead},
+		Scope:        accessTokenScope{},
+		JTI:          "expired",
+	}
+	expiredToken, err := server.signAccessToken(expiredPayload)
+	if err != nil {
+		t.Fatalf("sign expired token: %v", err)
+	}
+	expired := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/history/sessions", expiredToken, nil)
+	if expired.Code != http.StatusUnauthorized {
+		t.Fatalf("expired token status = %d, want %d; body=%s", expired.Code, http.StatusUnauthorized, expired.Body.String())
+	}
+	noCapabilityPayload := accessTokenPayload{
+		IssuedAt:  time.Now().Unix(),
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		Scope:     accessTokenScope{},
+		JTI:       "no-capability",
+	}
+	noCapabilityToken, err := server.signAccessToken(noCapabilityPayload)
+	if err != nil {
+		t.Fatalf("sign no capability token: %v", err)
+	}
+	forbidden := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/history/sessions", noCapabilityToken, nil)
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("missing capability status = %d, want %d; body=%s", forbidden.Code, http.StatusForbidden, forbidden.Body.String())
+	}
+}
+
+func TestAccessTokenViewerScopeAndPaginationFilters(t *testing.T) {
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	alice, err := createAISession(ctx, server.db, "alpha history", "alice", AIQuestionScope{RepoMode: "global"})
+	if err != nil {
+		t.Fatalf("create alice session: %v", err)
+	}
+	bob, err := createAISession(ctx, server.db, "beta history", "bob", AIQuestionScope{RepoMode: "global"})
+	if err != nil {
+		t.Fatalf("create bob session: %v", err)
+	}
+	older := time.Now().UTC().Add(-2 * time.Hour).Format(timeLayout)
+	newer := time.Now().UTC().Add(-time.Hour).Format(timeLayout)
+	if _, err := server.db.ExecContext(ctx, `UPDATE ai_sessions SET updated_at = ? WHERE id = ?`, newer, alice.ID); err != nil {
+		t.Fatalf("update alice: %v", err)
+	}
+	if _, err := server.db.ExecContext(ctx, `UPDATE ai_sessions SET updated_at = ?, archived_at = ? WHERE id = ?`, older, older, bob.ID); err != nil {
+		t.Fatalf("update bob: %v", err)
+	}
+
+	viewerToken := issueAccessTokenForTest(t, server, accessTokenScope{ViewerKey: "alice"}, time.Hour)
+	scopedList := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/history/sessions?archived=all", viewerToken, nil)
+	if scopedList.Code != http.StatusOK {
+		t.Fatalf("scoped list status = %d, want %d; body=%s", scopedList.Code, http.StatusOK, scopedList.Body.String())
+	}
+	if !strings.Contains(scopedList.Body.String(), `"viewer_key":"alice"`) || strings.Contains(scopedList.Body.String(), `"viewer_key":"bob"`) {
+		t.Fatalf("viewer scope not enforced: %s", scopedList.Body.String())
+	}
+	bobDetail := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/history/sessions/"+strconv.FormatInt(bob.ID, 10), viewerToken, nil)
+	if bobDetail.Code != http.StatusNotFound {
+		t.Fatalf("scoped detail status = %d, want %d; body=%s", bobDetail.Code, http.StatusNotFound, bobDetail.Body.String())
+	}
+
+	fullToken := issueAccessTokenForTest(t, server, accessTokenScope{}, time.Hour)
+	page1 := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/history/sessions?archived=all&limit=1", fullToken, nil)
+	if page1.Code != http.StatusOK {
+		t.Fatalf("page1 status = %d, want %d; body=%s", page1.Code, http.StatusOK, page1.Body.String())
+	}
+	var firstPage aiHistorySessionsResponse
+	if err := json.Unmarshal(page1.Body.Bytes(), &firstPage); err != nil {
+		t.Fatalf("decode page1: %v", err)
+	}
+	if len(firstPage.Items) != 1 || firstPage.NextCursor == "" {
+		t.Fatalf("page1 = %+v, want one item and next cursor", firstPage)
+	}
+	page2 := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/history/sessions?archived=all&limit=1&cursor="+firstPage.NextCursor, fullToken, nil)
+	if page2.Code != http.StatusOK {
+		t.Fatalf("page2 status = %d, want %d; body=%s", page2.Code, http.StatusOK, page2.Body.String())
+	}
+	var secondPage aiHistorySessionsResponse
+	if err := json.Unmarshal(page2.Body.Bytes(), &secondPage); err != nil {
+		t.Fatalf("decode page2: %v", err)
+	}
+	if len(secondPage.Items) != 1 || secondPage.Items[0].ID == firstPage.Items[0].ID {
+		t.Fatalf("page2 = %+v, should contain next session", secondPage)
+	}
+	filtered := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/history/sessions?archived=all&q=alpha&updated_after="+url.QueryEscape(older), fullToken, nil)
+	if filtered.Code != http.StatusOK {
+		t.Fatalf("filtered status = %d, want %d; body=%s", filtered.Code, http.StatusOK, filtered.Body.String())
+	}
+	if !strings.Contains(filtered.Body.String(), `"title":"alpha history"`) || strings.Contains(filtered.Body.String(), `"title":"beta history"`) {
+		t.Fatalf("filters not applied: %s", filtered.Body.String())
+	}
+	betweenUpdates := time.Now().UTC().Add(-90 * time.Minute).Format(timeLayout)
+	beforeFiltered := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/history/sessions?archived=all&updated_before="+url.QueryEscape(betweenUpdates), fullToken, nil)
+	if beforeFiltered.Code != http.StatusOK {
+		t.Fatalf("updated_before status = %d, want %d; body=%s", beforeFiltered.Code, http.StatusOK, beforeFiltered.Body.String())
+	}
+	if !strings.Contains(beforeFiltered.Body.String(), `"title":"beta history"`) || strings.Contains(beforeFiltered.Body.String(), `"title":"alpha history"`) {
+		t.Fatalf("updated_before filter not applied: %s", beforeFiltered.Body.String())
+	}
+	archivedOnly := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/history/sessions?archived=1", fullToken, nil)
+	if archivedOnly.Code != http.StatusOK {
+		t.Fatalf("archived status = %d, want %d; body=%s", archivedOnly.Code, http.StatusOK, archivedOnly.Body.String())
+	}
+	if !strings.Contains(archivedOnly.Body.String(), `"title":"beta history"`) || strings.Contains(archivedOnly.Body.String(), `"title":"alpha history"`) {
+		t.Fatalf("archived filter not applied: %s", archivedOnly.Body.String())
 	}
 }
 
@@ -961,6 +1206,11 @@ func installAIStreamConfig(t *testing.T, server *Server, providers []AIProvider)
 
 func doJSON(t *testing.T, server *Server, method, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
+	return doAuthorizedJSON(t, server, method, path, "", body)
+}
+
+func doAuthorizedJSON(t *testing.T, server *Server, method, path, bearer string, body any) *httptest.ResponseRecorder {
+	t.Helper()
 	var reader *bytes.Reader
 	if body == nil {
 		reader = bytes.NewReader(nil)
@@ -972,9 +1222,28 @@ func doJSON(t *testing.T, server *Server, method, path string, body any) *httpte
 		reader = bytes.NewReader(raw)
 	}
 	req := httptest.NewRequest(method, path, reader)
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	recorder := httptest.NewRecorder()
 	server.Routes().ServeHTTP(recorder, req)
 	return recorder
+}
+
+func issueAccessTokenForTest(t *testing.T, server *Server, scope accessTokenScope, ttl time.Duration) string {
+	t.Helper()
+	now := time.Now().UTC()
+	token, err := server.signAccessToken(accessTokenPayload{
+		IssuedAt:     now.Unix(),
+		ExpiresAt:    now.Add(ttl).Unix(),
+		Capabilities: []string{accessTokenCapabilityAIHistoryRead},
+		Scope:        scope,
+		JTI:          "test-token",
+	})
+	if err != nil {
+		t.Fatalf("sign access token: %v", err)
+	}
+	return token
 }
 
 func countAISecrets(t *testing.T, server *Server) int {
