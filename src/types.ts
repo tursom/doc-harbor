@@ -519,9 +519,26 @@ export interface AIStreamProviderAttemptEvent {
   error?: string
 }
 
+export interface AITaskFrame {
+  intent: string
+  user_goal: string
+  answer_shape: string
+  scope_strategy: string
+  target_artifacts: string[]
+  must_not: string[]
+  known_terms: string[]
+  generated_terms: string[]
+  follow_up?: {
+    is_follow_up: boolean
+    previous_paths?: string[]
+    previous_topic_summary?: string
+  }
+}
+
 export type AIStreamEvent =
   | { type: 'user_message'; message: AIMessage }
   | { type: 'run_started'; run: AIAgentRun; assistant_message: AIMessage }
+  | { type: 'task_frame'; task_frame: AITaskFrame }
   | AIStreamStageEvent
   | { type: 'service_candidates'; items: AIServiceCandidate[] }
   | { type: 'citations'; items: AIMessageCitation[] }

@@ -433,10 +433,83 @@ func TestAIAgentWorkflowPolicyDefaultsToShadowAndKeepsCompatibility(t *testing.T
 	if !ok {
 		t.Fatalf("checkpoint sse compatibility has unexpected type: %#v", checkpoint["sse_compatibility"])
 	}
-	for _, event := range []string{"run_started", "stage", "provider_attempt", "citations", "answer_delta", "message_done"} {
+	for _, event := range []string{"run_started", "task_frame", "stage", "provider_attempt", "citations", "answer_delta", "message_done"} {
 		if !testStringSliceContains(events, event) {
 			t.Fatalf("checkpoint missing legacy SSE event %s: %+v", event, events)
 		}
+	}
+}
+
+func TestAIAgentTaskFrameDeterministicIntents(t *testing.T) {
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	cfg := defaultAIConfig()
+	cases := []struct {
+		name     string
+		question string
+		want     string
+	}{
+		{name: "database direct update", question: "我想在数据库里直接修改游戏的价格", want: aiTaskIntentDatabaseDirectUpdateForTest},
+		{name: "api integration", question: "下单页面需要接哪些接口？请求参数和返回字段是什么？", want: aiTaskIntentAPIIntegration},
+		{name: "branch lookup", question: "库存锁定的新接口现在在哪个分支？", want: aiTaskIntentBranchLookup},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			frame, step := server.frameAITask(ctx, cfg, tc.question, aiQuestionPreparation{
+				SearchQuestion: tc.question,
+				Scope:          AIQuestionScope{RepoMode: "global"},
+			})
+			if frame.Intent != tc.want {
+				t.Fatalf("intent = %q, want %q; frame=%+v", frame.Intent, tc.want, frame)
+			}
+			if step.AgentName != "task_framer" || step.StepType != "deterministic" || step.Status != "success" {
+				t.Fatalf("unexpected framing step: %+v", step)
+			}
+			if !strings.Contains(step.OutputJSON, `"intent":"`+tc.want+`"`) {
+				t.Fatalf("step output missing task frame intent: %s", step.OutputJSON)
+			}
+		})
+	}
+}
+
+func TestAIAgentTaskFrameModelSupplementFailureKeepsDeterministicFrame(t *testing.T) {
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	modelServer := newAIAnswerModelTestServer(t, http.StatusOK, `{"choices":[{"message":{"role":"assistant","content":"not json"}}],"usage":{"prompt_tokens":3,"completion_tokens":4}}`)
+	secret, err := server.createOrUpdateAISecret(ctx, 0, aiSecretRequest{Name: "framer-api-key", SecretType: "api_key", Value: "sk-test-framer-secret"}, "test")
+	if err != nil {
+		t.Fatalf("create framer secret: %v", err)
+	}
+	cfg := defaultAIConfig()
+	cfg.Enabled = true
+	cfg.Chat.Providers = []AIProvider{{
+		ProviderKey:           "framer",
+		Name:                  "Framer",
+		Priority:              10,
+		ProviderType:          "openai_compatible",
+		BaseURL:               modelServer.URL,
+		Model:                 "frame-model",
+		APIKeySecretID:        secret.ID,
+		RequestTimeoutSeconds: 5,
+		MaxRPM:                60,
+	}}
+	cfg.Chat.Routing = buildDefaultRouting(ctx, server.db, cfg.Chat.Providers)
+
+	frame, step := server.frameAITask(ctx, cfg, "下单页面需要接哪些接口？请求参数和返回字段是什么？", aiQuestionPreparation{
+		SearchQuestion: "下单页面需要接哪些接口？请求参数和返回字段是什么？",
+		Scope:          AIQuestionScope{RepoMode: "global"},
+	})
+	if frame.Intent != aiTaskIntentAPIIntegration {
+		t.Fatalf("intent = %q, want deterministic api intent", frame.Intent)
+	}
+	if step.StepType != "model_call" || step.Status != "failed" || !strings.Contains(step.ErrorMessage, "JSON") {
+		t.Fatalf("model supplement failure not recorded as expected: %+v", step)
+	}
+	if !strings.Contains(step.OutputJSON, `"intent":"api_integration"`) {
+		t.Fatalf("failed model supplement did not preserve deterministic frame: %s", step.OutputJSON)
+	}
+	if strings.Contains(step.OutputJSON, "sk-test") || strings.Contains(step.ErrorMessage, "sk-test") {
+		t.Fatalf("task frame step leaked secret: %+v", step)
 	}
 }
 
@@ -514,6 +587,10 @@ func TestAIQuestionEndpointKeepsLegacyFieldsAndWritesShadowCheckpoint(t *testing
 	if checkpoint["agent_workflow_version"] != aiAgentWorkflowVersionV2Shadow || checkpoint["answer_mode"] != "legacy" {
 		t.Fatalf("run checkpoint should use shadow legacy workflow: %+v", checkpoint)
 	}
+	taskFrame, ok := checkpoint["task_frame"].(map[string]any)
+	if !ok || taskFrame["intent"] != aiTaskIntentDocumentQA {
+		t.Fatalf("run checkpoint missing task frame: %+v", checkpoint)
+	}
 	if result.Run.Status != "insufficient_evidence" || result.Run.VerificationStatus != "fail" {
 		t.Fatalf("no-evidence run status = %s/%s, want insufficient_evidence/fail", result.Run.Status, result.Run.VerificationStatus)
 	}
@@ -524,14 +601,20 @@ func TestAIQuestionEndpointKeepsLegacyFieldsAndWritesShadowCheckpoint(t *testing
 	if err != nil {
 		t.Fatalf("list run steps: %v", err)
 	}
-	var foundCoordinator bool
+	var foundCoordinator, foundTaskFramer bool
 	for _, step := range steps {
 		if step.AgentName == "coordinator" && strings.Contains(step.OutputJSON, `"agent_workflow_version":"v2-shadow"`) {
 			foundCoordinator = true
 		}
+		if step.AgentName == "task_framer" && strings.Contains(step.OutputJSON, `"intent":"document_qa"`) {
+			foundTaskFramer = true
+		}
 	}
 	if !foundCoordinator {
 		t.Fatalf("coordinator checkpoint step missing workflow version: %+v", steps)
+	}
+	if !foundTaskFramer {
+		t.Fatalf("task_framer step missing task frame: %+v", steps)
 	}
 }
 
@@ -932,6 +1015,26 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert step: %v", err)
 	}
+	taskFrame := aiTaskFrame{
+		Intent:          aiTaskIntentDiagnostics,
+		UserGoal:        "排查一次 AI 问答运行的检索、证据和模型调用过程",
+		AnswerShape:     "run_analysis",
+		ScopeStrategy:   "selected_repositories",
+		TargetArtifacts: []string{"run_steps", "retrieval_plan", "citations"},
+		MustNot:         []string{"expose_secrets"},
+		KnownTerms:      []string{"alpha"},
+	}
+	if err := insertAIStep(ctx, server.db, AIAgentStep{
+		RunID:      aliceRunID,
+		AgentName:  "task_framer",
+		StepType:   "deterministic",
+		Status:     "success",
+		OutputJSON: encodeJSON(taskFrame),
+		CreatedAt:  aliceStarted,
+		FinishedAt: aliceFinished,
+	}); err != nil {
+		t.Fatalf("insert task framer step: %v", err)
+	}
 	if _, err := insertAIServiceCandidate(ctx, server.db, AIServiceCandidate{
 		RunID:         aliceRunID,
 		MessageID:     aliceAssistant.ID,
@@ -1008,6 +1111,15 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 	}
 	if len(detailResp.DataSources.Repositories) != 1 || detailResp.DataSources.Repositories[0].ID != repo.ID {
 		t.Fatalf("run data sources were not narrowed by scope: %+v", detailResp.DataSources.Repositories)
+	}
+	var foundTaskFramer bool
+	for _, step := range detailResp.Steps {
+		if step.AgentName == "task_framer" && step.StepType == "deterministic" {
+			foundTaskFramer = true
+		}
+	}
+	if !foundTaskFramer {
+		t.Fatalf("diagnostics detail missing task_framer step: %+v", detailResp.Steps)
 	}
 	if detailResp.DataSources.CurrentFile == nil || detailResp.DataSources.CurrentFile.FilePath != "docs/README.md" {
 		t.Fatalf("run data sources missing current file: %+v", detailResp.DataSources.CurrentFile)
@@ -1586,6 +1698,21 @@ export function signUserToken(user) {
 	if strings.Join(prepared.Conversation.PreviousCitationPaths, ",") != "src/security/session_token.ts" {
 		t.Fatalf("prepared citation paths = %+v, want token path mentioned by previous answer", prepared.Conversation.PreviousCitationPaths)
 	}
+	parameterFollowUp, err := server.prepareAIQuestion(ctx, session.ID, "参数是什么？", AIQuestionScope{
+		RepoMode:   "global",
+		SourceMode: "smart_latest_with_branch_candidates",
+		FileTypes:  []string{"all"},
+	})
+	if err != nil {
+		t.Fatalf("prepare parameter follow-up: %v", err)
+	}
+	followFrame, _ := server.frameAITask(ctx, defaultAIConfig(), "参数是什么？", parameterFollowUp)
+	if followFrame.FollowUp == nil || strings.Join(followFrame.FollowUp.PreviousPaths, ",") != "src/security/session_token.ts" {
+		t.Fatalf("follow-up task frame did not inherit previous path: %+v", followFrame)
+	}
+	if !strings.Contains(followFrame.FollowUp.PreviousTopicSummary, "session_token.ts") || !strings.Contains(followFrame.FollowUp.PreviousTopicSummary, "token") {
+		t.Fatalf("follow-up task frame did not inherit topic summary: %+v", followFrame.FollowUp)
+	}
 
 	cfg := defaultAIConfig()
 	cfg.Chat.MaxContextChunks = 8
@@ -1648,7 +1775,7 @@ func TestAIQuestionStreamEndpointPersistsDeltasAndProviderFailover(t *testing.T)
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
 	body := recorder.Body.String()
-	for _, event := range []string{"event: user_message", "event: run_started", "event: stage", "event: provider_attempt", "event: answer_delta", "event: message_done", "event: done"} {
+	for _, event := range []string{"event: user_message", "event: run_started", "event: task_frame", "event: stage", "event: provider_attempt", "event: answer_delta", "event: message_done", "event: done"} {
 		if !strings.Contains(body, event) {
 			t.Fatalf("stream body missing %s: %s", event, body)
 		}

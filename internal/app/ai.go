@@ -410,6 +410,7 @@ type aiQuestionPreparation struct {
 	Scope                AIQuestionScope
 	Conversation         aiConversationContext
 	GeneratedSearchTerms []string
+	TaskFrame            *aiTaskFrame
 }
 
 type aiEvidence struct {
@@ -3967,6 +3968,10 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 	prepared, plannerStep := s.expandAIQuestionForRetrieval(ctx, active.Config, prepared)
 	plannerStep.RunID = run.ID
 	_ = insertAIStep(ctx, s.db, plannerStep)
+	taskFrame, taskFrameStep := s.frameAITask(ctx, active.Config, question, prepared)
+	prepared.TaskFrame = &taskFrame
+	taskFrameStep.RunID = run.ID
+	_ = insertAIStep(ctx, s.db, taskFrameStep)
 	checkpoint := buildAIAgentRunCheckpoint(scope, active.Config.Chat.Routing.DefaultTaskClass, prepared)
 	checkpointJSON := encodeJSON(checkpoint)
 	_ = insertAIStep(ctx, s.db, AIAgentStep{
@@ -3980,7 +3985,7 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 		FinishedAt: nowString(),
 	})
 
-	retrieval, err := s.retrieveAIEvidence(ctx, prepared.SearchQuestion, scope, active.Config)
+	retrieval, err := s.retrieveAIEvidenceWithTaskFrame(ctx, prepared.SearchQuestion, scope, active.Config, prepared.TaskFrame)
 	if err != nil {
 		_ = finishAIRun(ctx, s.db, run.ID, AIAgentRun{
 			Status:         "failed",
@@ -4176,6 +4181,12 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 	if err := insertAIStep(ctx, s.db, plannerStep); err != nil {
 		return err
 	}
+	taskFrame, taskFrameStep := s.frameAITask(ctx, active.Config, question, prepared)
+	prepared.TaskFrame = &taskFrame
+	taskFrameStep.RunID = run.ID
+	if err := insertAIStep(ctx, s.db, taskFrameStep); err != nil {
+		return err
+	}
 	checkpoint := buildAIAgentRunCheckpoint(scope, active.Config.Chat.Routing.DefaultTaskClass, prepared)
 	checkpointJSON = encodeJSON(checkpoint)
 	if err := insertAIStep(ctx, s.db, AIAgentStep{
@@ -4193,12 +4204,15 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 	if err := emit("run_started", map[string]any{"run": run, "assistant_message": assistantMsg}); err != nil {
 		return err
 	}
+	if err := emit("task_frame", map[string]any{"task_frame": taskFrame}); err != nil {
+		return err
+	}
 
 	currentState = "retrieve_smart_latest"
 	if err := emit("stage", aiStreamStageEvent{Stage: currentState, Status: "running", Message: "检索候选服务和引用证据"}); err != nil {
 		return err
 	}
-	retrieval, err := s.retrieveAIEvidence(ctx, prepared.SearchQuestion, scope, active.Config)
+	retrieval, err := s.retrieveAIEvidenceWithTaskFrame(ctx, prepared.SearchQuestion, scope, active.Config, prepared.TaskFrame)
 	if err != nil {
 		safeErr := sanitizeProviderError(err.Error())
 		assistantMsg.Status = "failed"
@@ -5037,8 +5051,12 @@ func listAICitationsForRun(ctx context.Context, db *sql.DB, runID int64) ([]AIMe
 }
 
 func (s *Server) retrieveAIEvidence(ctx context.Context, question string, scope AIQuestionScope, cfg AIConfigData) (aiRetrievalResult, error) {
+	return s.retrieveAIEvidenceWithTaskFrame(ctx, question, scope, cfg, nil)
+}
+
+func (s *Server) retrieveAIEvidenceWithTaskFrame(ctx context.Context, question string, scope AIQuestionScope, cfg AIConfigData, frame *aiTaskFrame) (aiRetrievalResult, error) {
 	scope = normalizeAIScope(scope)
-	intent := classifyAIIntent(question)
+	intent := aiTaskIntentForRetrieval(question, frame)
 	terms := aiQueryTerms(question)
 	repos, err := listRepositories(ctx, s.db)
 	if err != nil {
@@ -5095,7 +5113,10 @@ func (s *Server) retrieveAIEvidence(ctx context.Context, question string, scope 
 		"chunker_version":    aiChunkerVersion,
 		"candidate_branches": strings.Contains(scope.SourceMode, "branch"),
 	}
-	return aiRetrievalResult{Intent: intent, Scope: scope, Plan: plan, Evidence: evidence, ServiceCandidates: candidates}, nil
+	if frame != nil {
+		plan["task_frame"] = frame
+	}
+	return aiRetrievalResult{Intent: intent, Scope: scope, Plan: plan, Evidence: evidence, ServiceCandidates: candidates, TaskFrame: frame}, nil
 }
 
 func (s *Server) currentFileEvidence(ctx context.Context, current *AICurrentFileScope, terms []string) (aiEvidence, error) {
@@ -5254,7 +5275,7 @@ func (s *Server) searchRepoSmartLatestEvidence(ctx context.Context, repo Reposit
 			continue
 		}
 		score, matched := aiPathScore(candidate.FilePath, terms, intent)
-		if score <= 0 && intent != "api_integration" && intent != "cross_service" {
+		if score <= 0 && !aiIntentIsAPIIntegration(intent) && !aiIntentIsCrossService(intent) {
 			continue
 		}
 		candidate.PreScore = score
@@ -5284,7 +5305,7 @@ func (s *Server) searchRepoSmartLatestEvidence(ctx context.Context, repo Reposit
 			continue
 		}
 		score += 12
-		snippet, startLine, endLine := aiSnippet(content, terms, intent == "api_integration" || aiPathLooksCode(candidate.FilePath))
+		snippet, startLine, endLine := aiSnippet(content, terms, aiIntentIsAPIIntegration(intent) || aiPathLooksCode(candidate.FilePath))
 		if strings.TrimSpace(snippet) == "" {
 			continue
 		}
@@ -5335,7 +5356,7 @@ func (s *Server) searchRepoRefEvidence(ctx context.Context, repo Repository, tar
 		if matchLines := contentPathScores[entry.Path]; matchLines > 0 {
 			score += min(matchLines, 10) * 4
 		}
-		if score <= 0 && intent != "api_integration" && intent != "cross_service" {
+		if score <= 0 && !aiIntentIsAPIIntegration(intent) && !aiIntentIsCrossService(intent) {
 			continue
 		}
 		candidates = append(candidates, aiFileCandidate{Entry: entry, PreScore: score, Terms: matched})
@@ -5358,7 +5379,7 @@ func (s *Server) searchRepoRefEvidence(ctx context.Context, repo Repository, tar
 			continue
 		}
 		matchedTerms := mergeTerms(candidate.Terms, contentTerms)
-		snippet, startLine, endLine := aiSnippet(content, terms, intent == "api_integration" || aiPathLooksCode(candidate.Entry.Path))
+		snippet, startLine, endLine := aiSnippet(content, terms, aiIntentIsAPIIntegration(intent) || aiPathLooksCode(candidate.Entry.Path))
 		if strings.TrimSpace(snippet) == "" {
 			continue
 		}
@@ -5446,10 +5467,10 @@ func aiCodePathBoost(filePath, intent string) float64 {
 	if strings.HasSuffix(filePath, ".proto") || strings.HasSuffix(filePath, ".go") || strings.HasSuffix(filePath, ".ts") || strings.HasSuffix(filePath, ".js") {
 		boost += 1
 	}
-	if intent == "api_integration" {
+	if aiIntentIsAPIIntegration(intent) {
 		boost *= 1.7
 	}
-	if intent == "database_change" {
+	if aiIntentIsDatabaseDirectUpdate(intent) {
 		for _, keyword := range []string{"model", "models/", "schema", "migration", "migrations", "version/mysql", "sql", "mysql", "db/", "dao", "repository", "gorm"} {
 			if strings.Contains(filePath, keyword) {
 				boost += 5
@@ -5459,7 +5480,7 @@ func aiCodePathBoost(filePath, intent string) float64 {
 			boost += 8
 		}
 	}
-	if intent == "test_lookup" && aiPathLooksTest(filePath) {
+	if aiIntentIsTestLookup(intent) && aiPathLooksTest(filePath) {
 		boost += 8
 	}
 	return boost
@@ -5480,14 +5501,14 @@ func aiContentScore(content string, terms []string, intent string) (float64, []s
 			matched = append(matched, term)
 		}
 	}
-	if intent == "api_integration" {
+	if aiIntentIsAPIIntegration(intent) {
 		for _, pattern := range []string{"router.", ".get(", ".post(", ".put(", ".delete(", "handlefunc(", "group(", "rpc ", "service ", "shouldbind", "ctx.request", "requestbody", "openapi"} {
 			if strings.Contains(lower, pattern) {
 				score += 4
 			}
 		}
 	}
-	if intent == "database_change" {
+	if aiIntentIsDatabaseDirectUpdate(intent) {
 		for _, pattern := range []string{"create table", "alter table", "tablename()", "table_name", "column:", "gorm:", "model(&", ".where(", "where(", " update ", " set ", " select ", " from "} {
 			if strings.Contains(lower, pattern) {
 				score += 5
@@ -5498,8 +5519,8 @@ func aiContentScore(content string, terms []string, intent string) (float64, []s
 }
 
 func aiAdjustEvidenceScore(filePath string, score float64, intent string) float64 {
-	if aiPathLooksTest(filePath) && intent != "test_lookup" {
-		if intent == "database_change" {
+	if aiPathLooksTest(filePath) && !aiIntentIsTestLookup(intent) {
+		if aiIntentIsDatabaseDirectUpdate(intent) {
 			return score * 0.15
 		}
 		return score * 0.35
