@@ -1561,6 +1561,24 @@ async function handleAIStreamEvent(event: AIStreamEvent) {
         status: 'running'
       })
       break
+    case 'task_frame':
+      addEvidenceChainItem({
+        kind: 'stage',
+        title: '任务帧',
+        detail: `${event.task_frame.intent} · ${event.task_frame.answer_shape}`,
+        status: 'success',
+        meta: event.task_frame.target_artifacts.slice(0, 4).join(' · ')
+      })
+      break
+    case 'contract':
+      addEvidenceChainItem({
+        kind: 'stage',
+        title: '证据契约',
+        detail: `${event.contract.contract_id} · required: ${event.contract.required_keys.join(', ')}`,
+        status: 'success',
+        meta: event.contract.recommended_keys?.length ? `recommended: ${event.contract.recommended_keys.join(', ')}` : ''
+      })
+      break
     case 'stage':
       addEvidenceChainItem({
         kind: 'stage',

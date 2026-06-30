@@ -411,6 +411,7 @@ type aiQuestionPreparation struct {
 	Conversation         aiConversationContext
 	GeneratedSearchTerms []string
 	TaskFrame            *aiTaskFrame
+	Contract             *aiEvidenceContract
 }
 
 type aiEvidence struct {
@@ -3972,6 +3973,11 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 	prepared.TaskFrame = &taskFrame
 	taskFrameStep.RunID = run.ID
 	_ = insertAIStep(ctx, s.db, taskFrameStep)
+	contract := buildAIEvidenceContract(taskFrame)
+	prepared.Contract = &contract
+	contractStep := buildAIEvidenceContractStep(taskFrame, contract)
+	contractStep.RunID = run.ID
+	_ = insertAIStep(ctx, s.db, contractStep)
 	checkpoint := buildAIAgentRunCheckpoint(scope, active.Config.Chat.Routing.DefaultTaskClass, prepared)
 	checkpointJSON := encodeJSON(checkpoint)
 	_ = insertAIStep(ctx, s.db, AIAgentStep{
@@ -3985,7 +3991,7 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 		FinishedAt: nowString(),
 	})
 
-	retrieval, err := s.retrieveAIEvidenceWithTaskFrame(ctx, prepared.SearchQuestion, scope, active.Config, prepared.TaskFrame)
+	retrieval, err := s.retrieveAIEvidenceWithTaskFrame(ctx, prepared.SearchQuestion, scope, active.Config, prepared.TaskFrame, prepared.Contract)
 	if err != nil {
 		_ = finishAIRun(ctx, s.db, run.ID, AIAgentRun{
 			Status:         "failed",
@@ -4187,8 +4193,16 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 	if err := insertAIStep(ctx, s.db, taskFrameStep); err != nil {
 		return err
 	}
+	contract := buildAIEvidenceContract(taskFrame)
+	prepared.Contract = &contract
+	contractStep := buildAIEvidenceContractStep(taskFrame, contract)
+	contractStep.RunID = run.ID
+	if err := insertAIStep(ctx, s.db, contractStep); err != nil {
+		return err
+	}
 	checkpoint := buildAIAgentRunCheckpoint(scope, active.Config.Chat.Routing.DefaultTaskClass, prepared)
 	checkpointJSON = encodeJSON(checkpoint)
+	run.CheckpointJSON = checkpointJSON
 	if err := insertAIStep(ctx, s.db, AIAgentStep{
 		RunID:      run.ID,
 		AgentName:  "coordinator",
@@ -4207,12 +4221,15 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 	if err := emit("task_frame", map[string]any{"task_frame": taskFrame}); err != nil {
 		return err
 	}
+	if err := emit("contract", map[string]any{"contract": summarizeAIEvidenceContract(contract)}); err != nil {
+		return err
+	}
 
 	currentState = "retrieve_smart_latest"
 	if err := emit("stage", aiStreamStageEvent{Stage: currentState, Status: "running", Message: "检索候选服务和引用证据"}); err != nil {
 		return err
 	}
-	retrieval, err := s.retrieveAIEvidenceWithTaskFrame(ctx, prepared.SearchQuestion, scope, active.Config, prepared.TaskFrame)
+	retrieval, err := s.retrieveAIEvidenceWithTaskFrame(ctx, prepared.SearchQuestion, scope, active.Config, prepared.TaskFrame, prepared.Contract)
 	if err != nil {
 		safeErr := sanitizeProviderError(err.Error())
 		assistantMsg.Status = "failed"
@@ -4674,6 +4691,13 @@ func (s *Server) expandAIQuestionForRetrieval(ctx context.Context, cfg AIConfigD
 }
 
 func applyAIConversationContext(retrieval *aiRetrievalResult, prepared aiQuestionPreparation) {
+	if prepared.Contract != nil {
+		retrieval.Contract = prepared.Contract
+		if retrieval.Plan == nil {
+			retrieval.Plan = map[string]any{}
+		}
+		retrieval.Plan["evidence_contract"] = summarizeAIEvidenceContract(*prepared.Contract)
+	}
 	if len(prepared.GeneratedSearchTerms) > 0 {
 		if retrieval.Plan == nil {
 			retrieval.Plan = map[string]any{}
@@ -5051,10 +5075,10 @@ func listAICitationsForRun(ctx context.Context, db *sql.DB, runID int64) ([]AIMe
 }
 
 func (s *Server) retrieveAIEvidence(ctx context.Context, question string, scope AIQuestionScope, cfg AIConfigData) (aiRetrievalResult, error) {
-	return s.retrieveAIEvidenceWithTaskFrame(ctx, question, scope, cfg, nil)
+	return s.retrieveAIEvidenceWithTaskFrame(ctx, question, scope, cfg, nil, nil)
 }
 
-func (s *Server) retrieveAIEvidenceWithTaskFrame(ctx context.Context, question string, scope AIQuestionScope, cfg AIConfigData, frame *aiTaskFrame) (aiRetrievalResult, error) {
+func (s *Server) retrieveAIEvidenceWithTaskFrame(ctx context.Context, question string, scope AIQuestionScope, cfg AIConfigData, frame *aiTaskFrame, contract *aiEvidenceContract) (aiRetrievalResult, error) {
 	scope = normalizeAIScope(scope)
 	intent := aiTaskIntentForRetrieval(question, frame)
 	terms := aiQueryTerms(question)
@@ -5116,7 +5140,10 @@ func (s *Server) retrieveAIEvidenceWithTaskFrame(ctx context.Context, question s
 	if frame != nil {
 		plan["task_frame"] = frame
 	}
-	return aiRetrievalResult{Intent: intent, Scope: scope, Plan: plan, Evidence: evidence, ServiceCandidates: candidates, TaskFrame: frame}, nil
+	if contract != nil {
+		plan["evidence_contract"] = summarizeAIEvidenceContract(*contract)
+	}
+	return aiRetrievalResult{Intent: intent, Scope: scope, Plan: plan, Evidence: evidence, ServiceCandidates: candidates, TaskFrame: frame, Contract: contract}, nil
 }
 
 func (s *Server) currentFileEvidence(ctx context.Context, current *AICurrentFileScope, terms []string) (aiEvidence, error) {

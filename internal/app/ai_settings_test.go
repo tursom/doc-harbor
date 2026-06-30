@@ -433,7 +433,7 @@ func TestAIAgentWorkflowPolicyDefaultsToShadowAndKeepsCompatibility(t *testing.T
 	if !ok {
 		t.Fatalf("checkpoint sse compatibility has unexpected type: %#v", checkpoint["sse_compatibility"])
 	}
-	for _, event := range []string{"run_started", "task_frame", "stage", "provider_attempt", "citations", "answer_delta", "message_done"} {
+	for _, event := range []string{"run_started", "task_frame", "contract", "stage", "provider_attempt", "citations", "answer_delta", "message_done"} {
 		if !testStringSliceContains(events, event) {
 			t.Fatalf("checkpoint missing legacy SSE event %s: %+v", event, events)
 		}
@@ -591,6 +591,10 @@ func TestAIQuestionEndpointKeepsLegacyFieldsAndWritesShadowCheckpoint(t *testing
 	if !ok || taskFrame["intent"] != aiTaskIntentDocumentQA {
 		t.Fatalf("run checkpoint missing task frame: %+v", checkpoint)
 	}
+	evidenceContract, ok := checkpoint["evidence_contract"].(map[string]any)
+	if !ok || evidenceContract["contract_id"] != "document_qa.v1" {
+		t.Fatalf("run checkpoint missing evidence contract: %+v", checkpoint)
+	}
 	if result.Run.Status != "insufficient_evidence" || result.Run.VerificationStatus != "fail" {
 		t.Fatalf("no-evidence run status = %s/%s, want insufficient_evidence/fail", result.Run.Status, result.Run.VerificationStatus)
 	}
@@ -601,7 +605,7 @@ func TestAIQuestionEndpointKeepsLegacyFieldsAndWritesShadowCheckpoint(t *testing
 	if err != nil {
 		t.Fatalf("list run steps: %v", err)
 	}
-	var foundCoordinator, foundTaskFramer bool
+	var foundCoordinator, foundTaskFramer, foundContractBuilder bool
 	for _, step := range steps {
 		if step.AgentName == "coordinator" && strings.Contains(step.OutputJSON, `"agent_workflow_version":"v2-shadow"`) {
 			foundCoordinator = true
@@ -609,12 +613,25 @@ func TestAIQuestionEndpointKeepsLegacyFieldsAndWritesShadowCheckpoint(t *testing
 		if step.AgentName == "task_framer" && strings.Contains(step.OutputJSON, `"intent":"document_qa"`) {
 			foundTaskFramer = true
 		}
+		if step.AgentName == "contract_builder" && step.StepType == "deterministic" {
+			var contract aiEvidenceContract
+			if err := json.Unmarshal([]byte(step.OutputJSON), &contract); err != nil {
+				t.Fatalf("contract_builder output should be direct contract JSON: %v; output=%s", err, step.OutputJSON)
+			}
+			if contract.ContractID != "document_qa.v1" || !testStringSliceContains(aiEvidenceRequirementKeys(contract.Required), "cited_documents") {
+				t.Fatalf("unexpected contract_builder output: %+v", contract)
+			}
+			foundContractBuilder = true
+		}
 	}
 	if !foundCoordinator {
 		t.Fatalf("coordinator checkpoint step missing workflow version: %+v", steps)
 	}
 	if !foundTaskFramer {
 		t.Fatalf("task_framer step missing task frame: %+v", steps)
+	}
+	if !foundContractBuilder {
+		t.Fatalf("contract_builder step missing evidence contract: %+v", steps)
 	}
 }
 
@@ -1775,10 +1792,13 @@ func TestAIQuestionStreamEndpointPersistsDeltasAndProviderFailover(t *testing.T)
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
 	body := recorder.Body.String()
-	for _, event := range []string{"event: user_message", "event: run_started", "event: task_frame", "event: stage", "event: provider_attempt", "event: answer_delta", "event: message_done", "event: done"} {
+	for _, event := range []string{"event: user_message", "event: run_started", "event: task_frame", "event: contract", "event: stage", "event: provider_attempt", "event: answer_delta", "event: message_done", "event: done"} {
 		if !strings.Contains(body, event) {
 			t.Fatalf("stream body missing %s: %s", event, body)
 		}
+	}
+	if !strings.Contains(body, `"contract_id":"document_qa.v1"`) || !strings.Contains(body, `"required_keys"`) {
+		t.Fatalf("stream body missing contract summary: %s", body)
 	}
 	if !strings.Contains(body, `"provider_key":"deepseek-main"`) || !strings.Contains(body, `"status":"failed"`) {
 		t.Fatalf("stream body missing failed first provider: %s", body)

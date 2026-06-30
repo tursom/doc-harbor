@@ -51,6 +51,7 @@ func newAIAgentWorkflowPolicy(version string) aiAgentWorkflowPolicy {
 		SSECompatibilityEvents: []string{
 			"run_started",
 			"task_frame",
+			"contract",
 			"stage",
 			"provider_attempt",
 			"citations",
@@ -100,6 +101,7 @@ func buildAIAgentRunCheckpoint(scope AIQuestionScope, taskClass string, prepared
 		"conversation":           prepared.Conversation,
 		"effective_question":     truncate(prepared.SearchQuestion, 800),
 		"task_frame":             prepared.TaskFrame,
+		"evidence_contract":      prepared.Contract,
 		"generated_terms":        prepared.GeneratedSearchTerms,
 		"protected_main_path":    policy.ProtectedMainPath,
 		"sse_compatibility":      policy.SSECompatibilityEvents,

@@ -93,6 +93,55 @@ func TestAIAgentEvidenceContractJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAIAgentEvidenceContractBuilderTemplates(t *testing.T) {
+	databaseContract := buildAIEvidenceContract(aiTaskFrame{Intent: aiTaskIntentDatabaseDirectUpdateForTest})
+	if databaseContract.ContractID != "database_direct_update_for_test.v1" {
+		t.Fatalf("database contract id = %q", databaseContract.ContractID)
+	}
+	for _, key := range []string{"table_identity", "update_fields", "field_units", "where_conditions", "read_path", "verification_method", "side_effects"} {
+		if !testStringSliceContains(aiEvidenceRequirementKeys(databaseContract.Required), key) {
+			t.Fatalf("database contract required keys missing %s: %+v", key, databaseContract.Required)
+		}
+	}
+
+	apiContract := buildAIEvidenceContract(aiTaskFrame{Intent: aiTaskIntentAPIIntegration})
+	if apiContract.ContractID != "api_integration.v1" {
+		t.Fatalf("api contract id = %q", apiContract.ContractID)
+	}
+	for _, key := range []string{"service_candidate", "route_or_rpc", "request_fields", "response_fields", "error_codes", "branch_status"} {
+		if !testStringSliceContains(aiEvidenceRequirementKeys(apiContract.Required), key) {
+			t.Fatalf("api contract required keys missing %s: %+v", key, apiContract.Required)
+		}
+	}
+
+	documentContract := buildAIEvidenceContract(aiTaskFrame{Intent: aiTaskIntentDocumentQA})
+	if documentContract.ContractID != "document_qa.v1" {
+		t.Fatalf("document contract id = %q", documentContract.ContractID)
+	}
+	documentRequired := aiEvidenceRequirementKeys(documentContract.Required)
+	for _, sqlOrAPIKey := range []string{"table_identity", "update_fields", "route_or_rpc", "request_fields", "response_fields"} {
+		if testStringSliceContains(documentRequired, sqlOrAPIKey) {
+			t.Fatalf("document QA contract should not include SQL/API key %s: %+v", sqlOrAPIKey, documentContract.Required)
+		}
+	}
+
+	genericContract := buildAIEvidenceContract(aiTaskFrame{Intent: aiTaskIntentCodePathExplanation})
+	if genericContract.ContractID != "generic.v1" || genericContract.Intent != aiTaskIntentCodePathExplanation {
+		t.Fatalf("generic contract = %+v", genericContract)
+	}
+	combined := encodeJSON(map[string]aiEvidenceContract{
+		"database": databaseContract,
+		"api":      apiContract,
+		"document": documentContract,
+		"generic":  genericContract,
+	})
+	for _, fixedName := range []string{"doc-harbor", "game-service", "steam", "订单", "库存", "游戏"} {
+		if strings.Contains(strings.ToLower(combined), strings.ToLower(fixedName)) {
+			t.Fatalf("contract builder should not contain fixed business/service name %q: %s", fixedName, combined)
+		}
+	}
+}
+
 func TestAIAgentCoverageReportJSONSerialization(t *testing.T) {
 	report := aiContractCoverageReport{
 		ContractID:         "database_direct_update_for_test.v1",

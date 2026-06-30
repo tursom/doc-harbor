@@ -535,10 +535,19 @@ export interface AITaskFrame {
   }
 }
 
+export interface AIEvidenceContractSummary {
+  contract_id: string
+  intent?: string
+  required_keys: string[]
+  recommended_keys?: string[]
+  forbidden?: string[]
+}
+
 export type AIStreamEvent =
   | { type: 'user_message'; message: AIMessage }
   | { type: 'run_started'; run: AIAgentRun; assistant_message: AIMessage }
   | { type: 'task_frame'; task_frame: AITaskFrame }
+  | { type: 'contract'; contract: AIEvidenceContractSummary }
   | AIStreamStageEvent
   | { type: 'service_candidates'; items: AIServiceCandidate[] }
   | { type: 'citations'; items: AIMessageCitation[] }
