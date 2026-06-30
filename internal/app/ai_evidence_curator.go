@@ -276,7 +276,7 @@ func aiContentLooksWritePath(filePath, content string) bool {
 			return true
 		}
 	}
-	for _, pattern := range []string{".update(", ".updates(", ".save(", ".create(", ".delete(", " insert ", "\ninsert ", " update ", "\nupdate ", " set "} {
+	for _, pattern := range []string{".update(", ".updates(", ".save(", ".create(", ".delete(", "update(", "updates(", "save(", "create(", "delete(", " insert ", "\ninsert ", " update ", "\nupdate ", " set "} {
 		if strings.Contains(content, pattern) {
 			return true
 		}
@@ -408,6 +408,10 @@ func aiEvidenceMatchesRequirement(evidence aiEvidence, requirement aiEvidenceReq
 	switch key {
 	case "cited_documents", "cited_evidence", "current_fact", "target_artifacts":
 		return aiEvidenceTypeIsUsableFact(evidence.EvidenceType, testFocused)
+	case "entrypoint":
+		return evidence.EvidenceType == "handler" || evidence.EvidenceType == "route" || evidence.EvidenceType == "proto" || evidence.EvidenceType == "request_response_type" || evidence.EvidenceType == "code"
+	case "call_chain", "implementation_file":
+		return evidence.EvidenceType == "handler" || evidence.EvidenceType == "read_path" || evidence.EvidenceType == "write_path" || evidence.EvidenceType == "code"
 	case "scope_boundary", "version_or_branch", "source_scope", "branch_status":
 		return evidence.Citation.SourceScope != "" || evidence.Citation.Branch != "" || evidence.Citation.CommitSHA != ""
 	case "branch_candidates":
@@ -424,6 +428,12 @@ func aiEvidenceMatchesRequirement(evidence aiEvidence, requirement aiEvidenceReq
 		return evidence.EvidenceType == "read_path" || evidence.EvidenceType == "migration_sql"
 	case "read_path", "verification_method":
 		return evidence.EvidenceType == "read_path" || evidence.EvidenceType == "handler" || evidence.EvidenceType == "test_fixture" && testFocused
+	case "write_path":
+		return evidence.EvidenceType == "write_path" || evidence.EvidenceType == "handler" ||
+			evidence.EvidenceType == "read_path" && aiEvidenceLooksLikeWritePathEvidence(evidence) ||
+			evidence.EvidenceType == "test_fixture" && testFocused
+	case "persistence_target":
+		return evidence.EvidenceType == "orm_model" || evidence.EvidenceType == "migration_sql" || evidence.EvidenceType == "write_path" || evidence.EvidenceType == "read_path"
 	case "route_or_rpc":
 		return evidence.EvidenceType == "route" || evidence.EvidenceType == "proto" || evidence.EvidenceType == "handler"
 	case "request_fields", "response_fields":
@@ -473,6 +483,12 @@ func aiEvidenceLooksLikeFieldUnitEvidence(evidence aiEvidence) bool {
 	return false
 }
 
+func aiEvidenceLooksLikeWritePathEvidence(evidence aiEvidence) bool {
+	content := strings.ToLower(evidence.Content)
+	filePath := strings.ToLower(normalizeRepoPath(evidence.Citation.FilePath))
+	return aiContentLooksWritePath(filePath, content)
+}
+
 func aiEvidenceTypeAccepted(evidence aiEvidence, accepted string, testFocused bool) bool {
 	accepted = strings.ToLower(strings.TrimSpace(accepted))
 	if accepted == "" {
@@ -494,6 +510,8 @@ func aiEvidenceTypeAccepted(evidence aiEvidence, accepted string, testFocused bo
 		return evidence.EvidenceType == "request_response_type" || evidence.EvidenceType == "proto" || evidence.EvidenceType == "handler" || evidence.EvidenceType == "route"
 	case "service", "service_logic", "dao", "repository", "query_call", "select_query":
 		return evidence.EvidenceType == "read_path" || evidence.EvidenceType == "write_path" || evidence.EvidenceType == "handler"
+	case "index_path", "cache_path", "async_job", "event_handler", "compensation_path":
+		return evidence.EvidenceType == "write_path" || evidence.EvidenceType == "handler" || evidence.EvidenceType == "code"
 	case "query_builder", "unique_index":
 		return evidence.EvidenceType == "read_path" || evidence.EvidenceType == "migration_sql"
 	case "test_case":

@@ -203,6 +203,15 @@ func buildAIAnswerPolicy(frame aiTaskFrame, contract aiEvidenceContract, coverag
 			"每个请求字段都必须引用 request struct、binding tag、proto message 或 schema 证据",
 			"每个响应字段都必须引用 response struct、proto message、schema 或 handler return 证据",
 		)
+	case aiTaskIntentCodePathExplanation:
+		policy.Constraints = append(policy.Constraints,
+			"代码路径类问题应优先回答入口、调用链、写入点和同步副作用",
+			"除非用户明确要求 SQL 或数据库直改，否则不得把直接 UPDATE 数据库作为确定修改方案",
+			"如果同时存在主表兜底字段和业务写入链路，必须区分兜底/展示/实际业务值",
+		)
+		policy.CitationRequirements = append(policy.CitationRequirements,
+			"入口、调用链、写入点、持久化对象和副作用都必须有引用；缺引用时写未确认",
+		)
 	case aiTaskIntentBranchLookup:
 		policy.Constraints = append(policy.Constraints, "功能分支证据必须标注“功能分支候选”")
 	default:
@@ -323,6 +332,9 @@ func buildAIAnswerComposerSystemPrompt(policy aiAnswerPolicy) string {
 	}
 	if policy.Intent == aiTaskIntentAPIIntegration {
 		b.WriteString("接口接入约束：每个接口路径、请求字段、响应字段都必须有引用；缺引用时写未确认，不能补齐或猜字段。\n")
+	}
+	if policy.Intent == aiTaskIntentCodePathExplanation {
+		b.WriteString("代码路径约束：优先说明入口、调用链、写入点、持久化对象和同步副作用；除非用户明确要求 SQL 或数据库直改，不得把直接 UPDATE 数据库作为确定修改方案。若只找到表字段但缺少写入链路，必须写为证据缺口。\n")
 	}
 	return b.String()
 }

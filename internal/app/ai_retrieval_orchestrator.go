@@ -271,6 +271,10 @@ func aiRetrievalTermsForContractKeys(keys []string) []string {
 	for _, key := range keys {
 		terms = append(terms, key)
 		switch key {
+		case "entrypoint":
+			terms = append(terms, "entrypoint", "handler", "route", "rpc", "service", "controller", "func", "method")
+		case "call_chain", "implementation_file":
+			terms = append(terms, "call", "chain", "handler", "service", "usecase", "method", "func")
 		case "table_identity":
 			terms = append(terms, "table", "tablename", "table_name", "schema")
 		case "update_fields", "request_fields", "response_fields":
@@ -279,6 +283,10 @@ func aiRetrievalTermsForContractKeys(keys []string) []string {
 			terms = append(terms, "unit", "units", "currency", "decimal", "cents", "ratio", "precision", "scale")
 		case "where_conditions", "read_path", "verification_method":
 			terms = append(terms, "where", "select", "query", "find", "repository", "dao")
+		case "write_path":
+			terms = append(terms, "update", "updates", "save", "create", "write", "mutation", "repository", "dao")
+		case "persistence_target":
+			terms = append(terms, "model", "table", "schema", "index", "cache", "repository", "dao", "gorm")
 		case "route_or_rpc":
 			terms = append(terms, "route", "router", "rpc", "service", "handler")
 		case "error_codes":
@@ -313,6 +321,8 @@ func aiRetrievalFallbackTerms(intent string, missingKeys []string) []string {
 		terms = []string{"table", "tablename", "column", "where", "select", "update", "model", "migration", "db"}
 	} else if aiIntentIsAPIIntegration(intent) {
 		terms = []string{"api", "route", "router", "handler", "request", "response", "proto", "rpc"}
+	} else if aiIntentIsCodePathExplanation(intent) {
+		terms = []string{"handler", "service", "func", "method", "update", "write", "model", "db", "proto", "request"}
 	}
 	return mergeTerms(terms, aiRetrievalTermsForContractKeys(missingKeys))
 }
@@ -326,14 +336,23 @@ func aiRetrievalPathHintsForRound(intent string, missingKeys []string, round int
 		if aiIntentIsAPIIntegration(intent) {
 			return []string{"router", "proto", "handler", "client", "docs"}
 		}
+		if aiIntentIsCodePathExplanation(intent) {
+			return []string{"handler", "controller", "proto", "service", "db", "models"}
+		}
 		return nil
 	}
 	for _, key := range missingKeys {
 		switch key {
+		case "entrypoint", "call_chain", "implementation_file":
+			hints = append(hints, "handler", "controller", "route", "router", "proto", "service")
 		case "table_identity", "update_fields", "field_units":
 			hints = append(hints, "models", "migration", "db")
 		case "where_conditions", "read_path", "verification_method":
 			hints = append(hints, "db", "models", "migration")
+		case "write_path":
+			hints = append(hints, "handler", "db", "dao", "repository", "service")
+		case "persistence_target":
+			hints = append(hints, "models", "migration", "db", "dao", "repository", "schema")
 		case "route_or_rpc", "request_fields", "response_fields", "error_codes", "auth_policy":
 			hints = append(hints, "router", "proto", "handler", "client", "docs")
 		case "branch_status", "source_scope", "branch_candidates", "commit_evidence":
@@ -345,6 +364,9 @@ func aiRetrievalPathHintsForRound(intent string, missingKeys []string, round int
 	if len(hints) == 0 && aiIntentIsDatabaseDirectUpdate(intent) {
 		hints = []string{"models", "migration", "db"}
 	}
+	if len(hints) == 0 && aiIntentIsCodePathExplanation(intent) {
+		hints = []string{"handler", "service", "db", "models", "proto"}
+	}
 	return sanitizeAIRetrievalPathHints(hints)
 }
 
@@ -354,6 +376,9 @@ func aiRetrievalFileTypesForRound(intent string, missingKeys []string, round int
 	}
 	if aiIntentIsAPIIntegration(intent) {
 		return []string{"go", "ts", "js", "proto", "md", "vue"}
+	}
+	if aiIntentIsCodePathExplanation(intent) {
+		return []string{"go", "proto", "md"}
 	}
 	return nil
 }
@@ -390,7 +415,7 @@ func sanitizeAIRetrievalPathHints(values []string) []string {
 	allowed := map[string]struct{}{
 		"models": {}, "model": {}, "migration": {}, "migrations": {}, "db": {}, "database": {},
 		"router": {}, "route": {}, "routes": {}, "proto": {}, "handler": {}, "controller": {},
-		"client": {}, "docs": {}, "doc": {}, "schema": {}, "dao": {}, "repository": {},
+		"client": {}, "docs": {}, "doc": {}, "schema": {}, "dao": {}, "repository": {}, "service": {},
 	}
 	out := []string{}
 	for _, value := range values {
@@ -461,6 +486,10 @@ func aiEvidenceMatchesPathHints(item aiEvidence, hints []string) bool {
 			}
 		case "handler", "controller":
 			if strings.Contains(path, "handler") || strings.Contains(path, "controller") {
+				return true
+			}
+		case "service":
+			if strings.Contains(path, "service") || strings.Contains(path, "usecase") || strings.Contains(path, "core/") {
 				return true
 			}
 		case "client":

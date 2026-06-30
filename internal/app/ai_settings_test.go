@@ -1658,62 +1658,52 @@ func TestAIRefRetrievalKeepsContentMatchedCodePastPathNoise(t *testing.T) {
 	for i := 0; i < 220; i++ {
 		writeScanPathTestFile(t, sourceRepo, "doc/价格补偿-"+strconv.Itoa(i)+".md", "# 价格补偿\n\n这里只描述 Steam 价格补偿和价格表同步。\n")
 	}
-	writeScanPathTestFile(t, sourceRepo, "core/handle/inventory.go", `package handle
+	writeScanPathTestFile(t, sourceRepo, "models/steam_game_price.go", `package models
 
-import "strings"
-
-type AddGameCdkInventoryRequest struct {
-	Price string
+func (SteamGamePrice) TableName() string {
+	return "steam_game_price"
 }
 
-type UpdateGameInventoryStatusRequest struct {
-	InventoryIds []int64
-	SellStatus   string
-	Price        string
-}
-
-func AddGameCdkInventory(req AddGameCdkInventoryRequest) {
-	// 基础参数校验：这里的价格仅用于添加 CDK 库存，不是修改已售卖库存的基础价格。
-	priceText := strings.TrimSpace(req.Price)
-	if priceText == "" {
-		return
-	}
-	if !strings.Contains(priceText, ".") {
-		return
-	}
-}
-
-`+strings.Repeat("// 价格补偿噪声：Steam 价格表同步失败后会重试，不涉及卖家库存改价。\n", 80)+`
-func UpdateGameInventoryStatus(req UpdateGameInventoryStatusRequest) {
-	targetStatus := strings.ToLower(strings.TrimSpace(req.SellStatus))
-	hasStatusUpdate := targetStatus != ""
-	priceText := strings.TrimSpace(req.Price)
-	hasPriceUpdate := priceText != ""
-	targetPrice := priceText
-	if !hasStatusUpdate && !hasPriceUpdate {
-		return
-	}
-	priceUpdateInventoryIDs := make([]int64, 0, len(req.InventoryIds))
-	for _, inventoryID := range req.InventoryIds {
-		if hasPriceUpdate {
-			priceUpdateInventoryIDs = append(priceUpdateInventoryIDs, inventoryID)
-		}
-	}
-	if hasPriceUpdate {
-		priceTargets := ListSellerGoodsSKUPriceTargetsByInventoryIDs(priceUpdateInventoryIDs)
-		BatchUpdateSellerGoodsSKUPriceByTargets(targetPrice, priceTargets)
-	}
-}
-
-func ListSellerGoodsSKUPriceTargetsByInventoryIDs(inventoryIDs []int64) []string {
-	return nil
-}
-
-func BatchUpdateSellerGoodsSKUPriceByTargets(price string, targets []string) {
+// SteamGamePrice steam游戏售卖价格表；price_in_cents_with_discount 单位为 cents，数据库直改时必须使用占位符。
+type SteamGamePrice struct {
+	ID                       int64  `+"`"+`gorm:"column:id;primaryKey" json:"id"`+"`"+`
+	SteamAppID               int64  `+"`"+`gorm:"column:steam_app_id" json:"steam_app_id"`+"`"+`
+	CountryCode              string `+"`"+`gorm:"column:country_code" json:"country_code"`+"`"+`
+	IsSell                   int    `+"`"+`gorm:"column:is_sell" json:"is_sell"`+"`"+`
+	PackageID                int64  `+"`"+`gorm:"column:package_id" json:"package_id"`+"`"+`
+	PriceInCentsWithDiscount int64  `+"`"+`gorm:"column:price_in_cents_with_discount;comment:折扣后价格，单位 cents" json:"price_in_cents_with_discount"`+"`"+`
+	Type                     string `+"`"+`gorm:"column:type" json:"type"`+"`"+`
 }
 `)
+	writeScanPathTestFile(t, sourceRepo, "core/db/mysql_methods/steam_game_current_version_price.go", `package mysql_methods
+
+func findCurrentSteamGameVersionPrice(versionType string, targetID int64, countryCode string) {
+	db := global.DB.
+		Model(&models.SteamGamePrice{}).
+		Where("country_code = ?", countryCode).
+		Where("type = ?", versionType).
+		Where("is_sell = ?", 1)
+
+	switch versionType {
+	case models.SteamGamePriceTypeGame, models.SteamGamePriceTypeDLC:
+		db = db.Where("package_id = ?", targetID)
+	case models.SteamGamePriceTypeBundle:
+		db = db.Where("bundle_id = ?", targetID)
+	}
+	db.Order("last_modified DESC, id DESC").Limit(1).Find(&price)
+}
+`)
+	writeScanPathTestFile(t, sourceRepo, "version/mysql/v2.1.2.game.sql", `ALTER TABLE steam_game_price
+    ADD INDEX idx_sgp_pkg_country_sell_mod_id (
+    package_id,
+    country_code,
+    is_sell,
+    last_modified,
+    id
+);
+`)
 	runTestGit(t, sourceRepo, "add", ".")
-	runTestGit(t, sourceRepo, "commit", "-m", "add noisy price docs and inventory price update")
+	runTestGit(t, sourceRepo, "commit", "-m", "add noisy price docs and steam game price schema")
 
 	repo, err := createRepository(ctx, server.db, Repository{
 		Name:                  "game-service",
@@ -1732,7 +1722,7 @@ func BatchUpdateSellerGoodsSKUPriceByTargets(price string, targets []string) {
 		t.Fatalf("scan repository: %v", err)
 	}
 
-	plannerServer := newAIAnswerModelTestServer(t, http.StatusOK, `{"choices":[{"message":{"role":"assistant","content":"{\"terms\":[\"UpdateGameInventoryStatus\",\"inventory\",\"Price\",\"handler\",\"BatchUpdateSellerGoodsSKUPriceByTargets\"]}"}}],"usage":{"prompt_tokens":3,"completion_tokens":4}}`)
+	plannerServer := newAIAnswerModelTestServer(t, http.StatusOK, `{"choices":[{"message":{"role":"assistant","content":"{\"terms\":[\"steam_game_price\",\"price_in_cents_with_discount\",\"package_id\",\"country_code\",\"is_sell\",\"base_price\",\"Price\",\"UpdateGameInventoryStatus\"]}"}}],"usage":{"prompt_tokens":3,"completion_tokens":4}}`)
 	secret, err := server.createOrUpdateAISecret(ctx, 0, aiSecretRequest{Name: "query-planner-api-key", SecretType: "api_key", Value: "sk-test-query-planner"}, "test")
 	if err != nil {
 		t.Fatalf("create planner secret: %v", err)
@@ -1754,7 +1744,7 @@ func BatchUpdateSellerGoodsSKUPriceByTargets(price string, targets []string) {
 	cfg.Chat.Routing = buildDefaultRouting(ctx, server.db, cfg.Chat.Providers)
 	cfg.Chat.MaxContextChunks = 8
 	prepared, plannerStep := server.expandAIQuestionForRetrieval(ctx, cfg, aiQuestionPreparation{
-		SearchQuestion: "如何修改游戏售卖 inventory price 的基础价格",
+		SearchQuestion: "如何修改游戏售卖的基础价格",
 		Scope: AIQuestionScope{
 			RepoMode:   "global",
 			SourceMode: "smart_latest_with_branch_candidates",
@@ -1763,12 +1753,12 @@ func BatchUpdateSellerGoodsSKUPriceByTargets(price string, targets []string) {
 	if plannerStep.Status != "success" {
 		t.Fatalf("query planner status = %s, want success: step=%+v", plannerStep.Status, plannerStep)
 	}
-	for _, forbidden := range []string{"updategameinventorystatus", "batchupdatesellergoodsskupricebytargets"} {
+	for _, forbidden := range []string{"updategameinventorystatus"} {
 		if testStringSliceContains(prepared.GeneratedSearchTerms, forbidden) {
 			t.Fatalf("query planner accepted unsupported concrete code term %q: step=%+v prepared=%+v", forbidden, plannerStep, prepared)
 		}
 	}
-	for _, want := range []string{"inventory", "price", "handler"} {
+	for _, want := range []string{"steam_game_price", "price_in_cents_with_discount", "package_id", "country_code", "is_sell", "base_price", "price"} {
 		if !testStringSliceContains(prepared.GeneratedSearchTerms, want) {
 			t.Fatalf("query planner filtered supported term %q: step=%+v prepared=%+v", want, plannerStep, prepared)
 		}
@@ -1781,14 +1771,167 @@ func BatchUpdateSellerGoodsSKUPriceByTargets(price string, targets []string) {
 		t.Fatalf("retrieve evidence: %v", err)
 	}
 
-	for _, evidence := range retrieval.Evidence {
-		if evidence.Citation.FilePath == "core/handle/inventory.go" &&
-			strings.Contains(evidence.Content, "UpdateGameInventoryStatus") &&
-			strings.Contains(evidence.Content, "BatchUpdateSellerGoodsSKUPriceByTargets") {
-			return
+	if retrieval.Intent != "database_change" {
+		t.Fatalf("intent = %q, want database_change", retrieval.Intent)
+	}
+	if retrieval.Contract == nil || retrieval.Contract.ContractID != "database_direct_update_for_test.v1" {
+		t.Fatalf("retrieval contract = %+v, want database_direct_update_for_test.v1", retrieval.Contract)
+	}
+	if retrieval.ContractCoverage == nil {
+		t.Fatalf("retrieval missing contract coverage: %+v", retrieval)
+	}
+	for _, key := range []string{"table_identity", "update_fields", "field_units", "where_conditions", "read_path", "verification_method", "side_effects"} {
+		if !testStringSliceContains(retrieval.ContractCoverage.Covered, key) {
+			t.Fatalf("database coverage missing %s: coverage=%+v evidence=%+v", key, retrieval.ContractCoverage, retrieval.Evidence)
 		}
 	}
-	t.Fatalf("retrieval missed inventory price update code: %+v", retrieval.Evidence)
+
+	var foundModel, foundReadPath, foundIndex bool
+	for _, evidence := range retrieval.Evidence {
+		if evidence.Citation.FilePath == "models/steam_game_price.go" &&
+			strings.Contains(evidence.Content, "steam_game_price") &&
+			strings.Contains(evidence.Content, "price_in_cents_with_discount") &&
+			strings.Contains(evidence.Content, "cents") {
+			foundModel = true
+		}
+		if evidence.Citation.FilePath == "core/db/mysql_methods/steam_game_current_version_price.go" &&
+			strings.Contains(evidence.Content, "country_code") &&
+			strings.Contains(evidence.Content, "package_id") &&
+			strings.Contains(evidence.Content, "is_sell") {
+			foundReadPath = true
+		}
+		if evidence.Citation.FilePath == "version/mysql/v2.1.2.game.sql" &&
+			strings.Contains(evidence.Content, "steam_game_price") &&
+			strings.Contains(evidence.Content, "package_id") {
+			foundIndex = true
+		}
+	}
+	if !foundModel || !foundReadPath || !foundIndex {
+		t.Fatalf("retrieval missed steam price SQL evidence: model=%v readPath=%v index=%v evidence=%+v", foundModel, foundReadPath, foundIndex, retrieval.Evidence)
+	}
+
+	messages := buildAIChatMessages("如何修改游戏售卖的基础价格", retrieval)
+	if !strings.Contains(messages[0].Content, "SELECT/UPDATE") || !strings.Contains(messages[0].Content, "不要仅因为证据里没有现成 UPDATE 语句") {
+		t.Fatalf("system prompt should allow evidence-backed SQL examples: %s", messages[0].Content)
+	}
+	answer := "表 steam_game_price、字段 price_in_cents_with_discount、WHERE package_id/country_code/is_sell 来自证据 [C1][C2][C3]。\nUPDATE steam_game_price SET price_in_cents_with_discount = ? WHERE package_id = ? AND country_code = ? AND is_sell = ?; [C1][C2][C3]"
+	frame, contract, coverage, bundle := aiAnswerVerifierInputs(retrieval)
+	report := verifyAIAnswerWithContext(frame, contract, coverage, bundle, answer, aiAnswerVerificationContext{
+		EvidenceCount:  len(retrieval.Evidence),
+		RetrievalRound: len(retrieval.Rounds),
+		ServiceNames:   aiVerificationServiceNames(retrieval.ServiceCandidates),
+	})
+	if report.Status != aiAnswerVerificationStatusPass || report.NextAction != aiAnswerVerificationNextActionPass || !testStringSliceContains(report.PassedChecks, "sql_placeholders") {
+		t.Fatalf("expected SQL answer did not pass verifier: report=%+v", report)
+	}
+}
+
+func TestAIQuestionSteamBasePriceReturnsExpectedSQL(t *testing.T) {
+	requireGit(t)
+
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	sourceRepo := createTestGitRepo(t)
+	writeScanPathTestFile(t, sourceRepo, "models/steam_game_price.go", `package models
+
+func (SteamGamePrice) TableName() string {
+	return "steam_game_price"
+}
+
+// SteamGamePrice steam游戏售卖价格表；price_in_cents_with_discount 单位为 cents。
+type SteamGamePrice struct {
+	ID                       int64  `+"`"+`gorm:"column:id;primaryKey" json:"id"`+"`"+`
+	PackageID                int64  `+"`"+`gorm:"column:package_id" json:"package_id"`+"`"+`
+	CountryCode              string `+"`"+`gorm:"column:country_code" json:"country_code"`+"`"+`
+	IsSell                   int    `+"`"+`gorm:"column:is_sell" json:"is_sell"`+"`"+`
+	PriceInCentsWithDiscount int64  `+"`"+`gorm:"column:price_in_cents_with_discount;comment:折扣后价格，单位 cents" json:"price_in_cents_with_discount"`+"`"+`
+	Type                     string `+"`"+`gorm:"column:type" json:"type"`+"`"+`
+}
+`)
+	writeScanPathTestFile(t, sourceRepo, "core/db/mysql_methods/steam_game_current_version_price.go", `package mysql_methods
+
+func findCurrentSteamGameVersionPrice(versionType string, targetID int64, countryCode string) {
+	db := global.DB.
+		Model(&models.SteamGamePrice{}).
+		Where("country_code = ?", countryCode).
+		Where("type = ?", versionType).
+		Where("is_sell = ?", 1)
+	db = db.Where("package_id = ?", targetID)
+	db.Order("last_modified DESC, id DESC").Limit(1).Find(&price)
+}
+`)
+	writeScanPathTestFile(t, sourceRepo, "version/mysql/v2.1.2.game.sql", `ALTER TABLE steam_game_price
+    ADD INDEX idx_sgp_pkg_country_sell_mod_id (
+    package_id,
+    country_code,
+    is_sell,
+    last_modified,
+    id
+);
+`)
+	runTestGit(t, sourceRepo, "add", ".")
+	runTestGit(t, sourceRepo, "commit", "-m", "add steam game price sql evidence")
+	repo, err := createRepository(ctx, server.db, Repository{
+		Name:                  "game-trade",
+		Slug:                  "game-trade",
+		RepoURL:               sourceRepo,
+		DefaultBranch:         "main",
+		TrackedBranches:       []string{"*"},
+		LatestIncludeBranches: []string{"*"},
+		ScanPaths:             []ScanPath{{Path: ".", Enabled: true}},
+		Enabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("create repository: %v", err)
+	}
+	if _, err := server.scanner.Scan(ctx, repo.ID, "manual"); err != nil {
+		t.Fatalf("scan repository: %v", err)
+	}
+
+	modelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload := requireAIModelRequest(t, r)
+		prompt := aiEvalPromptFromPayload(payload)
+		content := "表 steam_game_price、字段 price_in_cents_with_discount、WHERE package_id/country_code/is_sell 来自证据 [C1][C2][C3]。\nUPDATE steam_game_price SET price_in_cents_with_discount = ? WHERE package_id = ? AND country_code = ? AND is_sell = ?; [C1][C2][C3]"
+		switch {
+		case strings.Contains(prompt, "检索前的查询规划器"):
+			content = `{"terms":["steam_game_price","price_in_cents_with_discount","package_id","country_code","is_sell","base_price","Price"]}`
+		case strings.Contains(prompt, "检索前的任务结构化助手"):
+			content = `{"user_goal":"给出数据库直接修改价格字段的 SQL 和风险边界","answer_shape":"sql_steps_with_risk","target_artifacts":["table_identity","update_fields","where_conditions","field_units"],"generated_terms":["steam_game_price","price_in_cents_with_discount","package_id","country_code","is_sell"]}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]string{"role": "assistant", "content": content}}},
+			"usage":   map[string]int{"prompt_tokens": 3, "completion_tokens": 4},
+		})
+	}))
+	t.Cleanup(modelServer.Close)
+
+	provider := newAIStreamProvider(t, server, "steam-sql", "SteamSQL", modelServer.URL, "steam-sql-model", "sk-test-steam-sql", 10)
+	installAIStreamConfig(t, server, []AIProvider{provider})
+	session, err := createAISession(ctx, server.db, "新的 AI 问答", "", AIQuestionScope{RepoMode: "global", SourceMode: "smart_latest_with_branch_candidates"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	result, err := server.askAIQuestion(ctx, session.ID, "如何修改游戏售卖的基础价格", AIQuestionScope{RepoMode: "global", SourceMode: "smart_latest_with_branch_candidates"}, "test")
+	if err != nil {
+		t.Fatalf("ask question: %v", err)
+	}
+	if result.Run.Status != "succeeded" || result.Run.VerificationStatus != aiAnswerVerificationStatusPass {
+		t.Fatalf("run status = %s/%s; report=%s; answer=%s", result.Run.Status, result.Run.VerificationStatus, result.Run.VerificationReportJSON, result.Message.Content)
+	}
+	for _, want := range []string{
+		"UPDATE steam_game_price SET price_in_cents_with_discount = ? WHERE package_id = ? AND country_code = ? AND is_sell = ?",
+		"[C1]",
+		"SteamSQL",
+	} {
+		combined := result.Message.Content + "\n" + result.Message.ProviderName
+		if !strings.Contains(combined, want) {
+			t.Fatalf("final answer missing %q:\nanswer=%s\nprovider=%s", want, result.Message.Content, result.Message.ProviderName)
+		}
+	}
+	if strings.Contains(result.Message.Content, "UpdateGameInventoryStatus") || strings.Contains(result.Message.Content, "yym_seller_goods_skus") {
+		t.Fatalf("final answer used wrong inventory price path: %s", result.Message.Content)
+	}
 }
 
 func TestAIQueryPlannerFiltersUnsupportedConcreteTerms(t *testing.T) {

@@ -169,6 +169,10 @@ func aiIntentIsCrossService(intent string) bool {
 	return intent == aiTaskIntentCrossServiceImpact || intent == "cross_service"
 }
 
+func aiIntentIsCodePathExplanation(intent string) bool {
+	return intent == aiTaskIntentCodePathExplanation || intent == "code_path"
+}
+
 func aiIntentIsTestLookup(intent string) bool {
 	return intent == "test_lookup"
 }
@@ -280,6 +284,22 @@ func aiTaskFrameScopeStrategy(prepared aiQuestionPreparation) string {
 
 func aiTaskFrameTermsFromQuestion(question string) []string {
 	return aiTaskFrameCleanList(aiQueryTerms(question), 16)
+}
+
+func aiTaskFrameLooksChangeGuidance(frame aiTaskFrame) bool {
+	values := []string{frame.Intent, frame.UserGoal, frame.AnswerShape, frame.ScopeStrategy}
+	values = append(values, frame.TargetArtifacts...)
+	values = append(values, frame.KnownTerms...)
+	values = append(values, frame.GeneratedTerms...)
+	if frame.FollowUp != nil {
+		values = append(values, frame.FollowUp.PreviousTopicSummary)
+		values = append(values, frame.FollowUp.PreviousPaths...)
+	}
+	text := strings.ToLower(strings.Join(values, " "))
+	return aiQuestionAsksChangeGuidance(text) ||
+		strings.Contains(text, "entrypoint") ||
+		strings.Contains(text, "call_chain") ||
+		strings.Contains(text, "write_path")
 }
 
 func aiTaskFramePreviousTopicSummary(conversation aiConversationContext) string {

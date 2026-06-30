@@ -125,15 +125,25 @@ func TestAIAgentEvidenceContractBuilderTemplates(t *testing.T) {
 		}
 	}
 
-	genericContract := buildAIEvidenceContract(aiTaskFrame{Intent: aiTaskIntentCodePathExplanation})
-	if genericContract.ContractID != "generic.v1" || genericContract.Intent != aiTaskIntentCodePathExplanation {
-		t.Fatalf("generic contract = %+v", genericContract)
+	codePathContract := buildAIEvidenceContract(aiTaskFrame{
+		Intent:          aiTaskIntentCodePathExplanation,
+		UserGoal:        "解释如何修改某个业务值",
+		AnswerShape:     "call_chain",
+		TargetArtifacts: []string{"entrypoint", "call_chain", "write_path"},
+	})
+	if codePathContract.ContractID != "code_path_explanation.v1" || codePathContract.Intent != aiTaskIntentCodePathExplanation {
+		t.Fatalf("code path contract = %+v", codePathContract)
+	}
+	for _, key := range []string{"entrypoint", "call_chain", "implementation_file", "scope_boundary", "write_path", "persistence_target", "side_effects"} {
+		if !testStringSliceContains(aiEvidenceRequirementKeys(codePathContract.Required), key) {
+			t.Fatalf("code path contract required keys missing %s: %+v", key, codePathContract.Required)
+		}
 	}
 	combined := encodeJSON(map[string]aiEvidenceContract{
 		"database": databaseContract,
 		"api":      apiContract,
 		"document": documentContract,
-		"generic":  genericContract,
+		"codePath": codePathContract,
 	})
 	for _, fixedName := range []string{"doc-harbor", "game-service", "steam", "订单", "库存", "游戏"} {
 		if strings.Contains(strings.ToLower(combined), strings.ToLower(fixedName)) {
@@ -142,23 +152,23 @@ func TestAIAgentEvidenceContractBuilderTemplates(t *testing.T) {
 	}
 }
 
-func TestAIQuestionChangeGuidanceUsesCodePathIntentAndGenericTerms(t *testing.T) {
+func TestAIQuestionChangeGuidanceUsesDatabaseIntentAndGeneratedSQLTerms(t *testing.T) {
 	question := "如何修改游戏售卖的基础价格"
-	if got := classifyAITaskIntent(question); got != aiTaskIntentCodePathExplanation {
-		t.Fatalf("task intent = %q, want %q", got, aiTaskIntentCodePathExplanation)
+	if got := classifyAITaskIntent(question); got != aiTaskIntentDatabaseDirectUpdateForTest {
+		t.Fatalf("task intent = %q, want %q", got, aiTaskIntentDatabaseDirectUpdateForTest)
 	}
-	if got := aiTaskIntentFromLegacy(classifyAIIntent(question)); got != aiTaskIntentCodePathExplanation {
-		t.Fatalf("legacy intent mapping = %q, want %q", got, aiTaskIntentCodePathExplanation)
+	if got := aiTaskIntentFromLegacy(classifyAIIntent(question)); got != aiTaskIntentDatabaseDirectUpdateForTest {
+		t.Fatalf("legacy intent mapping = %q, want %q", got, aiTaskIntentDatabaseDirectUpdateForTest)
 	}
 
-	plannerTerms := filterAIQueryPlannerTerms(parseAIQueryPlannerTerms(`{"terms":["price","base_price","sell_price","update","SteamGamePrice"]}`), question, nil)
-	for _, want := range []string{"price", "base_price", "sell_price", "update"} {
+	plannerTerms := filterAIQueryPlannerTerms(parseAIQueryPlannerTerms(`{"terms":["price","base_price","sell_price","steam_game_price","price_in_cents_with_discount","update","UpdateGameInventoryStatus"]}`), question, nil)
+	for _, want := range []string{"price", "base_price", "sell_price", "steam_game_price", "price_in_cents_with_discount", "update"} {
 		if !stringSliceContains(plannerTerms, want) {
 			t.Fatalf("generic planner term %q missing from %v", want, plannerTerms)
 		}
 	}
-	if stringSliceContains(plannerTerms, "steamgameprice") {
-		t.Fatalf("planner filter accepted unsupported concrete term: %v", plannerTerms)
+	if stringSliceContains(plannerTerms, "updategameinventorystatus") {
+		t.Fatalf("planner filter accepted unsupported method term: %v", plannerTerms)
 	}
 
 	terms := aiQueryTerms(question)
@@ -171,6 +181,57 @@ func TestAIQuestionChangeGuidanceUsesCodePathIntentAndGenericTerms(t *testing.T)
 	dbQuestion := "我想在数据库里直接修改游戏的价格"
 	if got := classifyAITaskIntent(dbQuestion); got != aiTaskIntentDatabaseDirectUpdateForTest {
 		t.Fatalf("database task intent = %q, want %q", got, aiTaskIntentDatabaseDirectUpdateForTest)
+	}
+}
+
+func TestAICodePathVerifierRejectsDirectSQLAnswer(t *testing.T) {
+	frame := aiTaskFrame{
+		Intent:          aiTaskIntentCodePathExplanation,
+		UserGoal:        "解释如何修改某个业务值",
+		AnswerShape:     "call_chain",
+		TargetArtifacts: []string{"entrypoint", "call_chain", "write_path"},
+	}
+	contract := buildAIEvidenceContract(frame)
+	coverage := aiContractCoverageReport{
+		ContractID: contract.ContractID,
+		Status:     "pass",
+		Coverage:   map[string]string{},
+		Items:      []aiContractCoverageItem{},
+		Covered:    aiEvidenceRequirementKeys(contract.Required),
+		NextAction: aiAnswerVerificationNextActionPass,
+	}
+	for _, requirement := range contract.Required {
+		coverage.Coverage[requirement.Key] = aiEvidenceCoverageCovered
+		coverage.Items = append(coverage.Items, aiContractCoverageItem{
+			Key:         requirement.Key,
+			Requirement: aiEvidenceCheckerRequirementRequired,
+			Status:      aiEvidenceCoverageCovered,
+			EvidenceIDs: []int64{1},
+			Confidence:  0.95,
+		})
+	}
+	bundle := aiEvidenceBundle{
+		BundleID: "code-path",
+		Groups: []aiEvidenceGroup{{
+			Key:               "entrypoint",
+			EvidenceIDs:       []int64{1},
+			EvidenceType:      "handler",
+			SourceReliability: aiEvidenceReliabilityHighSmartLatest,
+		}},
+	}
+	answer := "可以直接执行：\n```sql\nUPDATE some_table SET price = ? WHERE id = ?;\n```\n[C1]"
+	report := verifyAIAnswer(frame, contract, coverage, bundle, answer)
+	if !testStringSliceContains(report.FailedChecks, "code_path_direct_sql") {
+		t.Fatalf("code path direct SQL check did not fail: %+v", report)
+	}
+	if report.NextAction != aiAnswerVerificationNextActionRewriteAnswer {
+		t.Fatalf("next action = %q, want rewrite_answer: %+v", report.NextAction, report)
+	}
+
+	negatedAnswer := "不要直接 UPDATE 数据库；应基于证据说明业务入口、调用链和写入点。[C1]"
+	negatedReport := verifyAIAnswer(frame, contract, coverage, bundle, negatedAnswer)
+	if testStringSliceContains(negatedReport.FailedChecks, "code_path_direct_sql") {
+		t.Fatalf("negated direct SQL warning should not fail code path verifier: %+v", negatedReport)
 	}
 }
 

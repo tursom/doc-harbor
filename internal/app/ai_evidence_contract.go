@@ -56,6 +56,39 @@ func buildAIEvidenceContract(frame aiTaskFrame) aiEvidenceContract {
 			},
 			Forbidden: []string{"unsupported_fact", "invented_business_name", "test_fixture_as_runtime_fact"},
 		}
+	case aiTaskIntentCodePathExplanation:
+		required := []aiEvidenceRequirement{
+			{Key: "entrypoint", Description: "用户要操作或理解的入口函数、handler、RPC、路由或命令入口", AcceptedEvidenceTypes: []string{"handler", "route", "proto", "service", "code"}},
+			{Key: "call_chain", Description: "入口到关键实现之间的调用关系或执行路径", AcceptedEvidenceTypes: []string{"handler", "service_logic", "dao", "repository", "code"}},
+			{Key: "implementation_file", Description: "承载核心逻辑的文件或模块", AcceptedEvidenceTypes: []string{"code", "service_logic", "handler", "dao", "repository"}},
+			{Key: "scope_boundary", Description: "仓库、分支或当前文件范围", AcceptedEvidenceTypes: []string{"source_scope", "branch", "repository_context"}},
+		}
+		recommended := []aiEvidenceRequirement{
+			{Key: "read_path", Description: "现有读取或展示路径，用于区分兜底值、展示值和实际业务值", AcceptedEvidenceTypes: []string{"read_path", "handler", "service_logic", "dao", "repository"}},
+			{Key: "write_path", Description: "修改动作真正写入的位置、方法或持久化调用", AcceptedEvidenceTypes: []string{"write_path", "handler", "service_logic", "dao", "repository"}},
+			{Key: "persistence_target", Description: "被写入或刷新到的持久化对象、表、模型、索引或缓存", AcceptedEvidenceTypes: []string{"orm_model", "migration_sql", "write_path", "schema_doc", "index_path", "cache_path"}},
+			{Key: "side_effects", Description: "修改后的同步、索引、缓存、事件或补偿链路", AcceptedEvidenceTypes: []string{"cache_path", "index_path", "async_job", "event_handler", "compensation_path", "service_logic"}},
+			{Key: "branch_status", Description: "涉及功能分支时的分支和 commit 状态", AcceptedEvidenceTypes: []string{"branch", "commit", "source_scope"}},
+		}
+		if aiTaskFrameLooksChangeGuidance(frame) {
+			required = append(required,
+				aiEvidenceRequirement{Key: "write_path", Description: "修改动作真正写入的位置、方法或持久化调用", AcceptedEvidenceTypes: []string{"write_path", "handler", "service_logic", "dao", "repository"}},
+				aiEvidenceRequirement{Key: "persistence_target", Description: "被写入或刷新到的持久化对象、表、模型、索引或缓存", AcceptedEvidenceTypes: []string{"orm_model", "migration_sql", "write_path", "schema_doc", "index_path", "cache_path"}},
+				aiEvidenceRequirement{Key: "side_effects", Description: "修改后的同步、索引、缓存、事件或补偿链路", AcceptedEvidenceTypes: []string{"cache_path", "index_path", "async_job", "event_handler", "compensation_path", "service_logic"}},
+			)
+			recommended = []aiEvidenceRequirement{
+				{Key: "request_fields", Description: "如果存在接口或 RPC，确认相关请求字段和输入约束", AcceptedEvidenceTypes: []string{"request_type", "proto_message", "openapi_schema", "binding_tag", "validation", "handler"}},
+				{Key: "read_path", Description: "现有读取或展示路径，用于区分兜底值、展示值和实际业务值", AcceptedEvidenceTypes: []string{"read_path", "handler", "service_logic", "dao", "repository"}},
+				{Key: "branch_status", Description: "涉及功能分支时的分支和 commit 状态", AcceptedEvidenceTypes: []string{"branch", "commit", "source_scope"}},
+			}
+		}
+		return aiEvidenceContract{
+			ContractID:  "code_path_explanation.v1",
+			Intent:      intent,
+			Required:    required,
+			Recommended: recommended,
+			Forbidden:   []string{"unsupported_fact", "unreferenced_claim", "execute_sql", "direct_database_update_without_user_request", "secret_exposure"},
+		}
 	case aiTaskIntentBranchLookup:
 		return aiEvidenceContract{
 			ContractID: "branch_lookup.v1",

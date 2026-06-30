@@ -152,6 +152,11 @@ func verifyAIAnswerWithContext(frame aiTaskFrame, contract aiEvidenceContract, c
 			pass("sql_citations")
 		}
 	}
+	if intent == aiTaskIntentCodePathExplanation && aiAnswerSuggestsDirectDatabaseUpdate(answerLower, sqlStatements) {
+		fail("code_path_direct_sql", "code-path answers must not recommend direct database UPDATE unless the user explicitly asked for database direct update")
+	} else {
+		pass("code_path_no_direct_sql")
+	}
 
 	if !aiTaskFrameLooksTestFocused(frame) && aiAnswerUsesTestFixtureAsRuntimeFact(answer, bundle) {
 		fail("test_fixture_pollution", "non-test answer uses _test.go or fixture evidence as business fact")
@@ -298,7 +303,11 @@ func buildAIAnswerRewriteMessages(question string, retrieval aiRetrievalResult, 
 	rewriteInstruction.WriteString("\n\n重写要求：\n")
 	rewriteInstruction.WriteString("- 修复 failed_checks 指出的所有问题。\n")
 	rewriteInstruction.WriteString("- 不得声称已经执行 SQL、修改数据库或刷新缓存。\n")
-	rewriteInstruction.WriteString("- SQL 示例必须使用占位符，字段、表和 WHERE 条件必须带 [C#] 引用。\n")
+	if retrieval.TaskFrame != nil && aiIntentIsCodePathExplanation(retrieval.TaskFrame.Intent) {
+		rewriteInstruction.WriteString("- 当前是代码路径问题，除非用户明确要求数据库直改，否则不得输出 SQL/UPDATE 作为修改方案；改为说明入口、调用链、写入点、持久化对象和副作用。\n")
+	} else {
+		rewriteInstruction.WriteString("- SQL 示例必须使用占位符，字段、表和 WHERE 条件必须带 [C#] 引用。\n")
+	}
 	rewriteInstruction.WriteString("- 非测试问题不得把 _test.go 或 fixture 当业务事实。\n")
 	rewriteInstruction.WriteString("- 功能分支来源必须标注“功能分支候选”。\n")
 	rewriteInstruction.WriteString("- 不要输出 provider 错误、API key、token 或内部配置。\n")
@@ -400,11 +409,28 @@ func extractAIAnswerSQLStatements(answer string) []string {
 	}
 	for _, line := range strings.Split(answer, "\n") {
 		line = strings.TrimSpace(line)
-		if aiAnswerSQLKeywordPattern.MatchString(line) {
+		if aiAnswerLineLooksLikeSQLStatement(line) {
 			statements = append(statements, line)
 		}
 	}
 	return uniqueStrings(statements)
+}
+
+func aiAnswerLineLooksLikeSQLStatement(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	lower = strings.TrimLeft(lower, "-* \t>0123456789.)")
+	switch {
+	case strings.HasPrefix(lower, "update "):
+		return strings.Contains(lower, " set ")
+	case strings.HasPrefix(lower, "select "):
+		return strings.Contains(lower, " from ")
+	case strings.HasPrefix(lower, "insert into "):
+		return true
+	case strings.HasPrefix(lower, "delete from "):
+		return true
+	default:
+		return false
+	}
 }
 
 func extractAIFencedBlocks(answer string) []string {
@@ -482,6 +508,49 @@ func aiAnswerContainsDeterministicOperation(answerLower, intent string) bool {
 		}
 	}
 	return false
+}
+
+func aiAnswerSuggestsDirectDatabaseUpdate(answerLower string, sqlStatements []string) bool {
+	if len(sqlStatements) > 0 {
+		return true
+	}
+	for _, marker := range []string{
+		"直接修改数据库", "直接改数据库", "直接改库", "数据库操作完成", "通过数据库操作",
+		"只能通过数据库", "update ", " update", "修改数据库表", "直改表",
+	} {
+		if aiAnswerContainsUnnegatedMarker(answerLower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func aiAnswerContainsUnnegatedMarker(answerLower, marker string) bool {
+	searchFrom := 0
+	for {
+		index := strings.Index(answerLower[searchFrom:], marker)
+		if index < 0 {
+			return false
+		}
+		index += searchFrom
+		start := max(0, index-24)
+		end := min(len(answerLower), index+len(marker)+24)
+		context := answerLower[start:end]
+		negated := false
+		for _, negation := range []string{
+			"不要", "不得", "不能", "不应", "不可", "禁止", "避免", "不是", "并非", "不建议", "无需", "没有必要",
+			"do not", "don't", "should not", "must not", "not ",
+		} {
+			if strings.Contains(context, negation) {
+				negated = true
+				break
+			}
+		}
+		if !negated {
+			return true
+		}
+		searchFrom = index + len(marker)
+	}
 }
 
 func aiAnswerUsesTestFixtureAsRuntimeFact(answer string, bundle aiEvidenceBundle) bool {

@@ -6069,6 +6069,16 @@ func aiCodePathBoost(filePath, intent string) float64 {
 	if aiIntentIsAPIIntegration(intent) {
 		boost *= 1.7
 	}
+	if aiIntentIsCodePathExplanation(intent) {
+		for _, keyword := range []string{"handler", "controller", "service", "usecase", "core/", "proto", "request", "response", "model", "models/", "db/", "dao", "repository", "mysql"} {
+			if strings.Contains(filePath, keyword) {
+				boost += 4
+			}
+		}
+		if strings.HasSuffix(filePath, ".proto") {
+			boost += 4
+		}
+	}
 	if aiIntentIsDatabaseDirectUpdate(intent) {
 		for _, keyword := range []string{"model", "models/", "schema", "migration", "migrations", "version/mysql", "sql", "mysql", "db/", "dao", "repository", "gorm"} {
 			if strings.Contains(filePath, keyword) {
@@ -6102,6 +6112,13 @@ func aiContentScore(content string, terms []string, intent string) (float64, []s
 	}
 	if aiIntentIsAPIIntegration(intent) {
 		for _, pattern := range []string{"router.", ".get(", ".post(", ".put(", ".delete(", "handlefunc(", "group(", "rpc ", "service ", "shouldbind", "ctx.request", "requestbody", "openapi"} {
+			if strings.Contains(lower, pattern) {
+				score += 4
+			}
+		}
+	}
+	if aiIntentIsCodePathExplanation(intent) {
+		for _, pattern := range []string{"func ", "type ", "rpc ", "service ", "handler", ".update(", ".updates(", ".save(", ".create(", "model(&", ".where(", "where(", "sync", "index", "cache", "event"} {
 			if strings.Contains(lower, pattern) {
 				score += 4
 			}
@@ -6482,7 +6499,19 @@ func aiQuestionAsksDatabaseChange(q string) bool {
 	hasChangeAction := strings.Contains(q, "修改") || strings.Contains(q, "直接改") || strings.Contains(q, "直接修改") ||
 		strings.Contains(q, "更新") || strings.Contains(q, "改成") || strings.Contains(q, "写入") ||
 		strings.Contains(q, "update")
-	return hasDatabaseContext && hasChangeAction
+	return hasChangeAction && (hasDatabaseContext || aiQuestionAsksDataValueChange(q))
+}
+
+func aiQuestionAsksDataValueChange(q string) bool {
+	hasQuestionShape := strings.Contains(q, "如何") || strings.Contains(q, "怎么") ||
+		strings.Contains(q, "怎样") || strings.Contains(q, "在哪") || strings.Contains(q, "哪里")
+	hasChangeAction := strings.Contains(q, "修改") || strings.Contains(q, "调整") ||
+		strings.Contains(q, "改成") || strings.Contains(q, "变更") || strings.Contains(q, "更新") ||
+		strings.Contains(q, "配置") || strings.Contains(q, "update") || strings.Contains(q, "change")
+	if !hasQuestionShape || !hasChangeAction {
+		return false
+	}
+	return aiQuestionMentionsDataValue(q)
 }
 
 func aiQuestionAsksChangeGuidance(q string) bool {
@@ -6494,6 +6523,10 @@ func aiQuestionAsksChangeGuidance(q string) bool {
 	if !hasQuestionShape || !hasChangeAction {
 		return false
 	}
+	return aiQuestionMentionsDataValue(q)
+}
+
+func aiQuestionMentionsDataValue(q string) bool {
 	for _, marker := range []string{
 		"价格", "价钱", "金额", "基础价", "字段", "配置", "状态", "比例", "费率",
 		"price", "amount", "field", "config", "status", "rate",
@@ -6628,9 +6661,10 @@ func filterAIQueryPlannerTerms(terms []string, question string, frame *aiTaskFra
 		return nil
 	}
 	sourceTerms := aiQueryPlannerSourceTerms(question, frame)
+	allowDatabaseCandidates := aiQueryPlannerAllowsDatabaseCandidates(question, frame)
 	filtered := make([]string, 0, len(terms))
 	for _, term := range terms {
-		if aiQueryPlannerTermAllowed(term, sourceTerms) {
+		if aiQueryPlannerTermAllowed(term, sourceTerms) || allowDatabaseCandidates && aiQueryPlannerDatabaseCandidateTermAllowed(term, sourceTerms) {
 			filtered = append(filtered, term)
 		}
 	}
@@ -6639,6 +6673,14 @@ func filterAIQueryPlannerTerms(terms []string, question string, frame *aiTaskFra
 		filtered = filtered[:16]
 	}
 	return filtered
+}
+
+func aiQueryPlannerAllowsDatabaseCandidates(question string, frame *aiTaskFrame) bool {
+	if frame != nil && aiIntentIsDatabaseDirectUpdate(frame.Intent) {
+		return true
+	}
+	q := strings.ToLower(question)
+	return aiQuestionAsksDatabaseChange(q) || aiQuestionAsksDataValueChange(q)
 }
 
 func aiQueryPlannerSourceTerms(question string, frame *aiTaskFrame) map[string]struct{} {
@@ -6719,6 +6761,68 @@ func aiQueryPlannerTermAllowed(term string, sourceTerms map[string]struct{}) boo
 		return hasSource || allGeneric
 	}
 	return aiQueryPlannerHasGenericAffix(normalized, sourceTerms)
+}
+
+func aiQueryPlannerDatabaseCandidateTermAllowed(term string, sourceTerms map[string]struct{}) bool {
+	components := aiQueryPlannerIdentifierWords(term)
+	if len(components) == 0 {
+		return false
+	}
+	hasDataValueComponent := false
+	hasSourceComponent := false
+	for _, component := range components {
+		component = aiQueryPlannerNormalizeTerm(component)
+		if _, ok := sourceTerms[component]; ok {
+			hasSourceComponent = true
+		}
+		if aiQueryPlannerDatabaseDataValueComponent(component) {
+			hasDataValueComponent = true
+		}
+		if aiQueryPlannerActionComponent(component) && !aiQueryPlannerSQLActionComponent(component) {
+			return false
+		}
+	}
+	return hasDataValueComponent || hasSourceComponent && aiQueryPlannerLooksDatabaseIdentifier(term) || aiQueryPlannerLooksDatabaseIdentifier(term)
+}
+
+func aiQueryPlannerDatabaseDataValueComponent(component string) bool {
+	switch component {
+	case "price", "prices", "amount", "cents", "cent", "currency", "rate", "ratio", "config", "field", "value", "status":
+		return true
+	default:
+		return false
+	}
+}
+
+func aiQueryPlannerActionComponent(component string) bool {
+	switch component {
+	case "batch", "update", "updates", "add", "create", "delete", "remove", "list", "find", "query", "load", "get", "set", "by", "target", "targets", "handler", "request", "response":
+		return true
+	default:
+		return false
+	}
+}
+
+func aiQueryPlannerSQLActionComponent(component string) bool {
+	switch component {
+	case "update", "select", "where", "set":
+		return true
+	default:
+		return false
+	}
+}
+
+func aiQueryPlannerLooksDatabaseIdentifier(term string) bool {
+	normalized := aiQueryPlannerNormalizeTerm(term)
+	if strings.Contains(normalized, "_") {
+		return true
+	}
+	for _, component := range aiQueryPlannerIdentifierWords(term) {
+		if aiQueryPlannerDatabaseDataValueComponent(component) {
+			return true
+		}
+	}
+	return false
 }
 
 func aiQueryPlannerHasGenericAffix(term string, sourceTerms map[string]struct{}) bool {
