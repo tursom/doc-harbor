@@ -16,14 +16,16 @@ import (
 )
 
 const (
-	accessTokenCapabilityAIHistoryRead = "ai.history.read"
-	accessTokenDefaultTTL              = time.Hour
-	accessTokenMinTTL                  = 5 * time.Minute
-	accessTokenMaxTTL                  = 24 * time.Hour
+	accessTokenCapabilityAIHistoryRead     = "ai.history.read"
+	accessTokenCapabilityAIDiagnosticsRead = "ai.diagnostics.read"
+	accessTokenDefaultTTL                  = time.Hour
+	accessTokenMinTTL                      = 5 * time.Minute
+	accessTokenMaxTTL                      = 24 * time.Hour
 )
 
 var allowedAccessTokenCapabilities = map[string]struct{}{
-	accessTokenCapabilityAIHistoryRead: {},
+	accessTokenCapabilityAIHistoryRead:     {},
+	accessTokenCapabilityAIDiagnosticsRead: {},
 }
 
 type accessTokenRequest struct {
@@ -95,6 +97,10 @@ func (s *Server) handleAccessSubroutes(w http.ResponseWriter, r *http.Request) {
 	case "ai":
 		if len(parts) >= 2 && parts[1] == "history" {
 			s.handleAccessAIHistory(w, r, payload, parts[2:])
+			return
+		}
+		if len(parts) >= 2 && parts[1] == "diagnostics" {
+			s.handleAccessAIDiagnostics(w, r, payload, parts[2:])
 			return
 		}
 	}
@@ -251,7 +257,8 @@ func (s *Server) verifyAccessToken(token string) (accessTokenPayload, error) {
 	signingInput := parts[0] + "." + parts[1]
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write([]byte(signingInput))
-	if !hmac.Equal(signature, mac.Sum(nil)) {
+	expectedSignature := mac.Sum(nil)
+	if !hmac.Equal(signature, expectedSignature) || !hmac.Equal([]byte(parts[2]), []byte(base64.RawURLEncoding.EncodeToString(expectedSignature))) {
 		return accessTokenPayload{}, errUnauthorized("invalid access token")
 	}
 	payloadRaw, err := base64.RawURLEncoding.DecodeString(parts[1])

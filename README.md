@@ -152,7 +152,7 @@ curl -i \
 
 管理员可以在系统设置页的“访问 Token”区域签发临时 Token。默认有效期为 3600 秒，允许范围为 300 到 86400 秒；Token 使用 `DATA_DIR/secrets/access-token.key` 中的 HMAC-SHA256 密钥签名，密钥丢失或轮换后已签发 Token 会失效。
 
-当前只支持签发 `ai.history.read` 能力，用于远程只读访问 AI 对话历史。`scope.viewer_key` 留空时不限制 viewer，填写后服务端会强制按该 `viewer_key` 收窄支持该 scope 的接口。
+当前支持签发 `ai.history.read` 和 `ai.diagnostics.read` 能力，分别用于远程只读访问 AI 对话历史和 AI 问答排查数据。`scope.viewer_key` 留空时不限制 viewer，填写后服务端会强制按该 `viewer_key` 收窄支持该 scope 的接口。
 
 签发接口：
 
@@ -165,7 +165,7 @@ POST /api/tokens
 ```json
 {
   "ttl_seconds": 3600,
-  "capabilities": ["ai.history.read"],
+  "capabilities": ["ai.history.read", "ai.diagnostics.read"],
   "scope": {
     "viewer_key": ""
   }
@@ -193,6 +193,28 @@ curl -H "Authorization: Bearer $ACCESS_TOKEN" \
 ```
 
 如果 Token 带 `scope.viewer_key` 范围，服务端会强制按该 `viewer_key` 收窄列表和详情；不属于该范围的会话按 `404` 处理。Token 无效或过期返回 `401`，Token 有效但缺少 `ai.history.read` 能力返回 `403`。
+
+AI 问答排查接口使用独立的 `ai.diagnostics.read` 能力，用于远程查看 run 级链路数据。列表接口支持分页和过滤：
+
+```text
+GET /api/access/ai/diagnostics/runs?limit=50&cursor=...&session_id=1&status=failed&q=...&started_after=2026-06-29T00:00:00Z&started_before=2026-06-30T00:00:00Z
+```
+
+数据源接口返回当前 AI 可访问的启用仓库、启用扫描路径、默认分支/候选分支、最新扫描摘要和索引限制摘要：
+
+```bash
+curl -H "Authorization: Bearer $ACCESS_TOKEN" \
+  "http://127.0.0.1:14220/api/access/ai/diagnostics/data-sources"
+```
+
+详情接口返回单次问答的会话、用户消息、助手消息、run、脱敏 steps、本次 scope 解析后的数据源、候选服务和引用：
+
+```bash
+curl -H "Authorization: Bearer $ACCESS_TOKEN" \
+  "http://127.0.0.1:14220/api/access/ai/diagnostics/runs/1"
+```
+
+排查接口不会返回 step 的 `input_json`、`output_json`、仓库 `repo_url` / `credential_ref`、provider secret、API key、AI secret id 或 access-token 签名密钥。Token 有效但缺少 `ai.diagnostics.read` 能力时返回 `403`。
 
 ## Docker
 

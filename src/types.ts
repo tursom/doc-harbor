@@ -403,16 +403,91 @@ export interface AIAgentRun {
   status: string
   current_state: string
   intent: string
+  scope_json: string
+  retrieval_plan_json: string
   service_candidate_count: number
   evidence_count: number
+  code_evidence_count: number
+  memory_count: number
+  unconfirmed_count: number
   verification_status: string
+  verification_report_json: string
+  checkpoint_json: string
+  index_snapshot_id: number
   config_version: number
   config_hash: string
   model: string
   provider_name: string
+  provider_failover_json: string
+  model_route_json: string
+  escalation_count: number
+  estimated_cost_json: string
   started_at: string
   finished_at: string
   error_message: string
+}
+
+export interface AIDiagnosticsIndexingSummary {
+  default_scan_roots: string[]
+  exclude_globs: string[]
+  max_file_size: number
+}
+
+export interface AIDiagnosticsScanPath {
+  id: number
+  path: string
+  include_globs: string[]
+  exclude_globs: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface AIDiagnosticsBranchTarget {
+  branch: string
+  commit_sha: string
+  commit_time: string
+  last_scanned_at: string
+  source_scope: string
+}
+
+export interface AIDiagnosticsScanRun {
+  id: number
+  trigger_type: string
+  status: string
+  branch_count: number
+  file_count: number
+  skipped_count: number
+  error_count: number
+  started_at: string
+  finished_at: string
+}
+
+export interface AIDiagnosticsRepositorySource {
+  id: number
+  name: string
+  slug: string
+  enabled: boolean
+  default_branch: string
+  tracked_branches: string[]
+  latest_include_branches: string[]
+  latest_exclude_branches: string[]
+  stale_branch_days: number
+  branch_priority: string[]
+  sync_interval_seconds: number
+  max_file_size_bytes: number
+  scan_paths: AIDiagnosticsScanPath[]
+  default_target?: AIDiagnosticsBranchTarget
+  candidate_targets: AIDiagnosticsBranchTarget[]
+  latest_scan?: AIDiagnosticsScanRun
+  created_at: string
+  updated_at: string
+}
+
+export interface AIDiagnosticsDataSources {
+  scope: AIQuestionScope
+  indexing: AIDiagnosticsIndexingSummary
+  repositories: AIDiagnosticsRepositorySource[]
+  current_file?: AIQuestionScope['current_file']
 }
 
 export interface AIQuestionResult {

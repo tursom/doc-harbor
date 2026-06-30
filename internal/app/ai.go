@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -217,6 +218,137 @@ type aiHistorySessionDetailResponse struct {
 
 type aiHistorySessionCursor struct {
 	UpdatedAt string `json:"updated_at"`
+	ID        int64  `json:"id"`
+}
+
+type aiDiagnosticsRunsResponse struct {
+	Items      []aiDiagnosticsRunSummary `json:"items"`
+	NextCursor string                    `json:"next_cursor,omitempty"`
+}
+
+type aiDiagnosticsRunSummary struct {
+	Run                AIAgentRun `json:"run"`
+	Session            AISession  `json:"session"`
+	UserMessageID      int64      `json:"user_message_id"`
+	UserQuestion       string     `json:"user_question"`
+	AssistantMessageID int64      `json:"assistant_message_id"`
+	AssistantStatus    string     `json:"assistant_status"`
+	DurationMS         int64      `json:"duration_ms"`
+}
+
+type aiDiagnosticsRunDetailResponse struct {
+	Session           AISession            `json:"session"`
+	UserMessage       AIMessage            `json:"user_message"`
+	AssistantMessage  AIMessage            `json:"assistant_message"`
+	Run               AIAgentRun           `json:"run"`
+	Steps             []aiDiagnosticsStep  `json:"steps"`
+	DataSources       aiDiagnosticsSources `json:"data_sources"`
+	ServiceCandidates []AIServiceCandidate `json:"service_candidates"`
+	Citations         []AIMessageCitation  `json:"citations"`
+}
+
+type aiDiagnosticsSourcesResponse struct {
+	DataSources aiDiagnosticsSources `json:"data_sources"`
+}
+
+type aiDiagnosticsSources struct {
+	Scope        AIQuestionScope                 `json:"scope"`
+	Indexing     aiDiagnosticsIndexingSummary    `json:"indexing"`
+	Repositories []aiDiagnosticsRepositorySource `json:"repositories"`
+	CurrentFile  *AICurrentFileScope             `json:"current_file,omitempty"`
+}
+
+type aiDiagnosticsIndexingSummary struct {
+	DefaultScanRoots []string `json:"default_scan_roots"`
+	ExcludeGlobs     []string `json:"exclude_globs"`
+	MaxFileSize      int64    `json:"max_file_size"`
+}
+
+type aiDiagnosticsRepositorySource struct {
+	ID                    int64                       `json:"id"`
+	Name                  string                      `json:"name"`
+	Slug                  string                      `json:"slug"`
+	Enabled               bool                        `json:"enabled"`
+	DefaultBranch         string                      `json:"default_branch"`
+	TrackedBranches       []string                    `json:"tracked_branches"`
+	LatestIncludeBranches []string                    `json:"latest_include_branches"`
+	LatestExcludeBranches []string                    `json:"latest_exclude_branches"`
+	StaleBranchDays       int                         `json:"stale_branch_days"`
+	BranchPriority        []string                    `json:"branch_priority"`
+	SyncIntervalSeconds   int                         `json:"sync_interval_seconds"`
+	MaxFileSizeBytes      int64                       `json:"max_file_size_bytes"`
+	ScanPaths             []aiDiagnosticsScanPath     `json:"scan_paths"`
+	DefaultTarget         *aiDiagnosticsBranchTarget  `json:"default_target,omitempty"`
+	CandidateTargets      []aiDiagnosticsBranchTarget `json:"candidate_targets"`
+	LatestScan            *aiDiagnosticsScanRun       `json:"latest_scan,omitempty"`
+	CreatedAt             string                      `json:"created_at"`
+	UpdatedAt             string                      `json:"updated_at"`
+}
+
+type aiDiagnosticsScanPath struct {
+	ID           int64    `json:"id"`
+	Path         string   `json:"path"`
+	IncludeGlobs []string `json:"include_globs"`
+	ExcludeGlobs []string `json:"exclude_globs"`
+	CreatedAt    string   `json:"created_at"`
+	UpdatedAt    string   `json:"updated_at"`
+}
+
+type aiDiagnosticsBranchTarget struct {
+	Branch        string `json:"branch"`
+	CommitSHA     string `json:"commit_sha"`
+	CommitTime    string `json:"commit_time"`
+	LastScannedAt string `json:"last_scanned_at"`
+	SourceScope   string `json:"source_scope"`
+}
+
+type aiDiagnosticsScanRun struct {
+	ID           int64  `json:"id"`
+	TriggerType  string `json:"trigger_type"`
+	Status       string `json:"status"`
+	BranchCount  int    `json:"branch_count"`
+	FileCount    int    `json:"file_count"`
+	SkippedCount int    `json:"skipped_count"`
+	ErrorCount   int    `json:"error_count"`
+	StartedAt    string `json:"started_at"`
+	FinishedAt   string `json:"finished_at"`
+}
+
+type aiDiagnosticsStep struct {
+	ID                  int64  `json:"id"`
+	RunID               int64  `json:"run_id"`
+	ParentStepID        int64  `json:"parent_step_id"`
+	AgentName           string `json:"agent_name"`
+	StepType            string `json:"step_type"`
+	Status              string `json:"status"`
+	ToolName            string `json:"tool_name"`
+	TaskClass           string `json:"task_class"`
+	Model               string `json:"model"`
+	ProviderName        string `json:"provider_name"`
+	ModelRouteReason    string `json:"model_route_reason"`
+	EscalatedFromStepID int64  `json:"escalated_from_step_id"`
+	TokenInput          int    `json:"token_input"`
+	TokenOutput         int    `json:"token_output"`
+	EstimatedCost       string `json:"estimated_cost"`
+	LatencyMS           int    `json:"latency_ms"`
+	ErrorMessage        string `json:"error_message"`
+	CreatedAt           string `json:"created_at"`
+	FinishedAt          string `json:"finished_at"`
+}
+
+type aiDiagnosticsRunQuery struct {
+	Limit         int
+	Cursor        string
+	Viewer        string
+	SessionID     int64
+	Status        string
+	Q             string
+	StartedAfter  string
+	StartedBefore string
+}
+
+type aiDiagnosticsRunCursor struct {
+	StartedAt string `json:"started_at"`
 	ID        int64  `json:"id"`
 }
 
@@ -2391,6 +2523,76 @@ func (s *Server) handleAccessAIHistory(w http.ResponseWriter, r *http.Request, p
 	writeError(w, errNotFound("not found"))
 }
 
+func (s *Server) handleAccessAIDiagnostics(w http.ResponseWriter, r *http.Request, payload accessTokenPayload, parts []string) {
+	if !payload.hasCapability(accessTokenCapabilityAIDiagnosticsRead) {
+		writeError(w, errForbidden("access token missing ai.diagnostics.read capability"))
+		return
+	}
+	if len(parts) == 1 && parts[0] == "data-sources" {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		resp, err := s.getAIDiagnosticsDataSources(r.Context(), AIQuestionScope{})
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	if len(parts) == 1 && parts[0] == "runs" {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var sessionID int64
+		if raw := strings.TrimSpace(r.URL.Query().Get("session_id")); raw != "" {
+			parsed, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || parsed <= 0 {
+				writeError(w, errBadRequest("invalid session_id"))
+				return
+			}
+			sessionID = parsed
+		}
+		resp, err := listAIDiagnosticsRuns(r.Context(), s.db, aiDiagnosticsRunQuery{
+			Limit:         cleanLimit(r.URL.Query().Get("limit"), 50, 200),
+			Cursor:        r.URL.Query().Get("cursor"),
+			Viewer:        payload.Scope.ViewerKey,
+			SessionID:     sessionID,
+			Status:        r.URL.Query().Get("status"),
+			Q:             r.URL.Query().Get("q"),
+			StartedAfter:  r.URL.Query().Get("started_after"),
+			StartedBefore: r.URL.Query().Get("started_before"),
+		})
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	if len(parts) == 2 && parts[0] == "runs" {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		runID, err := parseID(parts[1])
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		resp, err := s.getAIDiagnosticsRunDetail(r.Context(), runID, payload.Scope.ViewerKey)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	writeError(w, errNotFound("not found"))
+}
+
 func (s *Server) handleAIMessageStream(w http.ResponseWriter, r *http.Request, sessionID int64) {
 	var req aiAskRequest
 	if err := decodeBody(r.Body, &req); err != nil {
@@ -3125,6 +3327,411 @@ func decodeAIHistorySessionCursor(raw string) (aiHistorySessionCursor, error) {
 		return aiHistorySessionCursor{}, errBadRequest("invalid cursor")
 	}
 	return cursor, nil
+}
+
+func listAIDiagnosticsRuns(ctx context.Context, db *sql.DB, req aiDiagnosticsRunQuery) (aiDiagnosticsRunsResponse, error) {
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	query := `SELECT r.id, r.session_id, r.user_message_id, r.assistant_message_id, r.status,
+		r.current_state, r.intent, r.scope_json, r.retrieval_plan_json, r.service_candidate_count, r.evidence_count,
+		r.code_evidence_count, r.memory_count, r.unconfirmed_count, r.verification_status, r.verification_report_json,
+		r.checkpoint_json, r.index_snapshot_id, r.config_version, r.config_hash, r.model, r.provider_name,
+		r.provider_failover_json, r.model_route_json, r.escalation_count, r.estimated_cost_json, r.started_at,
+		r.finished_at, r.error_message,
+		s.id, s.title, s.viewer_key, s.scope_json, s.created_at, s.updated_at, s.archived_at,
+		COALESCE(um.id, 0), COALESCE(um.content, ''),
+		COALESCE(am.id, 0), COALESCE(am.status, '')
+		FROM ai_agent_runs r
+		JOIN ai_sessions s ON s.id = r.session_id
+		LEFT JOIN ai_messages um ON um.id = r.user_message_id
+		LEFT JOIN ai_messages am ON am.id = r.assistant_message_id
+		WHERE 1=1`
+	args := []any{}
+	if viewer := strings.TrimSpace(req.Viewer); viewer != "" {
+		query += ` AND s.viewer_key = ?`
+		args = append(args, viewer)
+	}
+	if req.SessionID > 0 {
+		query += ` AND r.session_id = ?`
+		args = append(args, req.SessionID)
+	}
+	if status := strings.TrimSpace(req.Status); status != "" {
+		query += ` AND r.status = ?`
+		args = append(args, status)
+	}
+	if q := strings.TrimSpace(req.Q); q != "" {
+		query += ` AND (s.title LIKE ? OR um.content LIKE ? OR r.error_message LIKE ?)`
+		like := "%" + q + "%"
+		args = append(args, like, like, like)
+	}
+	if startedAfter := strings.TrimSpace(req.StartedAfter); startedAfter != "" {
+		if _, err := time.Parse(timeLayout, startedAfter); err != nil {
+			return aiDiagnosticsRunsResponse{}, errBadRequest("started_after must be RFC3339")
+		}
+		query += ` AND r.started_at >= ?`
+		args = append(args, startedAfter)
+	}
+	if startedBefore := strings.TrimSpace(req.StartedBefore); startedBefore != "" {
+		if _, err := time.Parse(timeLayout, startedBefore); err != nil {
+			return aiDiagnosticsRunsResponse{}, errBadRequest("started_before must be RFC3339")
+		}
+		query += ` AND r.started_at <= ?`
+		args = append(args, startedBefore)
+	}
+	if cursorRaw := strings.TrimSpace(req.Cursor); cursorRaw != "" {
+		cursor, err := decodeAIDiagnosticsRunCursor(cursorRaw)
+		if err != nil {
+			return aiDiagnosticsRunsResponse{}, err
+		}
+		query += ` AND (r.started_at < ? OR (r.started_at = ? AND r.id < ?))`
+		args = append(args, cursor.StartedAt, cursor.StartedAt, cursor.ID)
+	}
+	query += ` ORDER BY r.started_at DESC, r.id DESC LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return aiDiagnosticsRunsResponse{}, err
+	}
+	defer rows.Close()
+	items := []aiDiagnosticsRunSummary{}
+	for rows.Next() {
+		item, err := scanAIDiagnosticsRunSummary(rows)
+		if err != nil {
+			return aiDiagnosticsRunsResponse{}, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return aiDiagnosticsRunsResponse{}, err
+	}
+	resp := aiDiagnosticsRunsResponse{Items: items}
+	if len(resp.Items) > limit {
+		last := resp.Items[limit-1]
+		resp.Items = resp.Items[:limit]
+		resp.NextCursor = encodeAIDiagnosticsRunCursor(aiDiagnosticsRunCursor{StartedAt: last.Run.StartedAt, ID: last.Run.ID})
+	}
+	return resp, nil
+}
+
+func scanAIDiagnosticsRunSummary(row repoScanner) (aiDiagnosticsRunSummary, error) {
+	var item aiDiagnosticsRunSummary
+	if err := row.Scan(&item.Run.ID, &item.Run.SessionID, &item.Run.UserMessageID, &item.Run.AssistantMessageID,
+		&item.Run.Status, &item.Run.CurrentState, &item.Run.Intent, &item.Run.ScopeJSON, &item.Run.RetrievalPlanJSON,
+		&item.Run.ServiceCandidateCount, &item.Run.EvidenceCount, &item.Run.CodeEvidenceCount, &item.Run.MemoryCount,
+		&item.Run.UnconfirmedCount, &item.Run.VerificationStatus, &item.Run.VerificationReportJSON,
+		&item.Run.CheckpointJSON, &item.Run.IndexSnapshotID, &item.Run.ConfigVersion, &item.Run.ConfigHash,
+		&item.Run.Model, &item.Run.ProviderName, &item.Run.ProviderFailoverJSON, &item.Run.ModelRouteJSON,
+		&item.Run.EscalationCount, &item.Run.EstimatedCostJSON, &item.Run.StartedAt, &item.Run.FinishedAt,
+		&item.Run.ErrorMessage, &item.Session.ID, &item.Session.Title, &item.Session.ViewerKey, &item.Session.ScopeJSON,
+		&item.Session.CreatedAt, &item.Session.UpdatedAt, &item.Session.ArchivedAt, &item.UserMessageID,
+		&item.UserQuestion, &item.AssistantMessageID, &item.AssistantStatus); err != nil {
+		return aiDiagnosticsRunSummary{}, err
+	}
+	item.UserQuestion = truncate(item.UserQuestion, 500)
+	item.Run.ErrorMessage = sanitizeProviderError(item.Run.ErrorMessage)
+	item.DurationMS = aiRunDurationMS(item.Run)
+	return item, nil
+}
+
+func encodeAIDiagnosticsRunCursor(cursor aiDiagnosticsRunCursor) string {
+	raw, err := json.Marshal(cursor)
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func decodeAIDiagnosticsRunCursor(raw string) (aiDiagnosticsRunCursor, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return aiDiagnosticsRunCursor{}, errBadRequest("invalid cursor")
+	}
+	var cursor aiDiagnosticsRunCursor
+	if err := json.Unmarshal(decoded, &cursor); err != nil || cursor.StartedAt == "" || cursor.ID <= 0 {
+		return aiDiagnosticsRunCursor{}, errBadRequest("invalid cursor")
+	}
+	if _, err := time.Parse(timeLayout, cursor.StartedAt); err != nil {
+		return aiDiagnosticsRunCursor{}, errBadRequest("invalid cursor")
+	}
+	return cursor, nil
+}
+
+func (s *Server) getAIDiagnosticsDataSources(ctx context.Context, scope AIQuestionScope) (aiDiagnosticsSourcesResponse, error) {
+	sources, err := s.buildAIDiagnosticsSources(ctx, scope)
+	if err != nil {
+		return aiDiagnosticsSourcesResponse{}, err
+	}
+	return aiDiagnosticsSourcesResponse{DataSources: sources}, nil
+}
+
+func (s *Server) buildAIDiagnosticsSources(ctx context.Context, scope AIQuestionScope) (aiDiagnosticsSources, error) {
+	scope = normalizeAIScope(scope)
+	active, err := ensureActiveAIConfig(ctx, s.db)
+	if err != nil {
+		return aiDiagnosticsSources{}, err
+	}
+	repos, err := listRepositories(ctx, s.db)
+	if err != nil {
+		return aiDiagnosticsSources{}, err
+	}
+	repos = filterAIRepos(repos, scope)
+	out := aiDiagnosticsSources{
+		Scope: scope,
+		Indexing: aiDiagnosticsIndexingSummary{
+			DefaultScanRoots: append([]string(nil), active.Config.Indexing.DefaultScanRoots...),
+			ExcludeGlobs:     append([]string(nil), active.Config.Indexing.ExcludeGlobs...),
+			MaxFileSize:      active.Config.Indexing.MaxFileSize,
+		},
+		Repositories: []aiDiagnosticsRepositorySource{},
+		CurrentFile:  scope.CurrentFile,
+	}
+	for _, repo := range repos {
+		if !repo.Enabled {
+			continue
+		}
+		source, err := s.aiDiagnosticsRepositorySource(ctx, repo, scope.SourceMode)
+		if err != nil {
+			return aiDiagnosticsSources{}, err
+		}
+		out.Repositories = append(out.Repositories, source)
+	}
+	return out, nil
+}
+
+func (s *Server) aiDiagnosticsRepositorySource(ctx context.Context, repo Repository, sourceMode string) (aiDiagnosticsRepositorySource, error) {
+	source := aiDiagnosticsRepositorySource{
+		ID:                    repo.ID,
+		Name:                  repo.Name,
+		Slug:                  repo.Slug,
+		Enabled:               repo.Enabled,
+		DefaultBranch:         repo.DefaultBranch,
+		TrackedBranches:       append([]string(nil), repo.TrackedBranches...),
+		LatestIncludeBranches: append([]string(nil), repo.LatestIncludeBranches...),
+		LatestExcludeBranches: append([]string(nil), repo.LatestExcludeBranches...),
+		StaleBranchDays:       repo.StaleBranchDays,
+		BranchPriority:        append([]string(nil), repo.BranchPriority...),
+		SyncIntervalSeconds:   repo.SyncIntervalSeconds,
+		MaxFileSizeBytes:      repo.MaxFileSizeBytes,
+		ScanPaths:             []aiDiagnosticsScanPath{},
+		CandidateTargets:      []aiDiagnosticsBranchTarget{},
+		LatestScan:            sanitizeAIDiagnosticsScanRun(repo.LatestScan),
+		CreatedAt:             repo.CreatedAt,
+		UpdatedAt:             repo.UpdatedAt,
+	}
+	for _, scanPath := range repo.ScanPaths {
+		if !scanPath.Enabled {
+			continue
+		}
+		source.ScanPaths = append(source.ScanPaths, aiDiagnosticsScanPath{
+			ID:           scanPath.ID,
+			Path:         scanPath.Path,
+			IncludeGlobs: append([]string(nil), scanPath.IncludeGlobs...),
+			ExcludeGlobs: append([]string(nil), scanPath.ExcludeGlobs...),
+			CreatedAt:    scanPath.CreatedAt,
+			UpdatedAt:    scanPath.UpdatedAt,
+		})
+	}
+	refs, err := listBranches(ctx, s.db, repo.ID)
+	if err != nil {
+		return aiDiagnosticsRepositorySource{}, err
+	}
+	defaultRef := pickDefaultAIRef(repo, refs)
+	if defaultRef != nil {
+		target := aiDiagnosticsBranchTarget{
+			Branch:        defaultRef.RefName,
+			CommitSHA:     defaultRef.CommitSHA,
+			CommitTime:    defaultRef.CommitTime,
+			LastScannedAt: defaultRef.LastScannedAt,
+			SourceScope:   "smart_latest",
+		}
+		source.DefaultTarget = &target
+	}
+	if strings.Contains(sourceMode, "branch") {
+		for _, ref := range refs {
+			if defaultRef != nil && ref.RefName == defaultRef.RefName {
+				continue
+			}
+			if !aiBranchCandidate(repo, ref) {
+				continue
+			}
+			source.CandidateTargets = append(source.CandidateTargets, aiDiagnosticsBranchTarget{
+				Branch:        ref.RefName,
+				CommitSHA:     ref.CommitSHA,
+				CommitTime:    ref.CommitTime,
+				LastScannedAt: ref.LastScannedAt,
+				SourceScope:   "branch_candidate",
+			})
+			if len(source.CandidateTargets) >= 4 {
+				break
+			}
+		}
+	}
+	return source, nil
+}
+
+func sanitizeAIDiagnosticsScanRun(run *ScanRun) *aiDiagnosticsScanRun {
+	if run == nil {
+		return nil
+	}
+	return &aiDiagnosticsScanRun{
+		ID:           run.ID,
+		TriggerType:  run.TriggerType,
+		Status:       run.Status,
+		BranchCount:  run.BranchCount,
+		FileCount:    run.FileCount,
+		SkippedCount: run.SkippedCount,
+		ErrorCount:   run.ErrorCount,
+		StartedAt:    run.StartedAt,
+		FinishedAt:   run.FinishedAt,
+	}
+}
+
+func (s *Server) getAIDiagnosticsRunDetail(ctx context.Context, runID int64, viewer string) (aiDiagnosticsRunDetailResponse, error) {
+	run, session, err := getAIDiagnosticsRunWithSession(ctx, s.db, runID, viewer)
+	if err != nil {
+		return aiDiagnosticsRunDetailResponse{}, err
+	}
+	userMessage, err := getAIMessage(ctx, s.db, run.UserMessageID)
+	if err != nil {
+		return aiDiagnosticsRunDetailResponse{}, err
+	}
+	var assistantMessage AIMessage
+	if run.AssistantMessageID > 0 {
+		assistantMessage, err = getAIMessage(ctx, s.db, run.AssistantMessageID)
+		if err != nil {
+			return aiDiagnosticsRunDetailResponse{}, err
+		}
+	}
+	steps, err := listAIRunSteps(ctx, s.db, run.ID)
+	if err != nil {
+		return aiDiagnosticsRunDetailResponse{}, err
+	}
+	candidates, err := listAIServiceCandidatesForRun(ctx, s.db, run.ID)
+	if err != nil {
+		return aiDiagnosticsRunDetailResponse{}, err
+	}
+	citations, err := listAICitationsForRun(ctx, s.db, run.ID)
+	if err != nil {
+		return aiDiagnosticsRunDetailResponse{}, err
+	}
+	dataSources, err := s.buildAIDiagnosticsSources(ctx, aiScopeFromJSON(run.ScopeJSON))
+	if err != nil {
+		return aiDiagnosticsRunDetailResponse{}, err
+	}
+	return aiDiagnosticsRunDetailResponse{
+		Session:           session,
+		UserMessage:       userMessage,
+		AssistantMessage:  assistantMessage,
+		Run:               run,
+		Steps:             sanitizeAIDiagnosticsSteps(steps),
+		DataSources:       dataSources,
+		ServiceCandidates: candidates,
+		Citations:         citations,
+	}, nil
+}
+
+func aiScopeFromJSON(raw string) AIQuestionScope {
+	var scope AIQuestionScope
+	_ = json.Unmarshal([]byte(raw), &scope)
+	return scope
+}
+
+func getAIDiagnosticsRunWithSession(ctx context.Context, db *sql.DB, runID int64, viewer string) (AIAgentRun, AISession, error) {
+	query := `SELECT r.id, r.session_id, r.user_message_id, r.assistant_message_id, r.status,
+		r.current_state, r.intent, r.scope_json, r.retrieval_plan_json, r.service_candidate_count, r.evidence_count,
+		r.code_evidence_count, r.memory_count, r.unconfirmed_count, r.verification_status, r.verification_report_json,
+		r.checkpoint_json, r.index_snapshot_id, r.config_version, r.config_hash, r.model, r.provider_name,
+		r.provider_failover_json, r.model_route_json, r.escalation_count, r.estimated_cost_json, r.started_at,
+		r.finished_at, r.error_message,
+		s.id, s.title, s.viewer_key, s.scope_json, s.created_at, s.updated_at, s.archived_at
+		FROM ai_agent_runs r
+		JOIN ai_sessions s ON s.id = r.session_id
+		WHERE r.id = ?`
+	args := []any{runID}
+	if viewer = strings.TrimSpace(viewer); viewer != "" {
+		query += ` AND s.viewer_key = ?`
+		args = append(args, viewer)
+	}
+	row := db.QueryRowContext(ctx, query, args...)
+	var run AIAgentRun
+	var session AISession
+	if err := row.Scan(&run.ID, &run.SessionID, &run.UserMessageID, &run.AssistantMessageID, &run.Status,
+		&run.CurrentState, &run.Intent, &run.ScopeJSON, &run.RetrievalPlanJSON, &run.ServiceCandidateCount,
+		&run.EvidenceCount, &run.CodeEvidenceCount, &run.MemoryCount, &run.UnconfirmedCount, &run.VerificationStatus,
+		&run.VerificationReportJSON, &run.CheckpointJSON, &run.IndexSnapshotID, &run.ConfigVersion, &run.ConfigHash,
+		&run.Model, &run.ProviderName, &run.ProviderFailoverJSON, &run.ModelRouteJSON, &run.EscalationCount,
+		&run.EstimatedCostJSON, &run.StartedAt, &run.FinishedAt, &run.ErrorMessage, &session.ID, &session.Title,
+		&session.ViewerKey, &session.ScopeJSON, &session.CreatedAt, &session.UpdatedAt, &session.ArchivedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return AIAgentRun{}, AISession{}, errNotFound("ai run not found")
+		}
+		return AIAgentRun{}, AISession{}, err
+	}
+	run.ErrorMessage = sanitizeProviderError(run.ErrorMessage)
+	return run, session, nil
+}
+
+func getAIMessage(ctx context.Context, db *sql.DB, id int64) (AIMessage, error) {
+	row := db.QueryRowContext(ctx, `SELECT id, session_id, role, content, model, provider_name, model_route_json,
+		prompt_tokens, completion_tokens, latency_ms, status, error_message, created_at
+		FROM ai_messages WHERE id = ?`, id)
+	msg, err := scanAIMessage(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return AIMessage{}, errNotFound("ai message not found")
+		}
+		return AIMessage{}, err
+	}
+	return msg, nil
+}
+
+func sanitizeAIDiagnosticsSteps(steps []AIAgentStep) []aiDiagnosticsStep {
+	out := make([]aiDiagnosticsStep, 0, len(steps))
+	for _, step := range steps {
+		out = append(out, aiDiagnosticsStep{
+			ID:                  step.ID,
+			RunID:               step.RunID,
+			ParentStepID:        step.ParentStepID,
+			AgentName:           step.AgentName,
+			StepType:            step.StepType,
+			Status:              step.Status,
+			ToolName:            step.ToolName,
+			TaskClass:           step.TaskClass,
+			Model:               step.Model,
+			ProviderName:        step.ProviderName,
+			ModelRouteReason:    step.ModelRouteReason,
+			EscalatedFromStepID: step.EscalatedFromStepID,
+			TokenInput:          step.TokenInput,
+			TokenOutput:         step.TokenOutput,
+			EstimatedCost:       step.EstimatedCost,
+			LatencyMS:           step.LatencyMS,
+			ErrorMessage:        sanitizeProviderError(step.ErrorMessage),
+			CreatedAt:           step.CreatedAt,
+			FinishedAt:          step.FinishedAt,
+		})
+	}
+	return out
+}
+
+func aiRunDurationMS(run AIAgentRun) int64 {
+	started, err := time.Parse(timeLayout, run.StartedAt)
+	if err != nil {
+		return 0
+	}
+	finishedAt := run.FinishedAt
+	if finishedAt == "" {
+		return 0
+	}
+	finished, err := time.Parse(timeLayout, finishedAt)
+	if err != nil || finished.Before(started) {
+		return 0
+	}
+	return finished.Sub(started).Milliseconds()
 }
 
 func createAISession(ctx context.Context, db *sql.DB, title, viewer string, scope AIQuestionScope) (AISession, error) {
@@ -4262,6 +4869,33 @@ func listAIServiceCandidatesForSession(ctx context.Context, db *sql.DB, sessionI
 	return candidates, rows.Err()
 }
 
+func listAIServiceCandidatesForRun(ctx context.Context, db *sql.DB, runID int64) ([]AIServiceCandidate, error) {
+	rows, err := db.QueryContext(ctx, `SELECT c.id, c.run_id, c.message_id, c.service_profile_id, c.repo_id,
+		COALESCE(r.name, ''), c.service_name, c.matched_terms, c.confidence, c.reason, c.score,
+		c.evidence_count, c.created_at
+		FROM ai_service_candidates c
+		LEFT JOIN repositories r ON r.id = c.repo_id
+		WHERE c.run_id = ?
+		ORDER BY c.score DESC, c.id`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	candidates := []AIServiceCandidate{}
+	for rows.Next() {
+		var candidate AIServiceCandidate
+		var matchedTerms string
+		if err := rows.Scan(&candidate.ID, &candidate.RunID, &candidate.MessageID, &candidate.ServiceProfileID,
+			&candidate.RepoID, &candidate.RepoName, &candidate.ServiceName, &matchedTerms, &candidate.Confidence,
+			&candidate.Reason, &candidate.Score, &candidate.EvidenceCount, &candidate.CreatedAt); err != nil {
+			return nil, err
+		}
+		candidate.MatchedTerms = decodeStringList(matchedTerms, nil)
+		candidates = append(candidates, candidate)
+	}
+	return candidates, rows.Err()
+}
+
 func insertAICitation(ctx context.Context, db *sql.DB, citation AIMessageCitation) (AIMessageCitation, error) {
 	if citation.CreatedAt == "" {
 		citation.CreatedAt = nowString()
@@ -4290,6 +4924,33 @@ func listAICitationsForSession(ctx context.Context, db *sql.DB, sessionID int64)
 		LEFT JOIN repositories r ON r.id = c.repo_id
 		WHERE m.session_id = ?
 		ORDER BY c.message_id DESC, c.score DESC, c.id`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	citations := []AIMessageCitation{}
+	for rows.Next() {
+		var citation AIMessageCitation
+		if err := rows.Scan(&citation.ID, &citation.MessageID, &citation.IndexSnapshotID, &citation.ChunkID,
+			&citation.APISymbolID, &citation.RepoID, &citation.RepoName, &citation.VersionID, &citation.SourceScope,
+			&citation.Branch, &citation.CommitSHA, &citation.FilePath, &citation.LineStart, &citation.LineEnd,
+			&citation.QuoteText, &citation.Score, &citation.CreatedAt); err != nil {
+			return nil, err
+		}
+		citations = append(citations, citation)
+	}
+	return citations, rows.Err()
+}
+
+func listAICitationsForRun(ctx context.Context, db *sql.DB, runID int64) ([]AIMessageCitation, error) {
+	rows, err := db.QueryContext(ctx, `SELECT c.id, c.message_id, c.index_snapshot_id, c.chunk_id,
+		c.api_symbol_id, c.repo_id, COALESCE(rp.name, ''), c.version_id, c.source_scope, c.branch,
+		c.commit_sha, c.file_path, c.line_start, c.line_end, c.quote_text, c.score, c.created_at
+		FROM ai_message_citations c
+		JOIN ai_agent_runs ar ON ar.assistant_message_id = c.message_id
+		LEFT JOIN repositories rp ON rp.id = c.repo_id
+		WHERE ar.id = ?
+		ORDER BY c.score DESC, c.id`, runID)
 	if err != nil {
 		return nil, err
 	}

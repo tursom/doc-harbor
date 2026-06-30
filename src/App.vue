@@ -741,6 +741,7 @@
                   能力
                   <select v-model="accessTokenForm.capabilities" multiple>
                     <option value="ai.history.read">AI 历史读取</option>
+                    <option value="ai.diagnostics.read">AI 问答排查</option>
                   </select>
                 </label>
                 <label>

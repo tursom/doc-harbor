@@ -519,6 +519,12 @@ func TestAccessTokenRejectsInvalidTTLAndBearer(t *testing.T) {
 			t.Fatalf("invalid capabilities status = %d, want %d; body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
 		}
 	}
+	diagnostics := doJSON(t, server, http.MethodPost, "/api/tokens", map[string]any{
+		"capabilities": []string{accessTokenCapabilityAIDiagnosticsRead},
+	})
+	if diagnostics.Code != http.StatusOK {
+		t.Fatalf("diagnostics capability status = %d, want %d; body=%s", diagnostics.Code, http.StatusOK, diagnostics.Body.String())
+	}
 	missing := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/history/sessions", "", nil)
 	if missing.Code != http.StatusUnauthorized {
 		t.Fatalf("missing token status = %d, want %d; body=%s", missing.Code, http.StatusUnauthorized, missing.Body.String())
@@ -637,6 +643,309 @@ func TestAccessTokenViewerScopeAndPaginationFilters(t *testing.T) {
 	}
 	if !strings.Contains(archivedOnly.Body.String(), `"title":"beta history"`) || strings.Contains(archivedOnly.Body.String(), `"title":"alpha history"`) {
 		t.Fatalf("archived filter not applied: %s", archivedOnly.Body.String())
+	}
+}
+
+func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	repo, err := createRepository(ctx, server.db, Repository{
+		Name:                  "doc-harbor",
+		Slug:                  "doc-harbor-diagnostics",
+		RepoURL:               "https://example.test/doc-harbor-diagnostics.git",
+		DefaultBranch:         "main",
+		TrackedBranches:       []string{"main", "release/*"},
+		LatestIncludeBranches: []string{"main", "release/*"},
+		LatestExcludeBranches: []string{"archive/*"},
+		BranchPriority:        []string{"main", "release/*"},
+		CredentialRef:         "repo-secret-ref",
+		Enabled:               true,
+		ScanPaths: []ScanPath{{
+			Path:         "docs",
+			IncludeGlobs: []string{"**/*.md"},
+			ExcludeGlobs: []string{"private/**"},
+			Enabled:      true,
+		}, {
+			Path:    "disabled",
+			Enabled: false,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create repo: %v", err)
+	}
+	if _, err := server.db.ExecContext(ctx, `UPDATE repo_scan_paths SET enabled = 0 WHERE repo_id = ? AND path = 'disabled'`, repo.ID); err != nil {
+		t.Fatalf("disable scan path: %v", err)
+	}
+	repo, err = getRepository(ctx, server.db, repo.ID)
+	if err != nil {
+		t.Fatalf("reload repo: %v", err)
+	}
+	secondaryRepo, err := createRepository(ctx, server.db, Repository{
+		Name:          "secondary",
+		Slug:          "secondary-diagnostics",
+		RepoURL:       "https://example.test/secondary-diagnostics.git",
+		DefaultBranch: "main",
+		Enabled:       true,
+	})
+	if err != nil {
+		t.Fatalf("create secondary repo: %v", err)
+	}
+	tx, err := server.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin refs tx: %v", err)
+	}
+	for _, ref := range []RepoRef{
+		{RepoID: repo.ID, RefType: "branch", RefName: "main", CommitSHA: "mainsha", CommitTime: time.Now().UTC().Add(-30 * time.Minute).Format(timeLayout), LastScannedAt: time.Now().UTC().Format(timeLayout)},
+		{RepoID: repo.ID, RefType: "branch", RefName: "release/v1", CommitSHA: "releasesha", CommitTime: time.Now().UTC().Add(-20 * time.Minute).Format(timeLayout), LastScannedAt: time.Now().UTC().Format(timeLayout)},
+		{RepoID: secondaryRepo.ID, RefType: "branch", RefName: "main", CommitSHA: "secondsha", CommitTime: time.Now().UTC().Add(-25 * time.Minute).Format(timeLayout), LastScannedAt: time.Now().UTC().Format(timeLayout)},
+	} {
+		if err := upsertRepoRef(ctx, tx, ref); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("insert ref: %v", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit refs: %v", err)
+	}
+	scanRun, err := createScanRun(ctx, server.db, repo.ID, "manual")
+	if err != nil {
+		t.Fatalf("create scan run: %v", err)
+	}
+	scanRun.Status = "success"
+	scanRun.BranchCount = 2
+	scanRun.FileCount = 10
+	scanRun.SkippedCount = 1
+	scanRun.ErrorCount = 0
+	scanRun.DetailJSON = `{"internal":"not exposed"}`
+	scanRun.ErrorMessage = "do not expose"
+	if err := finishScanRun(ctx, server.db, scanRun); err != nil {
+		t.Fatalf("finish scan run: %v", err)
+	}
+	alice, err := createAISession(ctx, server.db, "alpha diagnostic", "alice", AIQuestionScope{RepoMode: "global"})
+	if err != nil {
+		t.Fatalf("create alice session: %v", err)
+	}
+	bob, err := createAISession(ctx, server.db, "beta diagnostic", "bob", AIQuestionScope{RepoMode: "global"})
+	if err != nil {
+		t.Fatalf("create bob session: %v", err)
+	}
+	aliceUser, err := insertAIMessage(ctx, server.db, AIMessage{SessionID: alice.ID, Role: "user", Content: "为什么 alpha 调用失败"})
+	if err != nil {
+		t.Fatalf("insert alice user: %v", err)
+	}
+	aliceAssistant, err := insertAIMessage(ctx, server.db, AIMessage{
+		SessionID:        alice.ID,
+		Role:             "assistant",
+		Content:          "alpha answer",
+		Model:            "diag-model",
+		ProviderName:     "DiagProvider",
+		ModelRouteJSON:   `{"route":"diag"}`,
+		PromptTokens:     11,
+		CompletionTokens: 7,
+		LatencyMS:        123,
+	})
+	if err != nil {
+		t.Fatalf("insert alice assistant: %v", err)
+	}
+	bobUser, err := insertAIMessage(ctx, server.db, AIMessage{SessionID: bob.ID, Role: "user", Content: "beta question"})
+	if err != nil {
+		t.Fatalf("insert bob user: %v", err)
+	}
+	bobAssistant, err := insertAIMessage(ctx, server.db, AIMessage{SessionID: bob.ID, Role: "assistant", Content: "beta answer"})
+	if err != nil {
+		t.Fatalf("insert bob assistant: %v", err)
+	}
+	aliceStarted := time.Now().UTC().Add(-time.Hour).Format(timeLayout)
+	aliceFinished := time.Now().UTC().Add(-time.Hour + time.Minute).Format(timeLayout)
+	bobStarted := time.Now().UTC().Add(-2 * time.Hour).Format(timeLayout)
+	bobFinished := time.Now().UTC().Add(-2*time.Hour + time.Minute).Format(timeLayout)
+	aliceRunID := insertDiagnosticsRunForTest(t, server, alice.ID, aliceUser.ID, aliceAssistant.ID, "failed", aliceStarted, aliceFinished, AIQuestionScope{
+		RepoMode:   "selected",
+		RepoIDs:    []int64{repo.ID},
+		SourceMode: "smart_latest",
+		CurrentFile: &AICurrentFileScope{
+			RepoID:    repo.ID,
+			VersionID: 12,
+			Branch:    "main",
+			CommitSHA: "mainsha",
+			FilePath:  "docs/README.md",
+		},
+	})
+	bobRunID := insertDiagnosticsRunForTest(t, server, bob.ID, bobUser.ID, bobAssistant.ID, "succeeded", bobStarted, bobFinished)
+	if err := insertAIStep(ctx, server.db, AIAgentStep{
+		RunID:            aliceRunID,
+		AgentName:        "coordinator",
+		StepType:         "checkpoint",
+		Status:           "failed",
+		ToolName:         "retrieval",
+		TaskClass:        "standard",
+		Model:            "diag-model",
+		ProviderName:     "DiagProvider",
+		ModelRouteReason: "primary",
+		InputJSON:        `{"prompt":"secret prompt"}`,
+		OutputJSON:       `{"raw":"secret output"}`,
+		TokenInput:       11,
+		TokenOutput:      7,
+		EstimatedCost:    `{"usd":0.001}`,
+		LatencyMS:        123,
+		ErrorMessage:     "provider 500 sk-test-step-secret",
+		CreatedAt:        aliceStarted,
+		FinishedAt:       aliceFinished,
+	}); err != nil {
+		t.Fatalf("insert step: %v", err)
+	}
+	if _, err := insertAIServiceCandidate(ctx, server.db, AIServiceCandidate{
+		RunID:         aliceRunID,
+		MessageID:     aliceAssistant.ID,
+		RepoID:        repo.ID,
+		ServiceName:   "doc-harbor",
+		MatchedTerms:  []string{"alpha"},
+		Confidence:    "high",
+		Reason:        "matched alpha",
+		Score:         9,
+		EvidenceCount: 1,
+	}); err != nil {
+		t.Fatalf("insert candidate: %v", err)
+	}
+	if _, err := insertAICitation(ctx, server.db, AIMessageCitation{
+		MessageID:   aliceAssistant.ID,
+		RepoID:      repo.ID,
+		VersionID:   1,
+		SourceScope: "smart_latest",
+		Branch:      "main",
+		CommitSHA:   "abcdef",
+		FilePath:    "README.md",
+		LineStart:   1,
+		LineEnd:     2,
+		QuoteText:   "diagnostic quote",
+		Score:       8,
+	}); err != nil {
+		t.Fatalf("insert citation: %v", err)
+	}
+
+	diagnosticsToken := issueAccessTokenForTest(t, server, accessTokenScope{}, time.Hour, accessTokenCapabilityAIDiagnosticsRead)
+	list := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/diagnostics/runs?limit=1", diagnosticsToken, nil)
+	if list.Code != http.StatusOK {
+		t.Fatalf("diagnostics list status = %d, want %d; body=%s", list.Code, http.StatusOK, list.Body.String())
+	}
+	var firstPage aiDiagnosticsRunsResponse
+	if err := json.Unmarshal(list.Body.Bytes(), &firstPage); err != nil {
+		t.Fatalf("decode diagnostics list: %v", err)
+	}
+	if len(firstPage.Items) != 1 || firstPage.NextCursor == "" || firstPage.Items[0].Run.ID != aliceRunID || firstPage.Items[0].DurationMS != int64(time.Minute/time.Millisecond) {
+		t.Fatalf("diagnostics first page = %+v", firstPage)
+	}
+	second := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/diagnostics/runs?limit=1&cursor="+firstPage.NextCursor, diagnosticsToken, nil)
+	if second.Code != http.StatusOK {
+		t.Fatalf("diagnostics second page status = %d, want %d; body=%s", second.Code, http.StatusOK, second.Body.String())
+	}
+	if !strings.Contains(second.Body.String(), `"id":`+strconv.FormatInt(bobRunID, 10)) {
+		t.Fatalf("diagnostics second page missing bob run: %s", second.Body.String())
+	}
+	filtered := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/diagnostics/runs?status=failed&q=alpha&started_after="+url.QueryEscape(bobStarted)+"&started_before="+url.QueryEscape(aliceFinished), diagnosticsToken, nil)
+	if filtered.Code != http.StatusOK {
+		t.Fatalf("diagnostics filtered status = %d, want %d; body=%s", filtered.Code, http.StatusOK, filtered.Body.String())
+	}
+	if !strings.Contains(filtered.Body.String(), `"viewer_key":"alice"`) || strings.Contains(filtered.Body.String(), `"viewer_key":"bob"`) {
+		t.Fatalf("diagnostics filters not applied: %s", filtered.Body.String())
+	}
+	detail := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/diagnostics/runs/"+strconv.FormatInt(aliceRunID, 10), diagnosticsToken, nil)
+	if detail.Code != http.StatusOK {
+		t.Fatalf("diagnostics detail status = %d, want %d; body=%s", detail.Code, http.StatusOK, detail.Body.String())
+	}
+	body := detail.Body.String()
+	for _, required := range []string{`"user_message"`, `"assistant_message"`, `"steps"`, `"service_candidates"`, `"citations"`, `"model_route_json"`, `"provider_failover_json"`, "sk-[redacted]"} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("diagnostics detail missing %s: %s", required, body)
+		}
+	}
+	for _, forbidden := range []string{"input_json", "output_json", "secret prompt", "secret output", "api_key", "api_key_secret_id", "sk-test"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("diagnostics detail leaked %s: %s", forbidden, body)
+		}
+	}
+	var detailResp aiDiagnosticsRunDetailResponse
+	if err := json.Unmarshal(detail.Body.Bytes(), &detailResp); err != nil {
+		t.Fatalf("decode diagnostics detail: %v", err)
+	}
+	if len(detailResp.DataSources.Repositories) != 1 || detailResp.DataSources.Repositories[0].ID != repo.ID {
+		t.Fatalf("run data sources were not narrowed by scope: %+v", detailResp.DataSources.Repositories)
+	}
+	if detailResp.DataSources.CurrentFile == nil || detailResp.DataSources.CurrentFile.FilePath != "docs/README.md" {
+		t.Fatalf("run data sources missing current file: %+v", detailResp.DataSources.CurrentFile)
+	}
+	if len(detailResp.DataSources.Repositories[0].CandidateTargets) != 0 {
+		t.Fatalf("run data sources should not include branch candidates for smart_latest scope: %+v", detailResp.DataSources.Repositories[0].CandidateTargets)
+	}
+	dataSources := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/diagnostics/data-sources", diagnosticsToken, nil)
+	if dataSources.Code != http.StatusOK {
+		t.Fatalf("diagnostics data sources status = %d, want %d; body=%s", dataSources.Code, http.StatusOK, dataSources.Body.String())
+	}
+	var dataSourcesResp aiDiagnosticsSourcesResponse
+	if err := json.Unmarshal(dataSources.Body.Bytes(), &dataSourcesResp); err != nil {
+		t.Fatalf("decode diagnostics data sources: %v", err)
+	}
+	if len(dataSourcesResp.DataSources.Repositories) != 2 {
+		t.Fatalf("data sources repo count = %d, want 2: %+v", len(dataSourcesResp.DataSources.Repositories), dataSourcesResp.DataSources.Repositories)
+	}
+	var primarySource aiDiagnosticsRepositorySource
+	for _, source := range dataSourcesResp.DataSources.Repositories {
+		if source.ID == repo.ID {
+			primarySource = source
+			break
+		}
+	}
+	if primarySource.ID == 0 {
+		t.Fatalf("data sources missing primary repo: %+v", dataSourcesResp.DataSources.Repositories)
+	}
+	if len(primarySource.ScanPaths) != 1 || primarySource.ScanPaths[0].Path != "docs" {
+		t.Fatalf("data sources scan paths = %+v, want only enabled docs path", primarySource.ScanPaths)
+	}
+	if primarySource.DefaultTarget == nil || primarySource.DefaultTarget.Branch != "main" {
+		t.Fatalf("data sources default target = %+v, want main", primarySource.DefaultTarget)
+	}
+	if len(primarySource.CandidateTargets) != 1 || primarySource.CandidateTargets[0].Branch != "release/v1" {
+		t.Fatalf("data sources candidate targets = %+v, want release/v1", primarySource.CandidateTargets)
+	}
+	if primarySource.LatestScan == nil || primarySource.LatestScan.FileCount != 10 {
+		t.Fatalf("data sources latest scan = %+v, want file_count 10", primarySource.LatestScan)
+	}
+	if dataSourcesResp.DataSources.Indexing.MaxFileSize <= 0 {
+		t.Fatalf("data sources missing indexing summary: %+v", dataSourcesResp.DataSources.Indexing)
+	}
+	for _, forbidden := range []string{"repo_url", "credential_ref", "repo-secret-ref", "api_key", "secret", "input_json", "output_json", "detail_json", "do not expose"} {
+		if strings.Contains(dataSources.Body.String(), forbidden) {
+			t.Fatalf("diagnostics data sources leaked %s: %s", forbidden, dataSources.Body.String())
+		}
+	}
+	historyToken := issueAccessTokenForTest(t, server, accessTokenScope{}, time.Hour, accessTokenCapabilityAIHistoryRead)
+	forbidden := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/diagnostics/runs", historyToken, nil)
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("history token diagnostics status = %d, want %d; body=%s", forbidden.Code, http.StatusForbidden, forbidden.Body.String())
+	}
+	forbiddenDataSources := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/diagnostics/data-sources", historyToken, nil)
+	if forbiddenDataSources.Code != http.StatusForbidden {
+		t.Fatalf("history token data sources status = %d, want %d; body=%s", forbiddenDataSources.Code, http.StatusForbidden, forbiddenDataSources.Body.String())
+	}
+	scopedToken := issueAccessTokenForTest(t, server, accessTokenScope{ViewerKey: "alice"}, time.Hour, accessTokenCapabilityAIDiagnosticsRead)
+	scopedList := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/diagnostics/runs", scopedToken, nil)
+	if scopedList.Code != http.StatusOK {
+		t.Fatalf("scoped diagnostics status = %d, want %d; body=%s", scopedList.Code, http.StatusOK, scopedList.Body.String())
+	}
+	if !strings.Contains(scopedList.Body.String(), `"viewer_key":"alice"`) || strings.Contains(scopedList.Body.String(), `"viewer_key":"bob"`) {
+		t.Fatalf("diagnostics viewer scope not enforced: %s", scopedList.Body.String())
+	}
+	bobDetail := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/diagnostics/runs/"+strconv.FormatInt(bobRunID, 10), scopedToken, nil)
+	if bobDetail.Code != http.StatusNotFound {
+		t.Fatalf("scoped diagnostics detail status = %d, want %d; body=%s", bobDetail.Code, http.StatusNotFound, bobDetail.Body.String())
+	}
+	missing := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/diagnostics/runs", "", nil)
+	if missing.Code != http.StatusUnauthorized {
+		t.Fatalf("missing diagnostics token status = %d, want %d; body=%s", missing.Code, http.StatusUnauthorized, missing.Body.String())
+	}
+	missingDataSources := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/diagnostics/data-sources", "", nil)
+	if missingDataSources.Code != http.StatusUnauthorized {
+		t.Fatalf("missing data sources token status = %d, want %d; body=%s", missingDataSources.Code, http.StatusUnauthorized, missingDataSources.Body.String())
 	}
 }
 
@@ -1230,13 +1539,16 @@ func doAuthorizedJSON(t *testing.T, server *Server, method, path, bearer string,
 	return recorder
 }
 
-func issueAccessTokenForTest(t *testing.T, server *Server, scope accessTokenScope, ttl time.Duration) string {
+func issueAccessTokenForTest(t *testing.T, server *Server, scope accessTokenScope, ttl time.Duration, capabilities ...string) string {
 	t.Helper()
 	now := time.Now().UTC()
+	if len(capabilities) == 0 {
+		capabilities = []string{accessTokenCapabilityAIHistoryRead}
+	}
 	token, err := server.signAccessToken(accessTokenPayload{
 		IssuedAt:     now.Unix(),
 		ExpiresAt:    now.Add(ttl).Unix(),
-		Capabilities: []string{accessTokenCapabilityAIHistoryRead},
+		Capabilities: capabilities,
 		Scope:        scope,
 		JTI:          "test-token",
 	})
@@ -1244,6 +1556,33 @@ func issueAccessTokenForTest(t *testing.T, server *Server, scope accessTokenScop
 		t.Fatalf("sign access token: %v", err)
 	}
 	return token
+}
+
+func insertDiagnosticsRunForTest(t *testing.T, server *Server, sessionID, userMessageID, assistantMessageID int64, status, startedAt, finishedAt string, scopes ...AIQuestionScope) int64 {
+	t.Helper()
+	scopeJSON := "{}"
+	if len(scopes) > 0 {
+		scopeJSON = encodeJSON(normalizeAIScope(scopes[0]))
+	}
+	res, err := server.db.ExecContext(context.Background(), `INSERT INTO ai_agent_runs
+		(session_id, user_message_id, assistant_message_id, status, current_state, intent, scope_json,
+		 retrieval_plan_json, service_candidate_count, evidence_count, code_evidence_count, verification_status,
+		 verification_report_json, checkpoint_json, index_snapshot_id, config_version, config_hash, model,
+		 provider_name, provider_failover_json, model_route_json, escalation_count, estimated_cost_json,
+		 started_at, finished_at, error_message)
+		VALUES (?, ?, ?, ?, 'verify_answer', 'diagnostic', ?, '{"plan":"diag"}', 1, 1, 1, 'fail',
+		 '{"ok":false}', '{"checkpoint":"diag"}', 7, 3, 'diag-hash', 'diag-model', 'DiagProvider',
+		 '{"attempts":[{"provider":"DiagProvider","status":"failed"}]}', '{"route":"diag"}', 1,
+		 '{"usd":0.001}', ?, ?, 'diagnostic failure')`,
+		sessionID, userMessageID, assistantMessageID, status, scopeJSON, startedAt, finishedAt)
+	if err != nil {
+		t.Fatalf("insert diagnostics run: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("diagnostics run id: %v", err)
+	}
+	return id
 }
 
 func countAISecrets(t *testing.T, server *Server) int {
