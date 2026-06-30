@@ -490,6 +490,74 @@ export interface AIDiagnosticsDataSources {
   current_file?: AIQuestionScope['current_file']
 }
 
+export interface AIDiagnosticsStep {
+  id: number
+  run_id: number
+  parent_step_id: number
+  agent_name: string
+  step_type: string
+  status: string
+  tool_name: string
+  task_class: string
+  model: string
+  provider_name: string
+  model_route_reason: string
+  escalated_from_step_id: number
+  token_input: number
+  token_output: number
+  estimated_cost: string
+  latency_ms: number
+  error_message: string
+  input?: unknown
+  output?: unknown
+  summary?: Record<string, unknown>
+  created_at: string
+  finished_at: string
+}
+
+export interface AIDiagnosticsRunSummary {
+  run: AIAgentRun
+  session: AISession
+  user_message_id: number
+  user_question: string
+  assistant_message_id: number
+  assistant_status: string
+  duration_ms: number
+}
+
+export interface AIDiagnosticsRunsResponse {
+  items: AIDiagnosticsRunSummary[]
+  next_cursor?: string
+}
+
+export interface AIDiagnosticsAgentWorkflow {
+  agent_workflow_version?: string
+  agent_workflow_mode?: string
+  answer_mode?: string
+  task_class?: string
+  task_frame?: AITaskFrame
+  evidence_contract?: AIEvidenceContractSummary
+  retrieval_rounds?: AIRetrievalRoundPlan[]
+  evidence_bundle?: AIEvidenceBundleSummary
+  contract_coverage?: AIContractCoverageReport
+  verification_report?: AIAnswerVerificationReport
+}
+
+export interface AIDiagnosticsRunDetailResponse {
+  session: AISession
+  user_message: AIMessage
+  assistant_message: AIMessage
+  run: AIAgentRun
+  task_frame?: AITaskFrame
+  evidence_contract?: AIEvidenceContractSummary
+  contract_coverage?: AIContractCoverageReport
+  agent_workflow?: AIDiagnosticsAgentWorkflow
+  steps: AIDiagnosticsStep[]
+  data_sources: AIDiagnosticsDataSources
+  service_candidates: AIServiceCandidate[]
+  citations: AIMessageCitation[]
+}
+
 export interface AIQuestionResult {
   run: AIAgentRun
   message: AIMessage
@@ -543,6 +611,59 @@ export interface AIEvidenceContractSummary {
   forbidden?: string[]
 }
 
+export interface AIEvidenceBundleSummary {
+  bundle_id?: string
+  coverage: Record<string, string>
+  group_count: number
+  excluded_count?: number
+}
+
+export interface AIContractCoverageItem {
+  key: string
+  requirement: string
+  status: string
+  evidence_ids: number[]
+  reason: string
+  missing_detail: string
+  confidence: number
+}
+
+export interface AIContractCoverageReport {
+  contract_id?: string
+  status: string
+  coverage?: Record<string, string>
+  items?: AIContractCoverageItem[]
+  covered?: string[]
+  partial?: string[]
+  missing_required: string[]
+  missing_recommended?: string[]
+  forbidden_matched?: string[]
+  unconfirmed_count?: number
+  next_action: string
+  details?: Record<string, string>
+}
+
+export interface AIRetrievalRoundSearch {
+  tool: string
+  query: string
+  file_types?: string[]
+  path_hints?: string[]
+  terms?: string[]
+}
+
+export interface AIRetrievalRoundPlan {
+  round: number
+  intent?: string
+  reason: string
+  missing_contract_keys?: string[]
+  searches: AIRetrievalRoundSearch[]
+  query_source?: string
+  planner_status?: string
+  new_evidence_count: number
+  coverage_delta: Record<string, string>
+  next_action?: string
+}
+
 export interface AIAnswerVerificationReport {
   agent_workflow_version?: string
   answer_mode?: string
@@ -561,6 +682,8 @@ export type AIStreamEvent =
   | { type: 'run_started'; run: AIAgentRun; assistant_message: AIMessage }
   | { type: 'task_frame'; task_frame: AITaskFrame }
   | { type: 'contract'; contract: AIEvidenceContractSummary }
+  | { type: 'retrieval_round'; round: AIRetrievalRoundPlan }
+  | { type: 'coverage'; coverage: AIContractCoverageReport; evidence_bundle?: AIEvidenceBundleSummary }
   | AIStreamStageEvent
   | { type: 'service_candidates'; items: AIServiceCandidate[] }
   | { type: 'citations'; items: AIMessageCitation[] }

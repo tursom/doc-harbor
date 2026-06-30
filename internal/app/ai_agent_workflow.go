@@ -52,6 +52,8 @@ func newAIAgentWorkflowPolicy(version string) aiAgentWorkflowPolicy {
 			"run_started",
 			"task_frame",
 			"contract",
+			"retrieval_round",
+			"coverage",
 			"stage",
 			"provider_attempt",
 			"verification",

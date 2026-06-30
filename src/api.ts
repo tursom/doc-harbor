@@ -2,6 +2,8 @@ import type {
   AIMessage,
   AIMessageCitation,
   AccessTokenResponse,
+  AIDiagnosticsRunDetailResponse,
+  AIDiagnosticsRunsResponse,
   AIProviderTestResult,
   AIQuestionResult,
   AIQuestionScope,
@@ -205,6 +207,17 @@ export const api = {
     return request<AccessTokenResponse>('/api/tokens', {
       method: 'POST',
       body: JSON.stringify(payload)
+    })
+  },
+  async aiDiagnosticsRuns(token: string, params: Record<string, string> = {}) {
+    const query = new URLSearchParams(params)
+    return request<AIDiagnosticsRunsResponse>(`/api/access/ai/diagnostics/runs${query.toString() ? `?${query}` : ''}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+  },
+  async aiDiagnosticsRun(token: string, runID: number) {
+    return request<AIDiagnosticsRunDetailResponse>(`/api/access/ai/diagnostics/runs/${runID}`, {
+      headers: { Authorization: `Bearer ${token}` }
     })
   },
   async aiSessions(params: Record<string, string> = {}) {

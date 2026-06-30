@@ -244,6 +244,7 @@ type aiDiagnosticsRunDetailResponse struct {
 	TaskFrame         any                  `json:"task_frame,omitempty"`
 	EvidenceContract  any                  `json:"evidence_contract,omitempty"`
 	ContractCoverage  any                  `json:"contract_coverage,omitempty"`
+	AgentWorkflow     any                  `json:"agent_workflow,omitempty"`
 	Steps             []aiDiagnosticsStep  `json:"steps"`
 	DataSources       aiDiagnosticsSources `json:"data_sources"`
 	ServiceCandidates []AIServiceCandidate `json:"service_candidates"`
@@ -335,6 +336,8 @@ type aiDiagnosticsStep struct {
 	EstimatedCost       string         `json:"estimated_cost"`
 	LatencyMS           int            `json:"latency_ms"`
 	ErrorMessage        string         `json:"error_message"`
+	Input               any            `json:"input,omitempty"`
+	Output              any            `json:"output,omitempty"`
 	Summary             map[string]any `json:"summary,omitempty"`
 	CreatedAt           string         `json:"created_at"`
 	FinishedAt          string         `json:"finished_at"`
@@ -3459,7 +3462,8 @@ func scanAIDiagnosticsRunSummary(row repoScanner) (aiDiagnosticsRunSummary, erro
 		&item.UserQuestion, &item.AssistantMessageID, &item.AssistantStatus); err != nil {
 		return aiDiagnosticsRunSummary{}, err
 	}
-	item.UserQuestion = truncate(item.UserQuestion, 500)
+	item.Session = sanitizeAIDiagnosticsSession(item.Session)
+	item.UserQuestion = sanitizeAIDiagnosticsSummaryString(item.UserQuestion)
 	item.Run = sanitizeAIDiagnosticsRun(item.Run)
 	item.DurationMS = aiRunDurationMS(item.Run)
 	return item, nil
@@ -3652,13 +3656,14 @@ func (s *Server) getAIDiagnosticsRunDetail(ctx context.Context, runID int64, vie
 		return aiDiagnosticsRunDetailResponse{}, err
 	}
 	return aiDiagnosticsRunDetailResponse{
-		Session:           session,
-		UserMessage:       userMessage,
-		AssistantMessage:  assistantMessage,
+		Session:           sanitizeAIDiagnosticsSession(session),
+		UserMessage:       sanitizeAIDiagnosticsMessage(userMessage),
+		AssistantMessage:  sanitizeAIDiagnosticsMessage(assistantMessage),
 		Run:               run,
 		TaskFrame:         taskFrame,
 		EvidenceContract:  evidenceContract,
 		ContractCoverage:  contractCoverage,
+		AgentWorkflow:     buildAIDiagnosticsAgentWorkflow(run, steps, taskFrame, evidenceContract, contractCoverage),
 		Steps:             sanitizeAIDiagnosticsSteps(steps),
 		DataSources:       dataSources,
 		ServiceCandidates: candidates,
@@ -3742,6 +3747,8 @@ func sanitizeAIDiagnosticsSteps(steps []AIAgentStep) []aiDiagnosticsStep {
 			EstimatedCost:       step.EstimatedCost,
 			LatencyMS:           step.LatencyMS,
 			ErrorMessage:        sanitizeProviderError(step.ErrorMessage),
+			Input:               sanitizeAIDiagnosticsStepPayload(step.InputJSON),
+			Output:              sanitizeAIDiagnosticsStepPayload(step.OutputJSON),
 			Summary:             sanitizeAIDiagnosticsStepSummary(step),
 			CreatedAt:           step.CreatedAt,
 			FinishedAt:          step.FinishedAt,
@@ -3751,6 +3758,7 @@ func sanitizeAIDiagnosticsSteps(steps []AIAgentStep) []aiDiagnosticsStep {
 }
 
 func sanitizeAIDiagnosticsRun(run AIAgentRun) AIAgentRun {
+	run.ScopeJSON = sanitizeAIDiagnosticsJSONText(run.ScopeJSON, false)
 	run.ErrorMessage = sanitizeProviderError(run.ErrorMessage)
 	run.RetrievalPlanJSON = sanitizeAIDiagnosticsJSONText(run.RetrievalPlanJSON, false)
 	run.VerificationReportJSON = sanitizeAIDiagnosticsJSONText(run.VerificationReportJSON, false)
@@ -3759,6 +3767,19 @@ func sanitizeAIDiagnosticsRun(run AIAgentRun) AIAgentRun {
 	run.ModelRouteJSON = sanitizeAIDiagnosticsJSONText(run.ModelRouteJSON, false)
 	run.EstimatedCostJSON = sanitizeAIDiagnosticsJSONText(run.EstimatedCostJSON, false)
 	return run
+}
+
+func sanitizeAIDiagnosticsSession(session AISession) AISession {
+	session.Title = sanitizeAIDiagnosticsSummaryString(session.Title)
+	session.ScopeJSON = sanitizeAIDiagnosticsJSONText(session.ScopeJSON, false)
+	return session
+}
+
+func sanitizeAIDiagnosticsMessage(message AIMessage) AIMessage {
+	message.Content = sanitizeAIDiagnosticsSummaryString(message.Content)
+	message.ModelRouteJSON = sanitizeAIDiagnosticsJSONText(message.ModelRouteJSON, false)
+	message.ErrorMessage = sanitizeProviderError(message.ErrorMessage)
+	return message
 }
 
 func sanitizeAIDiagnosticsJSONText(raw string, checkpoint bool) string {
@@ -3791,6 +3812,11 @@ func sanitizeAIDiagnosticsStepSummary(step AIAgentStep) map[string]any {
 			return summary
 		}
 	}
+	if step.AgentName == "answer_verifier" {
+		if summary := sanitizeAIDiagnosticsAnswerVerifierSummary(step.OutputJSON); len(summary) > 0 {
+			return summary
+		}
+	}
 
 	summary := map[string]any{}
 	if inputSummary, ok := extractAIDiagnosticsExplicitSummary(step.InputJSON); ok {
@@ -3803,6 +3829,60 @@ func sanitizeAIDiagnosticsStepSummary(step AIAgentStep) map[string]any {
 		return nil
 	}
 	return summary
+}
+
+func sanitizeAIDiagnosticsStepPayload(raw string) any {
+	payload, ok := decodeAIDiagnosticsSummaryJSON(raw)
+	if !ok {
+		if sanitized := sanitizeAIDiagnosticsSummaryString(raw); sanitized != "" {
+			return sanitized
+		}
+		return nil
+	}
+	return sanitizeAIDiagnosticsSummaryValue(payload, 0)
+}
+
+func buildAIDiagnosticsAgentWorkflow(run AIAgentRun, steps []AIAgentStep, taskFrame, evidenceContract, contractCoverage any) any {
+	workflow := map[string]any{}
+	if fields, ok := decodeAIDiagnosticsSummaryJSON(run.CheckpointJSON); ok {
+		if checkpoint, ok := fields.(map[string]any); ok {
+			for _, key := range []string{"agent_workflow_version", "agent_workflow_mode", "answer_mode", "task_class"} {
+				if value, exists := checkpoint[key]; exists {
+					workflow[key] = sanitizeAIDiagnosticsArtifact(value)
+				}
+			}
+			if value, exists := checkpoint["evidence_bundle"]; exists {
+				workflow["evidence_bundle"] = sanitizeAIDiagnosticsArtifact(summarizeAIDiagnosticsEvidenceBundleArtifact(value))
+			}
+		}
+	}
+	if _, exists := workflow["agent_workflow_version"]; !exists {
+		workflow["agent_workflow_version"] = aiAgentWorkflowVersionV2Shadow
+	}
+	if aiDiagnosticsArtifactPresent(taskFrame) {
+		workflow["task_frame"] = taskFrame
+	}
+	if aiDiagnosticsArtifactPresent(evidenceContract) {
+		workflow["evidence_contract"] = evidenceContract
+	}
+	if aiDiagnosticsArtifactPresent(contractCoverage) {
+		workflow["contract_coverage"] = contractCoverage
+	}
+	if rounds := extractAIDiagnosticsRetrievalRounds(run, steps); len(rounds) > 0 {
+		workflow["retrieval_rounds"] = rounds
+	}
+	if _, exists := workflow["evidence_bundle"]; !exists {
+		if bundle := extractAIDiagnosticsEvidenceBundle(steps); aiDiagnosticsArtifactPresent(bundle) {
+			workflow["evidence_bundle"] = bundle
+		}
+	}
+	if report := extractAIDiagnosticsVerificationReport(run, steps); aiDiagnosticsArtifactPresent(report) {
+		workflow["verification_report"] = report
+	}
+	if len(workflow) == 0 {
+		return nil
+	}
+	return sanitizeAIDiagnosticsArtifact(workflow)
 }
 
 func extractAIDiagnosticsRunArtifacts(run AIAgentRun, steps []AIAgentStep) (any, any, any) {
@@ -3966,6 +4046,109 @@ func sanitizeAIDiagnosticsEvidenceCuratorSummary(raw string) map[string]any {
 	return summary
 }
 
+func sanitizeAIDiagnosticsAnswerVerifierSummary(raw string) map[string]any {
+	payload, ok := decodeAIDiagnosticsSummaryJSON(raw)
+	if !ok {
+		return nil
+	}
+	fields, ok := payload.(map[string]any)
+	if !ok {
+		return nil
+	}
+	summary := map[string]any{}
+	for _, key := range []string{"verification_report", "report", "summary"} {
+		if value, exists := fields[key]; exists {
+			summary[key] = sanitizeAIDiagnosticsSummaryValue(value, 0)
+		}
+	}
+	if len(summary) == 0 {
+		return nil
+	}
+	return summary
+}
+
+func extractAIDiagnosticsRetrievalRounds(run AIAgentRun, steps []AIAgentStep) []any {
+	rounds := []any{}
+	for _, step := range steps {
+		if step.StepType != "retrieval_round" {
+			continue
+		}
+		if summary, ok := extractAIDiagnosticsExplicitSummary(step.OutputJSON); ok {
+			rounds = append(rounds, summary)
+		}
+	}
+	if len(rounds) > 0 {
+		return rounds
+	}
+	payload, ok := decodeAIDiagnosticsSummaryJSON(run.RetrievalPlanJSON)
+	if !ok {
+		return nil
+	}
+	fields, ok := payload.(map[string]any)
+	if !ok {
+		return nil
+	}
+	if value, exists := fields["retrieval_rounds"]; exists {
+		if sanitized, ok := sanitizeAIDiagnosticsSummaryValue(value, 0).([]any); ok {
+			return sanitized
+		}
+	}
+	return nil
+}
+
+func extractAIDiagnosticsEvidenceBundle(steps []AIAgentStep) any {
+	for _, step := range steps {
+		if step.AgentName != "evidence_curator" {
+			continue
+		}
+		summary := sanitizeAIDiagnosticsEvidenceCuratorSummary(step.OutputJSON)
+		if bundle, exists := summary["evidence_bundle"]; exists {
+			return summarizeAIDiagnosticsEvidenceBundleArtifact(bundle)
+		}
+	}
+	return nil
+}
+
+func extractAIDiagnosticsVerificationReport(run AIAgentRun, steps []AIAgentStep) any {
+	for _, step := range steps {
+		if step.AgentName != "answer_verifier" {
+			continue
+		}
+		summary := sanitizeAIDiagnosticsAnswerVerifierSummary(step.OutputJSON)
+		if report, exists := summary["verification_report"]; exists {
+			return report
+		}
+	}
+	payload, ok := decodeAIDiagnosticsSummaryJSON(run.VerificationReportJSON)
+	if !ok {
+		return nil
+	}
+	return sanitizeAIDiagnosticsSummaryValue(payload, 0)
+}
+
+func summarizeAIDiagnosticsEvidenceBundleArtifact(value any) any {
+	fields, ok := value.(map[string]any)
+	if !ok {
+		return value
+	}
+	summary := map[string]any{}
+	for _, key := range []string{"bundle_id", "coverage", "group_count", "excluded_count"} {
+		if nested, exists := fields[key]; exists {
+			summary[key] = nested
+		}
+	}
+	if groups, ok := fields["groups"].([]any); ok {
+		summary["group_count"] = len(groups)
+	}
+	if excluded, ok := fields["excluded"].([]any); ok {
+		summary["excluded_count"] = len(excluded)
+	}
+	if len(summary) == 0 {
+		return value
+	}
+	return summary
+}
+
 func extractAIDiagnosticsExplicitSummary(raw string) (any, bool) {
 	payload, ok := decodeAIDiagnosticsSummaryJSON(raw)
 	if !ok {
@@ -4084,6 +4267,7 @@ func sanitizeAIDiagnosticsSummaryString(value string) string {
 		diagnosticsSummaryAuthHeaderPattern,
 		diagnosticsSummaryBearerPattern,
 		diagnosticsSummarySensitiveKVPattern,
+		diagnosticsSummaryAPIKeyWordPattern,
 		diagnosticsSummarySecretPhrasePattern,
 		diagnosticsSummaryJWTPattern,
 		secretTokenPattern,
@@ -4657,6 +4841,11 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 			return err
 		}
 	}
+	for _, round := range retrieval.Rounds {
+		if err := emit("retrieval_round", map[string]any{"round": round}); err != nil {
+			return err
+		}
+	}
 	if err := insertAIStep(ctx, s.db, AIAgentStep{
 		RunID:      run.ID,
 		AgentName:  "retrieval",
@@ -4691,6 +4880,14 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 		checkpoint = buildAIAgentRunCheckpoint(scope, active.Config.Chat.Routing.DefaultTaskClass, prepared)
 		checkpointJSON = encodeJSON(checkpoint)
 		run.CheckpointJSON = checkpointJSON
+	}
+	if contractCoverage != nil {
+		if err := emit("coverage", map[string]any{
+			"coverage":        summarizeAIContractCoverageReport(*contractCoverage),
+			"evidence_bundle": summarizeAIRetrievalBundle(retrieval.EvidenceBundle),
+		}); err != nil {
+			return err
+		}
 	}
 	composer := prepareAIAnswerComposer(question, &retrieval)
 	prepared.AnswerPolicy = &composer.Policy
@@ -7164,6 +7361,7 @@ var (
 	whitespacePattern                     = regexp.MustCompile(`\s+`)
 	diagnosticsSummaryAuthHeaderPattern   = regexp.MustCompile(`(?i)\bauthorization\s*[:=]\s*["']?(?:(?:bearer|basic|token)\s+)?[A-Za-z0-9._~+/=:-]+`)
 	diagnosticsSummaryBearerPattern       = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`)
+	diagnosticsSummaryAPIKeyWordPattern   = regexp.MustCompile(`(?i)api[\s_-]*key`)
 	diagnosticsSummarySensitiveKVPattern  = regexp.MustCompile(`(?i)\b(?:api[\s_-]*key|secret|access[\s_-]*token|refresh[\s_-]*token|id[\s_-]*token|auth[\s_-]*token|token)\s*[:=]\s*["']?[^"',\s}]+`)
 	diagnosticsSummarySecretPhrasePattern = regexp.MustCompile(`(?i)\bsecret\s+[A-Za-z0-9._~+/=-]+`)
 	diagnosticsSummaryJWTPattern          = regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`)
@@ -7174,6 +7372,7 @@ func sanitizeProviderError(message string) string {
 		diagnosticsSummaryAuthHeaderPattern,
 		diagnosticsSummaryBearerPattern,
 		diagnosticsSummarySensitiveKVPattern,
+		diagnosticsSummaryAPIKeyWordPattern,
 		diagnosticsSummarySecretPhrasePattern,
 		diagnosticsSummaryJWTPattern,
 	} {

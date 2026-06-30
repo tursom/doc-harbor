@@ -25,6 +25,10 @@
           <SlidersHorizontal :size="16" />
           AI 配置
         </button>
+        <button :class="{ active: tab === 'ai-diagnostics' }" type="button" @click="switchTab('ai-diagnostics')">
+          <Activity :size="16" />
+          AI 诊断
+        </button>
         <button :class="{ active: tab === 'settings' }" type="button" @click="switchTab('settings')">
           <Settings :size="16" />
           系统设置
@@ -718,6 +722,169 @@
           </section>
         </section>
 
+        <section v-if="tab === 'ai-diagnostics'" class="ai-diagnostics-panel">
+          <div class="ai-config-head">
+            <div>
+              <h3>AI 诊断</h3>
+              <p class="muted">Agent workflow、检索轮次和校验报告</p>
+            </div>
+            <button class="command" type="button" :disabled="diagnosticsLoading || !diagnosticsToken.trim()" @click="loadDiagnosticsRuns">
+              <RefreshCw :size="16" />
+              刷新
+            </button>
+          </div>
+
+          <div v-if="diagnosticsError" class="alert error">{{ diagnosticsError }}</div>
+
+          <section class="config-band diagnostics-controls">
+            <label>
+              Diagnostics Token
+              <input v-model.trim="diagnosticsToken" type="password" autocomplete="off" />
+            </label>
+            <label>
+              状态
+              <select v-model="diagnosticsStatus">
+                <option value="">全部</option>
+                <option value="succeeded">succeeded</option>
+                <option value="completed_with_gaps">completed_with_gaps</option>
+                <option value="failed">failed</option>
+                <option value="insufficient_evidence">insufficient_evidence</option>
+              </select>
+            </label>
+            <label>
+              关键词
+              <input v-model.trim="diagnosticsQuery" @keydown.enter.prevent="loadDiagnosticsRuns" />
+            </label>
+            <button class="primary-action" type="button" :disabled="diagnosticsLoading || !diagnosticsToken.trim()" @click="loadDiagnosticsRuns">
+              <ShieldCheck :size="16" />
+              {{ diagnosticsLoading ? '读取中' : '读取 Runs' }}
+            </button>
+          </section>
+
+          <section class="diagnostics-grid">
+            <aside class="diagnostics-run-list">
+              <button
+                v-for="item in diagnosticsRuns"
+                :key="item.run.id"
+                class="diagnostics-run-row"
+                :class="{ active: diagnosticsDetail?.run.id === item.run.id }"
+                type="button"
+                @click="openDiagnosticsRun(item.run.id)"
+              >
+                <span class="status" :class="item.run.status">{{ item.run.status }}</span>
+                <strong>#{{ item.run.id }} {{ item.session.title }}</strong>
+                <small>{{ item.user_question }}</small>
+                <small>{{ formatTime(item.run.started_at) }} · {{ item.duration_ms }}ms</small>
+              </button>
+              <p v-if="!diagnosticsRuns.length" class="muted">暂无 run。</p>
+            </aside>
+
+            <article class="diagnostics-detail">
+              <template v-if="diagnosticsDetail">
+                <div class="section-title-row">
+                  <div>
+                    <h4>Run #{{ diagnosticsDetail.run.id }}</h4>
+                    <p class="muted">{{ diagnosticsDetail.user_message.content }}</p>
+                  </div>
+                  <span class="status" :class="diagnosticsDetail.run.verification_status || diagnosticsDetail.run.status">
+                    {{ diagnosticsDetail.run.verification_status || diagnosticsDetail.run.status }}
+                  </span>
+                </div>
+
+                <div class="diagnostics-summary-grid">
+                  <section>
+                    <h5>Task Frame</h5>
+                    <p><strong>{{ diagnosticsWorkflow?.task_frame?.intent || diagnosticsDetail.run.intent || '-' }}</strong></p>
+                    <p>{{ diagnosticsWorkflow?.task_frame?.user_goal || '-' }}</p>
+                    <small>{{ listText(diagnosticsWorkflow?.task_frame?.target_artifacts) }}</small>
+                  </section>
+                  <section>
+                    <h5>Evidence Contract</h5>
+                    <p><strong>{{ diagnosticsWorkflow?.evidence_contract?.contract_id || '-' }}</strong></p>
+                    <small>required: {{ listText(diagnosticsWorkflow?.evidence_contract?.required_keys) }}</small>
+                    <small>recommended: {{ listText(diagnosticsWorkflow?.evidence_contract?.recommended_keys) }}</small>
+                  </section>
+                  <section>
+                    <h5>Evidence Bundle</h5>
+                    <p><strong>{{ diagnosticsWorkflow?.evidence_bundle?.bundle_id || '-' }}</strong></p>
+                    <small>groups: {{ diagnosticsWorkflow?.evidence_bundle?.group_count ?? 0 }}</small>
+                    <small>excluded: {{ diagnosticsWorkflow?.evidence_bundle?.excluded_count ?? 0 }}</small>
+                  </section>
+                  <section>
+                    <h5>Answer Verifier</h5>
+                    <p><strong>{{ diagnosticsWorkflow?.verification_report?.status || diagnosticsDetail.run.verification_status || '-' }}</strong></p>
+                    <small>{{ diagnosticsWorkflow?.verification_report?.next_action || '-' }}</small>
+                    <small>{{ listText(diagnosticsWorkflow?.verification_report?.failed_checks) }}</small>
+                  </section>
+                </div>
+
+                <section class="diagnostics-block">
+                  <div class="section-title-row">
+                    <h4>Retrieval Rounds</h4>
+                    <span class="status medium">{{ diagnosticsWorkflow?.retrieval_rounds?.length || 0 }}</span>
+                  </div>
+                  <div v-for="round in diagnosticsWorkflow?.retrieval_rounds || []" :key="round.round" class="diagnostics-round">
+                    <div>
+                      <strong>R{{ round.round }} · {{ round.reason }}</strong>
+                      <span>{{ round.new_evidence_count }} new</span>
+                    </div>
+                    <p>{{ round.searches.map((search) => search.query).join(' · ') }}</p>
+                    <small>missing: {{ listText(round.missing_contract_keys) }}</small>
+                    <small>delta: {{ coverageDeltaText(round.coverage_delta) }}</small>
+                  </div>
+                </section>
+
+                <section class="diagnostics-block">
+                  <div class="section-title-row">
+                    <h4>Contract Coverage</h4>
+                    <span class="status" :class="coverageStatusClass(diagnosticsCoverage?.status)">
+                      {{ diagnosticsCoverage?.status || '-' }}
+                    </span>
+                  </div>
+                  <div class="coverage-list">
+                    <div v-for="item in diagnosticCoverageItems" :key="item.key" class="coverage-row" :class="coverageStatusClass(item.status)">
+                      <span>{{ item.status }}</span>
+                      <strong>{{ item.key }}</strong>
+                      <small>{{ item.reason || item.missing_detail }}</small>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="diagnostics-block">
+                  <div class="section-title-row">
+                    <h4>Steps</h4>
+                    <span class="status medium">{{ diagnosticsDetail.steps.length }}</span>
+                  </div>
+                  <details v-for="step in diagnosticsDetail.steps" :key="step.id" class="diagnostics-step">
+                    <summary>
+                      <span class="status" :class="step.status">{{ step.status }}</span>
+                      <strong>{{ step.agent_name }}</strong>
+                      <small>{{ step.step_type }} · {{ step.latency_ms }}ms</small>
+                    </summary>
+                    <pre>{{ prettyJSON(diagnosticsStepPayload(step)) }}</pre>
+                  </details>
+                </section>
+
+                <section class="diagnostics-block">
+                  <div class="section-title-row">
+                    <h4>Data Sources</h4>
+                    <span class="status medium">{{ diagnosticsDetail.data_sources.repositories.length }}</span>
+                  </div>
+                  <div v-for="source in diagnosticsDetail.data_sources.repositories" :key="source.id" class="diagnostics-source">
+                    <strong>{{ source.name }}</strong>
+                    <small>{{ source.default_target?.branch || source.default_branch }} · {{ source.latest_scan?.status || 'not_scanned' }}</small>
+                    <small>scan: {{ source.scan_paths.map((path) => path.path).join(', ') || '-' }}</small>
+                  </div>
+                </section>
+              </template>
+              <div v-else class="empty-preview">
+                <ListChecks :size="30" />
+                <p>选择 run 查看诊断详情。</p>
+              </div>
+            </article>
+          </section>
+        </section>
+
         <section v-if="tab === 'settings'" class="settings-panel">
           <div class="ai-config-head">
             <div>
@@ -778,6 +945,7 @@
 <script setup lang="ts">
 import DOMPurify from 'dompurify'
 import {
+  Activity,
   Bot,
   BookOpen,
   ChevronLeft,
@@ -805,6 +973,11 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { APIRequestError, api, blobURL, downloadURL } from './api'
 import type {
   AICostTier,
+  AIContractCoverageItem,
+  AIContractCoverageReport,
+  AIDiagnosticsRunDetailResponse,
+  AIDiagnosticsRunSummary,
+  AIDiagnosticsStep,
   AINotice,
   AIMessage,
   AIMessageCitation,
@@ -826,7 +999,7 @@ import type {
   ScanRun
 } from './types'
 
-type AppTab = 'docs' | 'history' | 'runs' | 'ai' | 'ai-config' | 'settings'
+type AppTab = 'docs' | 'history' | 'runs' | 'ai' | 'ai-config' | 'ai-diagnostics' | 'settings'
 type AIEvidenceChainItem = {
   id: string
   kind: 'stage' | 'provider'
@@ -889,6 +1062,13 @@ const aiProviderBusy = ref('')
 const accessTokenBusy = ref(false)
 const accessTokenForm = ref({ ttl_seconds: 3600, capabilities: ['ai.history.read'], viewer_key: '' })
 const issuedAccessToken = ref<AccessTokenResponse | null>(null)
+const diagnosticsToken = ref('')
+const diagnosticsStatus = ref('')
+const diagnosticsQuery = ref('')
+const diagnosticsRuns = ref<AIDiagnosticsRunSummary[]>([])
+const diagnosticsDetail = ref<AIDiagnosticsRunDetailResponse | null>(null)
+const diagnosticsLoading = ref(false)
+const diagnosticsError = ref('')
 
 const form = ref<Partial<Repository>>({
   name: '',
@@ -1015,6 +1195,7 @@ const isGlobalTab = computed(() => isGlobalTabName(tab.value))
 const workspaceTitle = computed(() => {
   if (tab.value === 'ai') return 'AI 问答'
   if (tab.value === 'ai-config') return 'AI 配置'
+  if (tab.value === 'ai-diagnostics') return 'AI 诊断'
   if (tab.value === 'settings') return '系统设置'
   return selectedRepo.value?.name || '仓库配置'
 })
@@ -1022,6 +1203,7 @@ const workspaceTitle = computed(() => {
 const workspaceSubtitle = computed(() => {
   if (tab.value === 'ai') return '全局服务发现、代码证据召回和带引用回答'
   if (tab.value === 'ai-config') return '全局供应商、模型和密钥'
+  if (tab.value === 'ai-diagnostics') return '排查 Agent workflow、证据契约和答案校验'
   if (tab.value === 'settings') return '访问 Token 和远程集成'
   return selectedRepo.value?.repo_url || ''
 })
@@ -1095,6 +1277,28 @@ const aiActiveRouteProviders = computed(() => {
 })
 
 const canAskWithCurrentFile = computed(() => Boolean(fileContent.value && fileContent.value.file_size <= 1024 * 1024))
+
+const diagnosticsWorkflow = computed(() => diagnosticsDetail.value?.agent_workflow || null)
+
+const diagnosticsCoverage = computed<AIContractCoverageReport | null>(
+  () => diagnosticsWorkflow.value?.contract_coverage || diagnosticsDetail.value?.contract_coverage || null
+)
+
+const diagnosticCoverageItems = computed<AIContractCoverageItem[]>(() => {
+  const coverage = diagnosticsCoverage.value
+  if (!coverage) return []
+  if (coverage.items?.length) return coverage.items
+  const statuses = coverage.coverage || {}
+  return Object.entries(statuses).map(([key, status]) => ({
+    key,
+    requirement: coverage.missing_required?.includes(key) ? 'required' : 'recommended',
+    status,
+    evidence_ids: [],
+    reason: coverage.details?.[key] || '',
+    missing_detail: coverage.details?.[key] || '',
+    confidence: 0
+  }))
+})
 
 const graphRowHeight = 38
 const graphCenterY = graphRowHeight / 2
@@ -1436,6 +1640,41 @@ async function loadScanRuns() {
   scanRuns.value = response.items
 }
 
+async function loadDiagnosticsRuns() {
+  if (!diagnosticsToken.value.trim()) return
+  diagnosticsLoading.value = true
+  diagnosticsError.value = ''
+  try {
+    const params: Record<string, string> = { limit: '50' }
+    if (diagnosticsStatus.value) params.status = diagnosticsStatus.value
+    if (diagnosticsQuery.value) params.q = diagnosticsQuery.value
+    const response = await api.aiDiagnosticsRuns(diagnosticsToken.value.trim(), params)
+    diagnosticsRuns.value = response.items || []
+    if (diagnosticsRuns.value[0]) {
+      await openDiagnosticsRun(diagnosticsRuns.value[0].run.id)
+    } else {
+      diagnosticsDetail.value = null
+    }
+  } catch (err) {
+    diagnosticsError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    diagnosticsLoading.value = false
+  }
+}
+
+async function openDiagnosticsRun(runID: number) {
+  if (!diagnosticsToken.value.trim()) return
+  diagnosticsLoading.value = true
+  diagnosticsError.value = ''
+  try {
+    diagnosticsDetail.value = await api.aiDiagnosticsRun(diagnosticsToken.value.trim(), runID)
+  } catch (err) {
+    diagnosticsError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    diagnosticsLoading.value = false
+  }
+}
+
 async function loadAIPage() {
   aiBusy.value = true
   error.value = ''
@@ -1577,6 +1816,24 @@ async function handleAIStreamEvent(event: AIStreamEvent) {
         detail: `${event.contract.contract_id} · required: ${event.contract.required_keys.join(', ')}`,
         status: 'success',
         meta: event.contract.recommended_keys?.length ? `recommended: ${event.contract.recommended_keys.join(', ')}` : ''
+      })
+      break
+    case 'retrieval_round':
+      addEvidenceChainItem({
+        kind: 'stage',
+        title: `检索 R${event.round.round}`,
+        detail: event.round.reason,
+        status: 'success',
+        meta: `新增 ${event.round.new_evidence_count} · ${coverageDeltaText(event.round.coverage_delta)}`
+      })
+      break
+    case 'coverage':
+      addEvidenceChainItem({
+        kind: 'stage',
+        title: '契约覆盖',
+        detail: `${event.coverage.status} · next: ${event.coverage.next_action}`,
+        status: coverageStatusClass(event.coverage.status),
+        meta: `缺口 ${event.coverage.unconfirmed_count ?? event.coverage.missing_required?.length ?? 0} · 证据组 ${event.evidence_bundle?.group_count ?? 0}`
       })
       break
     case 'stage':
@@ -2118,10 +2375,11 @@ function repoName(repoID: number) {
 async function loadGlobalTabData(nextTab: AppTab) {
   if (nextTab === 'ai') await loadAIPage()
   if (nextTab === 'ai-config') await loadAIConfig()
+  if (nextTab === 'ai-diagnostics' && diagnosticsToken.value.trim() && !diagnosticsRuns.value.length) await loadDiagnosticsRuns()
 }
 
 function isGlobalTabName(value: AppTab) {
-  return value === 'ai' || value === 'ai-config' || value === 'settings'
+  return value === 'ai' || value === 'ai-config' || value === 'ai-diagnostics' || value === 'settings'
 }
 
 async function withBusy(fn: () => Promise<void>) {
@@ -2409,7 +2667,15 @@ function readURLState(): URLState {
   const dirParam = params.get('dir')
   return {
     repoID: repoID > 0 ? repoID : undefined,
-    tab: tabParam === 'history' || tabParam === 'runs' || tabParam === 'ai' || tabParam === 'ai-config' || tabParam === 'settings' ? tabParam : 'docs',
+    tab:
+      tabParam === 'history' ||
+      tabParam === 'runs' ||
+      tabParam === 'ai' ||
+      tabParam === 'ai-config' ||
+      tabParam === 'ai-diagnostics' ||
+      tabParam === 'settings'
+        ? tabParam
+        : 'docs',
     view: viewParam === 'branch' ? 'branch' : 'latest',
     branch: params.get('branch') || '',
     dir: dirParam === null ? undefined : dirParam || '.',
@@ -2536,6 +2802,47 @@ function shortSha(value?: string) {
 function shortCommit(value?: string) {
   if (!value) return '-'
   return value.slice(0, 8)
+}
+
+function listText(values?: string[]) {
+  return values?.filter(Boolean).join(', ') || '-'
+}
+
+function coverageDeltaText(delta?: Record<string, string>) {
+  if (!delta || !Object.keys(delta).length) return '无变化'
+  return Object.entries(delta)
+    .map(([key, status]) => `${key}:${status}`)
+    .join(' · ')
+}
+
+function coverageStatusClass(status?: string) {
+  switch (status) {
+    case 'covered':
+    case 'pass':
+    case 'succeeded':
+      return 'success'
+    case 'missing':
+    case 'missing_required':
+    case 'failed':
+    case 'forbidden':
+    case 'conflict':
+    case 'verification_failed':
+      return 'failed'
+    case 'partial':
+    case 'completed_with_gaps':
+      return 'running'
+    default:
+      return status || 'low'
+  }
+}
+
+function prettyJSON(value: unknown) {
+  if (value === undefined || value === null) return '-'
+  return JSON.stringify(value, null, 2)
+}
+
+function diagnosticsStepPayload(step: AIDiagnosticsStep): unknown {
+  return step.summary || { input: step.input, output: step.output }
 }
 
 function formatHistoryTime(value?: string) {

@@ -433,7 +433,7 @@ func TestAIAgentWorkflowPolicyDefaultsToShadowAndKeepsCompatibility(t *testing.T
 	if !ok {
 		t.Fatalf("checkpoint sse compatibility has unexpected type: %#v", checkpoint["sse_compatibility"])
 	}
-	for _, event := range []string{"run_started", "task_frame", "contract", "stage", "provider_attempt", "verification", "citations", "answer_delta", "message_done"} {
+	for _, event := range []string{"run_started", "task_frame", "contract", "retrieval_round", "coverage", "stage", "provider_attempt", "verification", "citations", "answer_delta", "message_done"} {
 		if !testStringSliceContains(events, event) {
 			t.Fatalf("checkpoint missing legacy SSE event %s: %+v", event, events)
 		}
@@ -904,6 +904,7 @@ func TestAccessTokenViewerScopeAndPaginationFilters(t *testing.T) {
 func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 	server := newWebhookTestServer(t)
 	ctx := context.Background()
+	diagnosticsJWT := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJkaWFnbm9zdGljcyJ9.signature"
 	repo, err := createRepository(ctx, server.db, Repository{
 		Name:                  "doc-harbor",
 		Slug:                  "doc-harbor-diagnostics",
@@ -980,24 +981,42 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create alice session: %v", err)
 	}
+	if _, err := server.db.ExecContext(ctx, `UPDATE ai_sessions SET title = ?, scope_json = ? WHERE id = ?`,
+		"alpha diagnostic api_key=sk-test-session-title Authorization: Bearer raw-session-title-token "+diagnosticsJWT,
+		encodeJSON(map[string]any{
+			"repo_mode":     "selected",
+			"repo_ids":      []int64{repo.ID},
+			"source_mode":   "smart_latest",
+			"api_key":       "sk-test-session-scope",
+			"authorization": "Bearer raw-session-scope-token",
+			"token":         "raw-session-scope-token",
+			"note":          "API key: sk-test-session-scope-note token=raw-session-scope-note " + diagnosticsJWT,
+		}), alice.ID); err != nil {
+		t.Fatalf("seed sensitive session diagnostics fields: %v", err)
+	}
 	bob, err := createAISession(ctx, server.db, "beta diagnostic", "bob", AIQuestionScope{RepoMode: "global"})
 	if err != nil {
 		t.Fatalf("create bob session: %v", err)
 	}
-	aliceUser, err := insertAIMessage(ctx, server.db, AIMessage{SessionID: alice.ID, Role: "user", Content: "为什么 alpha 调用失败"})
+	aliceUser, err := insertAIMessage(ctx, server.db, AIMessage{
+		SessionID: alice.ID,
+		Role:      "user",
+		Content:   "为什么 alpha 调用失败 api_key=sk-test-user-message API key: sk-test-user-phrase Authorization: Bearer raw-user-auth-token Bearer raw-user-bearer-token token=raw-user-token " + diagnosticsJWT,
+	})
 	if err != nil {
 		t.Fatalf("insert alice user: %v", err)
 	}
 	aliceAssistant, err := insertAIMessage(ctx, server.db, AIMessage{
 		SessionID:        alice.ID,
 		Role:             "assistant",
-		Content:          "alpha answer",
+		Content:          "alpha answer API key: sk-test-assistant-content Authorization: Bearer raw-assistant-content-token Bearer raw-assistant-bearer-token token=raw-assistant-token " + diagnosticsJWT,
 		Model:            "diag-model",
 		ProviderName:     "DiagProvider",
-		ModelRouteJSON:   `{"route":"diag"}`,
+		ModelRouteJSON:   encodeJSON(map[string]any{"route": "diag", "api_key": "sk-test-assistant-route", "authorization": "Bearer raw-assistant-route-token", "reason": "token=raw-assistant-route-token " + diagnosticsJWT}),
 		PromptTokens:     11,
 		CompletionTokens: 7,
 		LatencyMS:        123,
+		ErrorMessage:     "assistant failed api_key=sk-test-assistant-error Authorization: Bearer raw-assistant-error-token token=raw-assistant-error-token " + diagnosticsJWT,
 	})
 	if err != nil {
 		t.Fatalf("insert alice assistant: %v", err)
@@ -1026,6 +1045,33 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 			FilePath:  "docs/README.md",
 		},
 	})
+	if _, err := server.db.ExecContext(ctx, `UPDATE ai_agent_runs SET
+		scope_json = ?, retrieval_plan_json = ?, verification_report_json = ?, checkpoint_json = ?,
+		provider_failover_json = ?, model_route_json = ?, error_message = ?
+		WHERE id = ?`,
+		encodeJSON(map[string]any{
+			"repo_mode":   "selected",
+			"repo_ids":    []int64{repo.ID},
+			"source_mode": "smart_latest",
+			"current_file": map[string]any{
+				"repo_id":    repo.ID,
+				"version_id": 12,
+				"branch":     "main",
+				"commit_sha": "mainsha",
+				"file_path":  "docs/README.md",
+			},
+			"api_key": "sk-test-run-scope",
+			"note":    "Authorization: Bearer raw-run-scope-token token=raw-run-scope-token " + diagnosticsJWT,
+		}),
+		encodeJSON(map[string]any{"plan": "diag", "query": "api_key=sk-test-run-plan token=raw-run-plan-token " + diagnosticsJWT, "token": "raw-run-plan-token"}),
+		encodeJSON(map[string]any{"ok": false, "details": []string{"API key: sk-test-run-report Authorization: Bearer raw-run-report-token " + diagnosticsJWT}}),
+		encodeJSON(map[string]any{"checkpoint": "diag", "note": "Bearer raw-run-checkpoint-token token=raw-run-checkpoint-token", "api_key": "sk-test-run-checkpoint"}),
+		encodeJSON(map[string]any{"attempts": []map[string]any{{"provider": "DiagProvider", "status": "failed", "error": "Authorization: Bearer raw-run-failover-token api_key=sk-test-run-failover"}}}),
+		encodeJSON(map[string]any{"route": "diag", "reason": "API key: sk-test-run-route token=raw-run-route-token " + diagnosticsJWT, "api_key": "sk-test-run-route"}),
+		"diagnostic failure api_key=sk-test-run-error Authorization: Bearer raw-run-error-token token=raw-run-error-token "+diagnosticsJWT,
+		aliceRunID); err != nil {
+		t.Fatalf("seed sensitive run diagnostics fields: %v", err)
+	}
 	bobRunID := insertDiagnosticsRunForTest(t, server, bob.ID, bobUser.ID, bobAssistant.ID, "succeeded", bobStarted, bobFinished)
 	if err := insertAIStep(ctx, server.db, AIAgentStep{
 		RunID:            aliceRunID,
@@ -1152,6 +1198,26 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert contract checker step: %v", err)
 	}
+	roundStep := buildAIRetrievalRoundStep(&taskFrame, &contract, nil, nil, aiRetrievalRoundPlan{
+		Round:               1,
+		Intent:              aiLegacyIntentForTaskFrame(taskFrame),
+		Reason:              "initial_recall_from_task_frame",
+		MissingContractKeys: []string{"run_steps", "citations"},
+		Searches: []aiRetrievalRoundSearch{{
+			Tool:      "smart_latest_search",
+			Query:     "alpha diagnostics",
+			FileTypes: []string{"all"},
+			Terms:     []string{"alpha"},
+		}},
+		QuerySource:      "task_frame_known_terms",
+		PlannerStatus:    "deterministic",
+		NewEvidenceCount: 1,
+		CoverageDelta:    map[string]string{"run_steps": aiEvidenceCoveragePartial, "citations": aiEvidenceCoverageMissing},
+	}, contractCoverage)
+	roundStep.RunID = aliceRunID
+	if err := insertAIStep(ctx, server.db, roundStep); err != nil {
+		t.Fatalf("insert retrieval round step: %v", err)
+	}
 	curatorOutput := map[string]any{
 		"evidence_bundle": map[string]any{
 			"bundle_id": "curated-document_qa.v1",
@@ -1204,6 +1270,29 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert evidence curator step: %v", err)
 	}
+	verifierStep := buildAIAnswerVerifierStep(taskFrame, contract, contractCoverage, aiEvidenceBundle{
+		BundleID: "curated-document_qa.v1",
+		Coverage: map[string]string{"run_steps": aiEvidenceCoveragePartial, "citations": aiEvidenceCoverageMissing},
+		Groups: []aiEvidenceGroup{{
+			Key:         "run_steps",
+			EvidenceIDs: []int64{2},
+			Summary:     "partial run steps",
+		}},
+	}, aiAnswerVerificationReport{
+		AgentWorkflowVersion: aiAgentWorkflowVersionV2Shadow,
+		AnswerMode:           "answer_verifier",
+		Status:               aiAnswerVerificationStatusFailed,
+		Reason:               "missing citation evidence",
+		Details:              []string{"Authorization: Bearer raw-diagnostics-token api_key=sk-test-verifier-secret token=raw-diagnostics-token"},
+		FailedChecks:         []string{"citation_coverage"},
+		NextAction:           aiAnswerVerificationNextActionRetrieveMore,
+		RewriteAttempted:     true,
+		WorkflowStatus:       aiWorkflowStatusCompletedWithGaps,
+	}, "secret answer")
+	verifierStep.RunID = aliceRunID
+	if err := insertAIStep(ctx, server.db, verifierStep); err != nil {
+		t.Fatalf("insert answer verifier step: %v", err)
+	}
 	if _, err := insertAIServiceCandidate(ctx, server.db, AIServiceCandidate{
 		RunID:         aliceRunID,
 		MessageID:     aliceAssistant.ID,
@@ -1234,10 +1323,56 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 	}
 
 	diagnosticsToken := issueAccessTokenForTest(t, server, accessTokenScope{}, time.Hour, accessTokenCapabilityAIDiagnosticsRead)
+	sensitiveDiagnosticsFragments := []string{
+		"api_key",
+		"API key",
+		"Authorization",
+		"Bearer",
+		"sk-test",
+		"raw-session-title-token",
+		"raw-session-scope-token",
+		"raw-session-scope-note",
+		"raw-user-auth-token",
+		"raw-user-bearer-token",
+		"raw-user-token",
+		"raw-assistant-content-token",
+		"raw-assistant-bearer-token",
+		"raw-assistant-token",
+		"raw-assistant-route-token",
+		"raw-assistant-error-token",
+		"raw-run-scope-token",
+		"raw-run-plan-token",
+		"raw-run-report-token",
+		"raw-run-checkpoint-token",
+		"raw-run-failover-token",
+		"raw-run-route-token",
+		"raw-run-error-token",
+		"raw-diagnostics-token",
+		"raw-secret",
+		diagnosticsJWT,
+		`"token"`,
+		`"access_token"`,
+		`"authorization"`,
+	}
+	assertDiagnosticsRedacted := func(name, body string) {
+		t.Helper()
+		for _, forbidden := range sensitiveDiagnosticsFragments {
+			if strings.Contains(body, forbidden) {
+				t.Fatalf("%s leaked %s: %s", name, forbidden, body)
+			}
+		}
+	}
 	list := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/diagnostics/runs?limit=1", diagnosticsToken, nil)
 	if list.Code != http.StatusOK {
 		t.Fatalf("diagnostics list status = %d, want %d; body=%s", list.Code, http.StatusOK, list.Body.String())
 	}
+	listBody := list.Body.String()
+	for _, required := range []string{`"run"`, `"session"`, `"user_question"`, `"scope_json"`, `"duration_ms"`, "alpha"} {
+		if !strings.Contains(listBody, required) {
+			t.Fatalf("diagnostics list missing %s: %s", required, listBody)
+		}
+	}
+	assertDiagnosticsRedacted("diagnostics list", listBody)
 	var firstPage aiDiagnosticsRunsResponse
 	if err := json.Unmarshal(list.Body.Bytes(), &firstPage); err != nil {
 		t.Fatalf("decode diagnostics list: %v", err)
@@ -1259,12 +1394,13 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 	if !strings.Contains(filtered.Body.String(), `"viewer_key":"alice"`) || strings.Contains(filtered.Body.String(), `"viewer_key":"bob"`) {
 		t.Fatalf("diagnostics filters not applied: %s", filtered.Body.String())
 	}
+	assertDiagnosticsRedacted("diagnostics filtered list", filtered.Body.String())
 	detail := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/diagnostics/runs/"+strconv.FormatInt(aliceRunID, 10), diagnosticsToken, nil)
 	if detail.Code != http.StatusOK {
 		t.Fatalf("diagnostics detail status = %d, want %d; body=%s", detail.Code, http.StatusOK, detail.Body.String())
 	}
 	body := detail.Body.String()
-	for _, required := range []string{`"user_message"`, `"assistant_message"`, `"task_frame"`, `"evidence_contract"`, `"contract_coverage"`, `"steps"`, `"service_candidates"`, `"citations"`, `"model_route_json"`, `"provider_failover_json"`, `"contract_checker"`, `"missing_required":["run_steps","citations"]`, "sk-[redacted]"} {
+	for _, required := range []string{`"user_message"`, `"assistant_message"`, `"task_frame"`, `"evidence_contract"`, `"contract_coverage"`, `"agent_workflow"`, `"retrieval_rounds"`, `"evidence_bundle"`, `"verification_report"`, `"steps"`, `"service_candidates"`, `"citations"`, `"model_route_json"`, `"provider_failover_json"`, `"contract_checker"`, `"missing_required":["run_steps","citations"]`, "sk-[redacted]"} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("diagnostics detail missing %s: %s", required, body)
 		}
@@ -1274,6 +1410,7 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 			t.Fatalf("diagnostics detail leaked %s: %s", forbidden, body)
 		}
 	}
+	assertDiagnosticsRedacted("diagnostics detail", body)
 	var detailResp aiDiagnosticsRunDetailResponse
 	if err := json.Unmarshal(detail.Body.Bytes(), &detailResp); err != nil {
 		t.Fatalf("decode diagnostics detail: %v", err)
@@ -1284,8 +1421,19 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 	if detailResp.TaskFrame == nil || detailResp.EvidenceContract == nil || detailResp.ContractCoverage == nil {
 		t.Fatalf("diagnostics detail missing top-level agent artifacts: %+v", detailResp)
 	}
-	var foundTaskFramer, foundEvidenceCurator, foundContractChecker bool
+	workflow, ok := detailResp.AgentWorkflow.(map[string]any)
+	if !ok || workflow["task_frame"] == nil || workflow["evidence_contract"] == nil || workflow["contract_coverage"] == nil || workflow["evidence_bundle"] == nil || workflow["verification_report"] == nil {
+		t.Fatalf("diagnostics detail missing agent workflow payload: %+v", detailResp.AgentWorkflow)
+	}
+	rounds, ok := workflow["retrieval_rounds"].([]any)
+	if !ok || len(rounds) != 1 {
+		t.Fatalf("diagnostics workflow missing retrieval rounds: %+v", workflow["retrieval_rounds"])
+	}
+	var foundTaskFramer, foundEvidenceCurator, foundContractChecker, foundVerifier bool
 	for _, step := range detailResp.Steps {
+		if step.AgentName == "coordinator" && (step.Input == nil || step.Output == nil) {
+			t.Fatalf("diagnostics step missing sanitized input/output payload: %+v", step)
+		}
 		if step.AgentName == "task_framer" && step.StepType == "deterministic" {
 			foundTaskFramer = true
 		}
@@ -1325,6 +1473,24 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 				}
 			}
 		}
+		if step.AgentName == "answer_verifier" && step.StepType == "deterministic" {
+			foundVerifier = true
+			summaryJSON, err := json.Marshal(step.Summary)
+			if err != nil {
+				t.Fatalf("marshal verifier summary: %v", err)
+			}
+			summary := string(summaryJSON)
+			for _, required := range []string{`"verification_report"`, `"failed_checks":["citation_coverage"]`, `"next_action":"retrieve_more"`} {
+				if !strings.Contains(summary, required) {
+					t.Fatalf("verifier summary missing %s: %s", required, summary)
+				}
+			}
+			for _, forbidden := range []string{"api_key", "sk-test-verifier-secret", "raw-diagnostics-token", "Authorization", "Bearer", `"token"`} {
+				if strings.Contains(summary, forbidden) {
+					t.Fatalf("verifier summary leaked %s: %s", forbidden, summary)
+				}
+			}
+		}
 	}
 	if !foundTaskFramer {
 		t.Fatalf("diagnostics detail missing task_framer step: %+v", detailResp.Steps)
@@ -1334,6 +1500,9 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 	}
 	if !foundEvidenceCurator {
 		t.Fatalf("diagnostics detail missing evidence_curator step: %+v", detailResp.Steps)
+	}
+	if !foundVerifier {
+		t.Fatalf("diagnostics detail missing answer_verifier step: %+v", detailResp.Steps)
 	}
 	if detailResp.DataSources.CurrentFile == nil || detailResp.DataSources.CurrentFile.FilePath != "docs/README.md" {
 		t.Fatalf("run data sources missing current file: %+v", detailResp.DataSources.CurrentFile)
@@ -1383,6 +1552,15 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 		}
 	}
 	historyToken := issueAccessTokenForTest(t, server, accessTokenScope{}, time.Hour, accessTokenCapabilityAIHistoryRead)
+	historyDetail := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/history/sessions/"+strconv.FormatInt(alice.ID, 10), historyToken, nil)
+	if historyDetail.Code != http.StatusOK {
+		t.Fatalf("history detail status = %d, want %d; body=%s", historyDetail.Code, http.StatusOK, historyDetail.Body.String())
+	}
+	for _, raw := range []string{"api_key", "sk-test-user-message", "raw-user-auth-token", "sk-test-assistant-content", "raw-assistant-error-token", diagnosticsJWT} {
+		if !strings.Contains(historyDetail.Body.String(), raw) {
+			t.Fatalf("history detail unexpectedly sanitized %s: %s", raw, historyDetail.Body.String())
+		}
+	}
 	forbidden := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/diagnostics/runs", historyToken, nil)
 	if forbidden.Code != http.StatusForbidden {
 		t.Fatalf("history token diagnostics status = %d, want %d; body=%s", forbidden.Code, http.StatusForbidden, forbidden.Body.String())
@@ -2411,7 +2589,7 @@ func TestAIQuestionStreamEndpointPersistsDeltasAndProviderFailover(t *testing.T)
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
 	body := recorder.Body.String()
-	for _, event := range []string{"event: user_message", "event: run_started", "event: task_frame", "event: contract", "event: stage", "event: provider_attempt", "event: verification", "event: answer_delta", "event: message_done", "event: done"} {
+	for _, event := range []string{"event: user_message", "event: run_started", "event: task_frame", "event: contract", "event: retrieval_round", "event: coverage", "event: stage", "event: provider_attempt", "event: verification", "event: answer_delta", "event: message_done", "event: done"} {
 		if !strings.Contains(body, event) {
 			t.Fatalf("stream body missing %s: %s", event, body)
 		}
@@ -2421,6 +2599,9 @@ func TestAIQuestionStreamEndpointPersistsDeltasAndProviderFailover(t *testing.T)
 	}
 	if !strings.Contains(body, `"contract_id":"document_qa.v1"`) || !strings.Contains(body, `"required_keys"`) {
 		t.Fatalf("stream body missing contract summary: %s", body)
+	}
+	if !strings.Contains(body, `"coverage_delta"`) || !strings.Contains(body, `"evidence_bundle"`) || !strings.Contains(body, `"unconfirmed_count"`) {
+		t.Fatalf("stream body missing retrieval or coverage diagnostics: %s", body)
 	}
 	if !strings.Contains(body, `"provider_key":"deepseek-main"`) || !strings.Contains(body, `"status":"failed"`) {
 		t.Fatalf("stream body missing failed first provider: %s", body)
