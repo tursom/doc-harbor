@@ -4429,6 +4429,12 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 	} else {
 		modelResult = s.generateAIAnswer(ctx, active, question, retrieval)
 	}
+	verificationOutcome := s.verifyAndMaybeRewriteAIAnswer(ctx, active, question, retrieval, modelResult, start)
+	modelResult = verificationOutcome.Result
+	verifierFrame, verifierContract, verifierCoverage, verifierBundle := aiAnswerVerifierInputs(retrieval)
+	verifierStep := buildAIAnswerVerifierStep(verifierFrame, verifierContract, verifierCoverage, verifierBundle, verificationOutcome.Report, modelResult.Content)
+	verifierStep.RunID = run.ID
+	_ = insertAIStep(ctx, s.db, verifierStep)
 	notice := aiNoticeFromModelResult(modelResult)
 	assistantMsg, err := insertAIMessage(ctx, s.db, AIMessage{
 		SessionID:        sessionID,
@@ -4465,18 +4471,9 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 		}
 		candidates = append(candidates, inserted)
 	}
-	status := "succeeded"
-	verificationStatus := "pass"
-	if len(retrieval.Evidence) == 0 {
-		status = "insufficient_evidence"
-		verificationStatus = "fail"
-	} else if aiRetrievalHasCompletedGaps(contractCoverage) {
-		status = aiWorkflowStatusCompletedWithGaps
-		verificationStatus = aiWorkflowStatusCompletedWithGaps
-	}
 	if err := finishAIRun(ctx, s.db, run.ID, AIAgentRun{
 		AssistantMessageID:     assistantMsg.ID,
-		Status:                 status,
+		Status:                 verificationOutcome.RunStatus,
 		CurrentState:           "verify_answer",
 		Intent:                 retrieval.Intent,
 		ScopeJSON:              encodeJSON(retrieval.Scope),
@@ -4485,8 +4482,8 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 		EvidenceCount:          len(citations),
 		CodeEvidenceCount:      countCodeEvidence(citations),
 		UnconfirmedCount:       aiContractCoverageUnconfirmedRequiredCount(contractCoverage),
-		VerificationStatus:     verificationStatus,
-		VerificationReportJSON: buildAIShadowVerificationReport(verificationStatus, len(citations), contractCoverage),
+		VerificationStatus:     verificationOutcome.VerificationStatus,
+		VerificationReportJSON: encodeJSON(verificationOutcome.Report),
 		CheckpointJSON:         checkpointJSON,
 		Model:                  modelResult.Model,
 		ProviderName:           modelResult.ProviderName,
@@ -4752,6 +4749,7 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 	currentState = "model_call"
 	lastPersistAt := time.Now()
 	lastPersistLen := 0
+	var streamedDraft strings.Builder
 	persistStreaming := func(force bool) error {
 		if !force && len(assistantMsg.Content)-lastPersistLen < 512 && time.Since(lastPersistAt) < 500*time.Millisecond {
 			return nil
@@ -4785,9 +4783,6 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 		if err := emit("stage", aiStreamStageEvent{Stage: currentState, Status: "skipped", Message: "未找到证据，返回本地检索说明"}); err != nil {
 			return err
 		}
-		if err := emitFullAnswer(modelResult); err != nil {
-			return err
-		}
 	} else if !active.Config.Enabled {
 		modelResult = aiModelResult{
 			Content:        localEvidenceAnswer(question, retrieval, false),
@@ -4797,9 +4792,6 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 			LatencyMS:      int(time.Since(start).Milliseconds()),
 		}
 		if err := emit("stage", aiStreamStageEvent{Stage: currentState, Status: "skipped", Message: "AI 未启用，返回本地证据摘要"}); err != nil {
-			return err
-		}
-		if err := emitFullAnswer(modelResult); err != nil {
 			return err
 		}
 	} else {
@@ -4821,18 +4813,12 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 				return emit("provider_attempt", event)
 			},
 			AnswerDelta: func(delta string) error {
-				assistantMsg.Content += delta
-				if err := persistStreaming(false); err != nil {
-					return err
-				}
-				return emit("answer_delta", aiStreamAnswerDeltaEvent{MessageID: assistantMsg.ID, Delta: delta})
+				streamedDraft.WriteString(delta)
+				return nil
 			},
 		})
 		if err != nil {
 			if ctx.Err() != nil {
-				if strings.TrimSpace(modelResult.Content) != "" {
-					assistantMsg.Content = modelResult.Content
-				}
 				if modelResult.Model != "" {
 					assistantMsg.Model = modelResult.Model
 				}
@@ -4849,58 +4835,45 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 			}
 			var partial aiStreamPartialError
 			if errors.As(err, &partial) && strings.TrimSpace(modelResult.Content) != "" {
-				safeErr := sanitizeProviderError(partial.Message)
-				assistantMsg.Content = modelResult.Content
 				assistantMsg.Model = modelResult.Model
 				assistantMsg.ProviderName = modelResult.ProviderName
 				assistantMsg.ModelRouteJSON = modelResult.ModelRouteJSON
 				assistantMsg.PromptTokens = modelResult.PromptTokens
 				assistantMsg.CompletionTokens = modelResult.CompletionTokens
 				assistantMsg.LatencyMS = int(time.Since(start).Milliseconds())
-				assistantMsg.Status = "partial"
-				assistantMsg.ErrorMessage = safeErr
-				persistCtx, cancel := aiPersistenceContext(ctx)
-				_ = updateAIMessage(persistCtx, s.db, assistantMsg)
-				_ = finishAIRun(persistCtx, s.db, run.ID, AIAgentRun{
-					AssistantMessageID:     assistantMsg.ID,
-					Status:                 "failed",
-					CurrentState:           currentState,
-					Intent:                 retrieval.Intent,
-					ScopeJSON:              encodeJSON(retrieval.Scope),
-					RetrievalPlanJSON:      encodeJSON(retrieval.Plan),
-					ServiceCandidateCount:  len(candidates),
-					EvidenceCount:          len(citations),
-					CodeEvidenceCount:      countCodeEvidence(citations),
-					UnconfirmedCount:       aiContractCoverageUnconfirmedRequiredCount(contractCoverage),
-					VerificationStatus:     "fail",
-					VerificationReportJSON: buildAIShadowVerificationReport("fail", len(citations), contractCoverage),
-					Model:                  modelResult.Model,
-					ProviderName:           modelResult.ProviderName,
-					ProviderFailoverJSON:   modelResult.FailoverJSON,
-					ModelRouteJSON:         modelResult.ModelRouteJSON,
-					CheckpointJSON:         checkpointJSON,
-					FinishedAt:             nowString(),
-					ErrorMessage:           safeErr,
-				})
-				cancel()
-				completed = true
-				_ = emit("error", map[string]any{"message": safeErr, "partial_message_id": assistantMsg.ID, "assistant_message": assistantMsg})
-				return nil
+				modelResult = aiModelFallbackForError(question, retrieval, start, partial)
+				if err := emit("stage", aiStreamStageEvent{Stage: currentState, Status: "failed", Message: "模型流中断，返回本地证据摘要"}); err != nil {
+					return err
+				}
 			}
-			modelResult = aiModelFallbackForError(question, retrieval, start, err)
-			if err := emit("stage", aiStreamStageEvent{Stage: currentState, Status: "failed", Message: "模型调用失败，返回本地证据摘要"}); err != nil {
-				return err
-			}
-			if err := emitFullAnswer(modelResult); err != nil {
-				return err
+			if strings.TrimSpace(modelResult.Content) == "" || !errors.As(err, &partial) {
+				modelResult = aiModelFallbackForError(question, retrieval, start, err)
+				if err := emit("stage", aiStreamStageEvent{Stage: currentState, Status: "failed", Message: "模型调用失败，返回本地证据摘要"}); err != nil {
+					return err
+				}
 			}
 		} else {
 			modelResult.LatencyMS = int(time.Since(start).Milliseconds())
-			assistantMsg.Content = modelResult.Content
-			if err := persistStreaming(true); err != nil {
-				return err
+			if strings.TrimSpace(modelResult.Content) == "" && streamedDraft.Len() > 0 {
+				modelResult.Content = streamedDraft.String()
 			}
 		}
+	}
+
+	currentState = "verify_answer"
+	verificationOutcome := s.verifyAndMaybeRewriteAIAnswer(ctx, active, question, retrieval, modelResult, start)
+	modelResult = verificationOutcome.Result
+	verifierFrame, verifierContract, verifierCoverage, verifierBundle := aiAnswerVerifierInputs(retrieval)
+	verifierStep := buildAIAnswerVerifierStep(verifierFrame, verifierContract, verifierCoverage, verifierBundle, verificationOutcome.Report, modelResult.Content)
+	verifierStep.RunID = run.ID
+	if err := insertAIStep(ctx, s.db, verifierStep); err != nil {
+		return err
+	}
+	if err := emit("verification", map[string]any{"report": verificationOutcome.Report}); err != nil {
+		return err
+	}
+	if err := emitFullAnswer(modelResult); err != nil {
+		return err
 	}
 
 	notice := aiNoticeFromModelResult(modelResult)
@@ -4915,18 +4888,9 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 	if err := updateAIMessage(ctx, s.db, assistantMsg); err != nil {
 		return err
 	}
-	status := "succeeded"
-	verificationStatus := "pass"
-	if len(retrieval.Evidence) == 0 {
-		status = "insufficient_evidence"
-		verificationStatus = "fail"
-	} else if aiRetrievalHasCompletedGaps(contractCoverage) {
-		status = aiWorkflowStatusCompletedWithGaps
-		verificationStatus = aiWorkflowStatusCompletedWithGaps
-	}
 	if err := finishAIRun(ctx, s.db, run.ID, AIAgentRun{
 		AssistantMessageID:     assistantMsg.ID,
-		Status:                 status,
+		Status:                 verificationOutcome.RunStatus,
 		CurrentState:           "verify_answer",
 		Intent:                 retrieval.Intent,
 		ScopeJSON:              encodeJSON(retrieval.Scope),
@@ -4935,8 +4899,8 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 		EvidenceCount:          len(citations),
 		CodeEvidenceCount:      countCodeEvidence(citations),
 		UnconfirmedCount:       aiContractCoverageUnconfirmedRequiredCount(contractCoverage),
-		VerificationStatus:     verificationStatus,
-		VerificationReportJSON: buildAIShadowVerificationReport(verificationStatus, len(citations), contractCoverage),
+		VerificationStatus:     verificationOutcome.VerificationStatus,
+		VerificationReportJSON: encodeJSON(verificationOutcome.Report),
 		CheckpointJSON:         checkpointJSON,
 		Model:                  modelResult.Model,
 		ProviderName:           modelResult.ProviderName,
@@ -7198,16 +7162,25 @@ var (
 	authHeaderPattern                     = regexp.MustCompile(`(?i)authorization[^\n\r,]*`)
 	bearerTokenPattern                    = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`)
 	whitespacePattern                     = regexp.MustCompile(`\s+`)
-	diagnosticsSummaryAuthHeaderPattern   = regexp.MustCompile(`(?i)authorization\s*[:=]\s*(?:bearer\s+)?[A-Za-z0-9._~+/=-]+`)
+	diagnosticsSummaryAuthHeaderPattern   = regexp.MustCompile(`(?i)\bauthorization\s*[:=]\s*["']?(?:(?:bearer|basic|token)\s+)?[A-Za-z0-9._~+/=:-]+`)
 	diagnosticsSummaryBearerPattern       = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`)
-	diagnosticsSummarySensitiveKVPattern  = regexp.MustCompile(`(?i)(?:api[_-]?key|secret|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|token)\s*[:=]\s*["']?[^"',\s}]+`)
+	diagnosticsSummarySensitiveKVPattern  = regexp.MustCompile(`(?i)\b(?:api[\s_-]*key|secret|access[\s_-]*token|refresh[\s_-]*token|id[\s_-]*token|auth[\s_-]*token|token)\s*[:=]\s*["']?[^"',\s}]+`)
 	diagnosticsSummarySecretPhrasePattern = regexp.MustCompile(`(?i)\bsecret\s+[A-Za-z0-9._~+/=-]+`)
 	diagnosticsSummaryJWTPattern          = regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`)
 )
 
 func sanitizeProviderError(message string) string {
-	message = authHeaderPattern.ReplaceAllString(message, "authorization [redacted]")
-	message = bearerTokenPattern.ReplaceAllString(message, "bearer [redacted]")
+	for _, pattern := range []*regexp.Regexp{
+		diagnosticsSummaryAuthHeaderPattern,
+		diagnosticsSummaryBearerPattern,
+		diagnosticsSummarySensitiveKVPattern,
+		diagnosticsSummarySecretPhrasePattern,
+		diagnosticsSummaryJWTPattern,
+	} {
+		message = pattern.ReplaceAllString(message, "[redacted]")
+	}
+	message = authHeaderPattern.ReplaceAllString(message, "[redacted]")
+	message = bearerTokenPattern.ReplaceAllString(message, "[redacted]")
 	message = secretTokenPattern.ReplaceAllString(message, "sk-[redacted]")
 	message = strings.TrimSpace(whitespacePattern.ReplaceAllString(message, " "))
 	return truncate(message, 500)

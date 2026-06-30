@@ -504,6 +504,198 @@ func TestAIAnswerComposerStepsAndCheckpointSummaries(t *testing.T) {
 	}
 }
 
+func TestAIAnswerVerifierCoreActions(t *testing.T) {
+	frame := aiTaskFrame{Intent: aiTaskIntentDatabaseDirectUpdateForTest, UserGoal: "测试环境直接改价"}
+	contract := buildAIEvidenceContract(frame)
+	coverage := aiCoverageReportForTest(contract, nil, nil)
+	bundle := aiVerifierBundleForTest(coverage, aiEvidenceReliabilityHighSmartLatest)
+
+	passed := verifyAIAnswer(frame, contract, coverage, bundle, "表 steam_game_price、字段 price_in_cents_with_discount 和 WHERE id 来自证据 [C1]。\nUPDATE steam_game_price SET price_in_cents_with_discount = ? WHERE id = ?; [C1]")
+	if passed.Status != aiAnswerVerificationStatusPass || passed.NextAction != aiAnswerVerificationNextActionPass {
+		t.Fatalf("pass report = %+v", passed)
+	}
+
+	rewrite := verifyAIAnswer(frame, contract, coverage, bundle, "没有官方 UPDATE 示例，无法提供 SQL。[C1]")
+	if rewrite.NextAction != aiAnswerVerificationNextActionRewriteAnswer || !stringSliceContains(rewrite.FailedChecks, "unsupported_refusal") {
+		t.Fatalf("unsupported refusal report = %+v", rewrite)
+	}
+
+	sqlFailed := verifyAIAnswer(frame, contract, coverage, bundle, "UPDATE steam_game_price SET price_in_cents_with_discount = 100 WHERE id = 1;")
+	if sqlFailed.NextAction != aiAnswerVerificationNextActionRewriteAnswer ||
+		!stringSliceContains(sqlFailed.FailedChecks, "sql_missing_placeholder") ||
+		!stringSliceContains(sqlFailed.FailedChecks, "sql_missing_citation") {
+		t.Fatalf("sql failure report = %+v", sqlFailed)
+	}
+
+	blocked := verifyAIAnswer(frame, contract, coverage, bundle, "我已经执行 SQL 并已修改数据库。[C1]")
+	if blocked.NextAction != aiAnswerVerificationNextActionBlockAnswer || !stringSliceContains(blocked.FailedChecks, "unauthorized_behavior") {
+		t.Fatalf("block report = %+v", blocked)
+	}
+
+	missingCoverage := aiCoverageReportForTest(contract, map[string]string{"table_identity": aiEvidenceCoverageMissing}, nil)
+	missingBundle := aiVerifierBundleForTest(missingCoverage, aiEvidenceReliabilityHighSmartLatest)
+	conservative := "已确认读取链路和候选字段 [C1]，但缺少表名证据；这里只列已确认事实和缺口。"
+	retrieveMore := verifyAIAnswerWithContext(frame, contract, missingCoverage, missingBundle, conservative, aiAnswerVerificationContext{EvidenceCount: 1, RetrievalRound: aiRetrievalMaxRounds - 1})
+	if retrieveMore.NextAction != aiAnswerVerificationNextActionRetrieveMore {
+		t.Fatalf("retrieve-more report = %+v", retrieveMore)
+	}
+	completedWithGaps := verifyAIAnswerWithContext(frame, contract, missingCoverage, missingBundle, conservative, aiAnswerVerificationContext{EvidenceCount: 1, RetrievalRound: aiRetrievalMaxRounds})
+	if completedWithGaps.Status != aiWorkflowStatusCompletedWithGaps || completedWithGaps.NextAction != aiAnswerVerificationNextActionCompleteWithGaps {
+		t.Fatalf("complete-with-gaps report = %+v", completedWithGaps)
+	}
+}
+
+func TestAIAnswerVerificationReportStableJSONFields(t *testing.T) {
+	frame := aiTaskFrame{Intent: aiTaskIntentDatabaseDirectUpdateForTest, UserGoal: "测试环境直接改价"}
+	contract := buildAIEvidenceContract(frame)
+	coverage := aiCoverageReportForTest(contract, nil, nil)
+	bundle := aiVerifierBundleForTest(coverage, aiEvidenceReliabilityHighSmartLatest)
+
+	report := verifyAIAnswer(frame, contract, coverage, bundle, "表 steam_game_price、字段 price_in_cents_with_discount 和 WHERE id 来自证据 [C1]。\nUPDATE steam_game_price SET price_in_cents_with_discount = ? WHERE id = ?; [C1]")
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal verification report: %v", err)
+	}
+	body := string(raw)
+	for _, required := range []string{`"status":"pass"`, `"reason":""`, `"details":[]`, `"next_action":"pass"`, `"failed_checks":[]`, `"rewrite_attempted":false`} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("verification report JSON missing stable field %s: %s", required, body)
+		}
+	}
+	var decoded aiAnswerVerificationReport
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("round-trip verification report: %v", err)
+	}
+	if decoded.Reason != "" || len(decoded.FailedChecks) != 0 || decoded.Status != aiAnswerVerificationStatusPass {
+		t.Fatalf("decoded report = %+v", decoded)
+	}
+}
+
+func TestAIAnswerVerifierUsesDisplayedCitationLabels(t *testing.T) {
+	frame := aiTaskFrame{Intent: aiTaskIntentDocumentQA, UserGoal: "说明当前事实"}
+	contract := buildAIEvidenceContract(frame)
+	coverage := aiCoverageReportForTest(contract, nil, nil)
+	bundle := aiEvidenceBundle{
+		BundleID: "display-citation-test",
+		Coverage: coverage.Coverage,
+		Groups: []aiEvidenceGroup{{
+			Key:               "cited_documents",
+			EvidenceIDs:       []int64{2},
+			Summary:           "raw C2 is the first included evidence shown to the model",
+			EvidenceType:      "document",
+			SourceReliability: aiEvidenceReliabilityHighSmartLatest,
+		}},
+		Excluded: []aiEvidenceExclusion{{
+			EvidenceID:        1,
+			Reason:            aiEvidenceExcludedReasonTestFixtureNonTestTask,
+			FilePath:          "internal/app/raw_c1_test.go",
+			EvidenceType:      "test_fixture",
+			SourceReliability: aiEvidenceReliabilityExcludedTestFixtureNonTest,
+		}},
+	}
+	context := aiAnswerVerificationContext{EvidenceCount: 1, RetrievalRound: aiRetrievalMaxRounds}
+
+	includedDisplayC1 := verifyAIAnswerWithContext(frame, contract, coverage, bundle, "当前事实来自展示给模型的第一条证据 [C1]。", context)
+	if includedDisplayC1.Status != aiAnswerVerificationStatusPass ||
+		!stringSliceContains(includedDisplayC1.PassedChecks, "citation_exists") ||
+		stringSliceContains(includedDisplayC1.FailedChecks, "citation_not_found") {
+		t.Fatalf("display [C1] should pass even when raw C1 was excluded: %+v", includedDisplayC1)
+	}
+
+	rawC2AsDisplayC2 := verifyAIAnswerWithContext(frame, contract, coverage, bundle, "当前事实误用 raw C2 作为展示编号 [C2]。", context)
+	if !stringSliceContains(rawC2AsDisplayC2.FailedChecks, "citation_not_found") ||
+		stringSliceContains(rawC2AsDisplayC2.PassedChecks, "citation_exists") {
+		t.Fatalf("display [C2] should fail when only one evidence item was shown: %+v", rawC2AsDisplayC2)
+	}
+
+	fallbackDisplayC1 := verifyAIAnswer(frame, contract, coverage, bundle, "直接校验 fallback 也应接受展示证据 [C1]。")
+	if fallbackDisplayC1.Status != aiAnswerVerificationStatusPass ||
+		!stringSliceContains(fallbackDisplayC1.PassedChecks, "citation_exists") ||
+		stringSliceContains(fallbackDisplayC1.FailedChecks, "citation_not_found") {
+		t.Fatalf("fallback display [C1] should pass based on included evidence count: %+v", fallbackDisplayC1)
+	}
+
+	fallbackRawC2AsDisplayC2 := verifyAIAnswer(frame, contract, coverage, bundle, "直接校验 fallback 不应接受 raw ID 编号 [C2]。")
+	if !stringSliceContains(fallbackRawC2AsDisplayC2.FailedChecks, "citation_not_found") ||
+		stringSliceContains(fallbackRawC2AsDisplayC2.PassedChecks, "citation_exists") {
+		t.Fatalf("fallback display [C2] should fail based on included evidence count: %+v", fallbackRawC2AsDisplayC2)
+	}
+}
+
+func TestAIAnswerVerifierSecretRedactionCoversProviderFormats(t *testing.T) {
+	frame := aiTaskFrame{Intent: aiTaskIntentDocumentQA, UserGoal: "说明业务事实"}
+	contract := buildAIEvidenceContract(frame)
+	coverage := aiCoverageReportForTest(contract, nil, nil)
+	bundle := aiVerifierBundleForTest(coverage, aiEvidenceReliabilityHighSmartLatest)
+	cases := []struct {
+		name      string
+		answer    string
+		forbidden string
+	}{
+		{name: "api key underscore", answer: "provider failed api_key=raw-provider-api-key [C1]", forbidden: "raw-provider-api-key"},
+		{name: "api key space", answer: "provider failed API key: raw-provider-spaced-key [C1]", forbidden: "raw-provider-spaced-key"},
+		{name: "token kv", answer: "provider failed token=raw-provider-token [C1]", forbidden: "raw-provider-token"},
+		{name: "secret phrase", answer: "provider failed secret raw-provider-secret [C1]", forbidden: "raw-provider-secret"},
+		{name: "basic auth", answer: "provider failed Authorization: Basic cmF3LXByb3ZpZGVy [C1]", forbidden: "cmF3LXByb3ZpZGVy"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			report := verifyAIAnswer(frame, contract, coverage, bundle, tc.answer)
+			if report.NextAction != aiAnswerVerificationNextActionBlockAnswer || !stringSliceContains(report.FailedChecks, "secret_exposure") {
+				t.Fatalf("secret report = %+v", report)
+			}
+			if safe := sanitizeProviderError(tc.answer); strings.Contains(safe, tc.forbidden) {
+				t.Fatalf("provider error sanitizer leaked %q: %s", tc.forbidden, safe)
+			}
+			if reportJSON := encodeJSON(report); strings.Contains(reportJSON, tc.forbidden) {
+				t.Fatalf("verification report leaked %q: %s", tc.forbidden, reportJSON)
+			}
+		})
+	}
+}
+
+func TestAIAnswerVerificationEvidencePollutionAndBranchScope(t *testing.T) {
+	frame := aiTaskFrame{Intent: aiTaskIntentDocumentQA, UserGoal: "说明业务事实"}
+	contract := buildAIEvidenceContract(frame)
+	coverage := aiCoverageReportForTest(contract, nil, nil)
+	bundle := aiVerifierBundleForTest(coverage, aiEvidenceReliabilityHighSmartLatest)
+	bundle.Excluded = []aiEvidenceExclusion{{
+		EvidenceID: 1,
+		Reason:     aiEvidenceExcludedReasonTestFixtureNonTestTask,
+		FilePath:   "internal/app/payment_test.go",
+	}}
+
+	testPollution := verifyAIAnswerWithContext(frame, contract, coverage, bundle, "业务事实来自 internal/app/payment_test.go [C1]。", aiAnswerVerificationContext{EvidenceCount: 1, RetrievalRound: aiRetrievalMaxRounds})
+	if !stringSliceContains(testPollution.FailedChecks, "test_fixture_pollution") {
+		t.Fatalf("test fixture pollution report = %+v", testPollution)
+	}
+
+	excludedCitationBundle := aiVerifierBundleForTest(coverage, aiEvidenceReliabilityHighSmartLatest)
+	excludedCitationBundle.Excluded = []aiEvidenceExclusion{{
+		EvidenceID: 2,
+		Reason:     aiEvidenceExcludedReasonTestFixtureNonTestTask,
+		FilePath:   "internal/app/excluded_test.go",
+	}}
+	excludedCitation := verifyAIAnswerWithContext(frame, contract, coverage, excludedCitationBundle, "业务事实来自被排除证据 [C2]。", aiAnswerVerificationContext{EvidenceCount: 1, RetrievalRound: aiRetrievalMaxRounds})
+	if !stringSliceContains(excludedCitation.FailedChecks, "citation_not_found") {
+		t.Fatalf("excluded citation report = %+v", excludedCitation)
+	}
+
+	branchBundle := aiVerifierBundleForTest(coverage, aiEvidenceReliabilityMediumBranchCandidate)
+	branchMismatch := verifyAIAnswerWithContext(frame, contract, coverage, branchBundle, "这是智能最新事实，接口已经合入 [C1]。", aiAnswerVerificationContext{EvidenceCount: 1, RetrievalRound: aiRetrievalMaxRounds})
+	if !stringSliceContains(branchMismatch.FailedChecks, "branch_scope_mismatch") {
+		t.Fatalf("branch mismatch report = %+v", branchMismatch)
+	}
+	branchCandidatePromotion := verifyAIAnswerWithContext(frame, contract, coverage, branchBundle, "功能分支候选已合入主分支/已上线/当前最新事实 [C1]", aiAnswerVerificationContext{EvidenceCount: 1, RetrievalRound: aiRetrievalMaxRounds})
+	if !stringSliceContains(branchCandidatePromotion.FailedChecks, "branch_scope_mismatch") {
+		t.Fatalf("branch candidate promotion report = %+v", branchCandidatePromotion)
+	}
+	branchCandidateUnconfirmed := verifyAIAnswerWithContext(frame, contract, coverage, branchBundle, "功能分支候选，尚未确认合入主分支或上线 [C1]", aiAnswerVerificationContext{EvidenceCount: 1, RetrievalRound: aiRetrievalMaxRounds})
+	if stringSliceContains(branchCandidateUnconfirmed.FailedChecks, "branch_scope_mismatch") || !stringSliceContains(branchCandidateUnconfirmed.PassedChecks, "branch_scope") {
+		t.Fatalf("branch candidate unconfirmed report = %+v", branchCandidateUnconfirmed)
+	}
+}
+
 func TestAIAgentRetrievalResultLegacyJSONCompatibility(t *testing.T) {
 	retrieval := aiRetrievalResult{
 		TaskFrame:      &aiTaskFrame{},
@@ -837,6 +1029,24 @@ func aiAnswerComposerRetrievalForTest(frame aiTaskFrame, contract aiEvidenceCont
 		EvidenceBundle:   &bundle,
 		Coverage:         &coverage,
 		ContractCoverage: &coverage,
+	}
+}
+
+func aiVerifierBundleForTest(coverage aiContractCoverageReport, reliability string) aiEvidenceBundle {
+	groups := make([]aiEvidenceGroup, 0, len(coverage.Items))
+	for _, item := range coverage.Items {
+		groups = append(groups, aiEvidenceGroup{
+			Key:               item.Key,
+			EvidenceIDs:       []int64{1},
+			Summary:           item.Reason,
+			EvidenceType:      "code",
+			SourceReliability: reliability,
+		})
+	}
+	return aiEvidenceBundle{
+		BundleID: "verifier-test-bundle",
+		Coverage: coverage.Coverage,
+		Groups:   groups,
 	}
 }
 

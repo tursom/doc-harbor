@@ -85,12 +85,16 @@ type aiContractCoverageReport struct {
 }
 
 type aiAnswerVerificationReport struct {
-	Status       string   `json:"status"`
-	Reason       string   `json:"reason,omitempty"`
-	Details      []string `json:"details"`
-	PassedChecks []string `json:"passed_checks,omitempty"`
-	FailedChecks []string `json:"failed_checks,omitempty"`
-	NextAction   string   `json:"next_action"`
+	AgentWorkflowVersion string   `json:"agent_workflow_version,omitempty"`
+	AnswerMode           string   `json:"answer_mode,omitempty"`
+	Status               string   `json:"status"`
+	Reason               string   `json:"reason"`
+	Details              []string `json:"details"`
+	PassedChecks         []string `json:"passed_checks,omitempty"`
+	FailedChecks         []string `json:"failed_checks"`
+	NextAction           string   `json:"next_action"`
+	RewriteAttempted     bool     `json:"rewrite_attempted"`
+	WorkflowStatus       string   `json:"workflow_status,omitempty"`
 }
 
 type aiRetrievalRoundPlan struct {

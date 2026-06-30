@@ -433,7 +433,7 @@ func TestAIAgentWorkflowPolicyDefaultsToShadowAndKeepsCompatibility(t *testing.T
 	if !ok {
 		t.Fatalf("checkpoint sse compatibility has unexpected type: %#v", checkpoint["sse_compatibility"])
 	}
-	for _, event := range []string{"run_started", "task_frame", "contract", "stage", "provider_attempt", "citations", "answer_delta", "message_done"} {
+	for _, event := range []string{"run_started", "task_frame", "contract", "stage", "provider_attempt", "verification", "citations", "answer_delta", "message_done"} {
 		if !testStringSliceContains(events, event) {
 			t.Fatalf("checkpoint missing legacy SSE event %s: %+v", event, events)
 		}
@@ -1876,7 +1876,7 @@ func TestAIAgentRetrievalOrchestratorCompletedWithGapsDiagnostics(t *testing.T) 
 		t.Fatalf("decode question response: %v", err)
 	}
 	if result.Run.Status != aiWorkflowStatusCompletedWithGaps || result.Run.VerificationStatus != aiWorkflowStatusCompletedWithGaps {
-		t.Fatalf("run status = %s/%s, want completed_with_gaps", result.Run.Status, result.Run.VerificationStatus)
+		t.Fatalf("run status = %s/%s, want completed_with_gaps; report=%s; answer=%s", result.Run.Status, result.Run.VerificationStatus, result.Run.VerificationReportJSON, result.Message.Content)
 	}
 	if strings.Contains(result.Message.Content, "UPDATE ") {
 		t.Fatalf("completed_with_gaps local answer should not include deterministic UPDATE: %s", result.Message.Content)
@@ -1932,6 +1932,112 @@ func TestAIAgentRetrievalOrchestratorCompletedWithGapsDiagnostics(t *testing.T) 
 	}
 	if !foundRoundSummary {
 		t.Fatalf("diagnostics detail missing retrieval_round summary: %+v", detailResp.Steps)
+	}
+}
+
+func TestAIAnswerVerificationRewriteAndSecretFallback(t *testing.T) {
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	rewriteServer := newAIAnswerModelTestServer(t, http.StatusOK, `{"choices":[{"message":{"role":"assistant","content":"表 steam_game_price、字段 price_in_cents_with_discount 和 WHERE id 来自证据 [C1]。\nUPDATE steam_game_price SET price_in_cents_with_discount = ? WHERE id = ?; [C1]"}}],"usage":{"prompt_tokens":3,"completion_tokens":4}}`)
+	secret, err := server.createOrUpdateAISecret(ctx, 0, aiSecretRequest{Name: "rewrite-api-key", SecretType: "api_key", Value: "sk-test-rewrite-secret-1234"}, "test")
+	if err != nil {
+		t.Fatalf("create rewrite secret: %v", err)
+	}
+	cfg := defaultAIConfig()
+	cfg.Enabled = true
+	cfg.Chat.Providers = []AIProvider{{
+		ProviderKey:           "rewrite-main",
+		Name:                  "RewriteProvider",
+		Priority:              10,
+		ProviderType:          "openai_compatible",
+		BaseURL:               rewriteServer.URL,
+		Model:                 "rewrite-model",
+		APIKeySecretID:        secret.ID,
+		CostTier:              "low",
+		RequestTimeoutSeconds: 5,
+		MaxRPM:                60,
+	}}
+	cfg.Chat.Routing = buildDefaultRouting(ctx, server.db, cfg.Chat.Providers)
+	active := AIConfigVersion{Version: 1, ConfigHash: "rewrite-test", Config: cfg}
+
+	frame := aiTaskFrame{Intent: aiTaskIntentDatabaseDirectUpdateForTest, UserGoal: "测试环境直接改价"}
+	contract := buildAIEvidenceContract(frame)
+	coverage := aiCoverageReportForTest(contract, nil, nil)
+	retrieval := aiAnswerComposerRetrievalForTest(frame, contract, coverage, []aiEvidence{{
+		Repo: Repository{Name: "game-service"},
+		Citation: AIMessageCitation{
+			RepoID:      1,
+			SourceScope: "smart_latest",
+			Branch:      "main",
+			CommitSHA:   "abc123",
+			FilePath:    "models/steam_game_price.go",
+			LineStart:   1,
+			LineEnd:     20,
+		},
+		Content:           "func (SteamGamePrice) TableName() string { return \"steam_game_price\" }\nPriceInCentsWithDiscount int `gorm:\"column:price_in_cents_with_discount\"`\nfunc Find(id int64) { db.Where(\"id = ?\", id).Find(&price) }",
+		EvidenceType:      "orm_model",
+		SourceReliability: aiEvidenceReliabilityHighSmartLatest,
+		ContractKeys:      []string{"table_identity", "update_fields", "where_conditions"},
+	}})
+	retrieval.Rounds = []aiRetrievalRoundPlan{{Round: aiRetrievalMaxRounds}}
+
+	outcome := server.verifyAndMaybeRewriteAIAnswer(ctx, active, "怎么直接修改测试价格？", retrieval, aiModelResult{
+		Content:      "没有官方 UPDATE 示例，无法提供 SQL。[C1]",
+		ProviderName: "DraftProvider",
+		Model:        "draft-model",
+	}, time.Now())
+	if outcome.Report.Status != aiAnswerVerificationStatusPass || !outcome.Report.RewriteAttempted {
+		t.Fatalf("rewrite outcome report = %+v content=%s", outcome.Report, outcome.Result.Content)
+	}
+	if !strings.Contains(outcome.Result.Content, "UPDATE steam_game_price SET price_in_cents_with_discount = ? WHERE id = ?") {
+		t.Fatalf("rewrite did not keep verified SQL placeholders: %s", outcome.Result.Content)
+	}
+
+	secretOutcome := server.verifyAndMaybeRewriteAIAnswer(ctx, active, "怎么直接修改测试价格？", retrieval, aiModelResult{
+		Content:      "供应商错误 api_key=raw-answer-api-key API key: raw-answer-spaced-key token=raw-answer-token secret raw-answer-secret Authorization: Basic cmF3LWFuc3dlcg== [C1]",
+		ProviderName: "DraftProvider",
+		Model:        "draft-model",
+		FailoverJSON: `{"error":"api_key=raw-answer-api-key token=raw-answer-token secret raw-answer-secret Authorization: Basic cmF3LWFuc3dlcg=="}`,
+	}, time.Now())
+	reportJSON := encodeJSON(secretOutcome.Report)
+	if secretOutcome.Report.NextAction != aiAnswerVerificationNextActionBlockAnswer || secretOutcome.Result.ProviderName != "local-verifier" {
+		t.Fatalf("secret fallback outcome = %+v result=%+v", secretOutcome.Report, secretOutcome.Result)
+	}
+	for _, forbidden := range []string{"raw-answer-api-key", "raw-answer-spaced-key", "raw-answer-token", "raw-answer-secret", "cmF3LWFuc3dlcg"} {
+		if strings.Contains(secretOutcome.Result.Content, forbidden) || strings.Contains(reportJSON, forbidden) {
+			t.Fatalf("secret leaked after verifier fallback: forbidden=%s report=%s content=%s", forbidden, reportJSON, secretOutcome.Result.Content)
+		}
+	}
+
+	failingRewriteServer := newAIAnswerModelTestServer(t, http.StatusTooManyRequests, `{"error":"api_key=raw-rewrite-api-key API key: raw-rewrite-spaced-key token=raw-rewrite-token secret raw-rewrite-secret Authorization: Basic cmF3LXJld3JpdGU="}`)
+	failCfg := defaultAIConfig()
+	failCfg.Enabled = true
+	failCfg.Chat.Providers = []AIProvider{{
+		ProviderKey:           "rewrite-failing",
+		Name:                  "RewriteFailingProvider",
+		Priority:              10,
+		ProviderType:          "openai_compatible",
+		BaseURL:               failingRewriteServer.URL,
+		Model:                 "rewrite-failing-model",
+		APIKeySecretID:        secret.ID,
+		CostTier:              "low",
+		RequestTimeoutSeconds: 5,
+		MaxRPM:                60,
+	}}
+	failCfg.Chat.Routing = buildDefaultRouting(ctx, server.db, failCfg.Chat.Providers)
+	rewriteFailure := server.verifyAndMaybeRewriteAIAnswer(ctx, AIConfigVersion{Version: 1, ConfigHash: "rewrite-failure-test", Config: failCfg}, "怎么直接修改测试价格？", retrieval, aiModelResult{
+		Content:      "没有官方 UPDATE 示例，无法提供 SQL。[C1]",
+		ProviderName: "DraftProvider",
+		Model:        "draft-model",
+	}, time.Now())
+	rewriteFailureReport := encodeJSON(rewriteFailure.Report)
+	if rewriteFailure.Report.Status != aiAnswerVerificationStatusVerificationFailed || !rewriteFailure.Report.RewriteAttempted || rewriteFailure.Result.ProviderName != "local-verifier" {
+		t.Fatalf("rewrite failure outcome = %+v result=%+v", rewriteFailure.Report, rewriteFailure.Result)
+	}
+	for _, forbidden := range []string{"raw-rewrite-api-key", "raw-rewrite-spaced-key", "raw-rewrite-token", "raw-rewrite-secret", "cmF3LXJld3JpdGU"} {
+		if strings.Contains(rewriteFailureReport, forbidden) || strings.Contains(rewriteFailure.Result.Content, forbidden) {
+			t.Fatalf("rewrite failure leaked %s: report=%s content=%s", forbidden, rewriteFailureReport, rewriteFailure.Result.Content)
+		}
 	}
 }
 
@@ -2286,8 +2392,8 @@ func TestAIQuestionStreamEndpointPersistsDeltasAndProviderFailover(t *testing.T)
 	server := newWebhookTestServer(t)
 	ctx := context.Background()
 	createAIStreamEvidenceRepo(t, server)
-	failingProvider := newAIStreamHTTPErrorTestServer(t, http.StatusTooManyRequests, `{"error":"rate limit sk-test-stream-leak-12345678"}`)
-	successProvider := newAIStreamModelTestServer(t, []string{"第一段", "第二段"}, true)
+	failingProvider := newAIStreamHTTPErrorTestServer(t, http.StatusTooManyRequests, `{"error":"rate limit sk-test-stream-leak-12345678 api_key=raw-stream-api-key API key: raw-stream-spaced-key token=raw-stream-token secret raw-stream-secret Authorization: Basic cmF3LXN0cmVhbQ=="}`)
+	successProvider := newAIStreamModelTestServer(t, []string{"第一段 [C1]", "第二段 [C1]"}, true)
 	installAIStreamConfig(t, server, []AIProvider{
 		newAIStreamProvider(t, server, "deepseek-main", "DeepSeek", failingProvider.URL, "deepseek-v4-flash", "sk-test-first-stream-1234", 10),
 		newAIStreamProvider(t, server, "openai-main", "OpenAI", successProvider.URL, "gpt-4.1-mini", "sk-test-second-stream-5678", 20),
@@ -2305,10 +2411,13 @@ func TestAIQuestionStreamEndpointPersistsDeltasAndProviderFailover(t *testing.T)
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
 	body := recorder.Body.String()
-	for _, event := range []string{"event: user_message", "event: run_started", "event: task_frame", "event: contract", "event: stage", "event: provider_attempt", "event: answer_delta", "event: message_done", "event: done"} {
+	for _, event := range []string{"event: user_message", "event: run_started", "event: task_frame", "event: contract", "event: stage", "event: provider_attempt", "event: verification", "event: answer_delta", "event: message_done", "event: done"} {
 		if !strings.Contains(body, event) {
 			t.Fatalf("stream body missing %s: %s", event, body)
 		}
+	}
+	if strings.Index(body, "event: answer_delta") < strings.Index(body, "event: verification") {
+		t.Fatalf("answer_delta was sent before verification: %s", body)
 	}
 	if !strings.Contains(body, `"contract_id":"document_qa.v1"`) || !strings.Contains(body, `"required_keys"`) {
 		t.Fatalf("stream body missing contract summary: %s", body)
@@ -2322,13 +2431,21 @@ func TestAIQuestionStreamEndpointPersistsDeltasAndProviderFailover(t *testing.T)
 	if strings.Contains(body, "sk-test") {
 		t.Fatalf("stream response leaked API key: %s", body)
 	}
+	for _, forbidden := range []string{"raw-stream-api-key", "raw-stream-spaced-key", "raw-stream-token", "raw-stream-secret", "cmF3LXN0cmVhbQ"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("stream response leaked provider failure secret %s: %s", forbidden, body)
+		}
+	}
+	if strings.Contains(body, "第一段 [C1]") || strings.Contains(body, "第二段 [C1]") {
+		t.Fatalf("stream response exposed pre-verification model chunks: %s", body)
+	}
 	var content, status, provider, model string
 	if err := server.db.QueryRowContext(ctx, `SELECT content, status, provider_name, model
 		FROM ai_messages WHERE session_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1`, session.ID).
 		Scan(&content, &status, &provider, &model); err != nil {
 		t.Fatalf("load assistant message: %v", err)
 	}
-	if content != "第一段第二段" || status != "success" || provider != "OpenAI" || model != "gpt-4.1-mini" {
+	if !strings.Contains(content, "DocHarbor 后端根据只读 Git 检索得到的候选证据摘要") || status != "success" || provider != "local-verifier" || model != "none" {
 		t.Fatalf("assistant message = content=%q status=%q provider=%q model=%q", content, status, provider, model)
 	}
 }
@@ -2357,11 +2474,14 @@ func TestAIQuestionStreamProviderFailureAfterDeltaSavesPartialWithoutFailover(t 
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
 	body := recorder.Body.String()
-	if !strings.Contains(body, "event: error") || !strings.Contains(body, `"partial_message_id"`) {
-		t.Fatalf("stream body missing partial error event: %s", body)
+	if strings.Contains(body, "event: error") || strings.Contains(body, `"partial_message_id"`) {
+		t.Fatalf("stream should not expose partial model error after buffered delta: %s", body)
 	}
-	if strings.Contains(body, `"provider_key":"openai-main"`) || strings.Contains(body, "不应出现") {
-		t.Fatalf("stream should not fail over after first delta: %s", body)
+	if !strings.Contains(body, "event: verification") || !strings.Contains(body, "event: answer_delta") {
+		t.Fatalf("stream should release verified fallback answer: %s", body)
+	}
+	if strings.Contains(body, `"provider_key":"openai-main"`) || strings.Contains(body, "不应出现") || strings.Contains(body, "部分回答") {
+		t.Fatalf("stream should not expose failed partial delta or fail over after first buffered delta: %s", body)
 	}
 	var content, status, errorMessage string
 	if err := server.db.QueryRowContext(ctx, `SELECT content, status, error_message
@@ -2369,8 +2489,8 @@ func TestAIQuestionStreamProviderFailureAfterDeltaSavesPartialWithoutFailover(t 
 		Scan(&content, &status, &errorMessage); err != nil {
 		t.Fatalf("load assistant message: %v", err)
 	}
-	if content != "部分回答" || status != "partial" || errorMessage == "" {
-		t.Fatalf("assistant partial message = content=%q status=%q error=%q", content, status, errorMessage)
+	if strings.Contains(content, "部分回答") || status != "success" || errorMessage != "" {
+		t.Fatalf("assistant fallback message = content=%q status=%q error=%q", content, status, errorMessage)
 	}
 }
 
@@ -2389,7 +2509,7 @@ func TestAIQuestionStreamContextCancelSavesPartial(t *testing.T) {
 	}
 	streamCtx, cancel := context.WithCancel(ctx)
 	err = server.askAIQuestionStream(streamCtx, session.ID, "Hello README", AIQuestionScope{RepoMode: "global"}, "test", func(event string, data any) error {
-		if event == "answer_delta" {
+		if event == "provider_attempt" {
 			cancel()
 			return streamCtx.Err()
 		}
@@ -2404,8 +2524,8 @@ func TestAIQuestionStreamContextCancelSavesPartial(t *testing.T) {
 		Scan(&content, &status, &errorMessage); err != nil {
 		t.Fatalf("load assistant message: %v", err)
 	}
-	if content != "取消前" || status != "partial" || errorMessage == "" {
-		t.Fatalf("assistant canceled partial = content=%q status=%q error=%q", content, status, errorMessage)
+	if content != "" || status != "failed" || errorMessage == "" {
+		t.Fatalf("assistant canceled buffered stream = content=%q status=%q error=%q", content, status, errorMessage)
 	}
 }
 

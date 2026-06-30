@@ -543,6 +543,19 @@ export interface AIEvidenceContractSummary {
   forbidden?: string[]
 }
 
+export interface AIAnswerVerificationReport {
+  agent_workflow_version?: string
+  answer_mode?: string
+  status: string
+  reason?: string
+  details: string[]
+  passed_checks?: string[]
+  failed_checks?: string[]
+  next_action: string
+  rewrite_attempted: boolean
+  workflow_status?: string
+}
+
 export type AIStreamEvent =
   | { type: 'user_message'; message: AIMessage }
   | { type: 'run_started'; run: AIAgentRun; assistant_message: AIMessage }
@@ -552,6 +565,7 @@ export type AIStreamEvent =
   | { type: 'service_candidates'; items: AIServiceCandidate[] }
   | { type: 'citations'; items: AIMessageCitation[] }
   | AIStreamProviderAttemptEvent
+  | { type: 'verification'; report: AIAnswerVerificationReport }
   | { type: 'answer_delta'; message_id: number; delta: string }
   | {
       type: 'message_done'

@@ -1605,6 +1605,17 @@ async function handleAIStreamEvent(event: AIStreamEvent) {
         meta: `${event.model || '-'} · 优先级 ${event.priority}`
       })
       break
+    case 'verification':
+      addEvidenceChainItem({
+        kind: 'stage',
+        title: '答案校验',
+        detail: event.report.reason
+          ? `${event.report.status} · ${event.report.reason}`
+          : `${event.report.status} · ${event.report.next_action}`,
+        status: event.report.status === 'pass' ? 'success' : event.report.status,
+        meta: event.report.failed_checks?.join(' · ') || ''
+      })
+      break
     case 'answer_delta':
       appendAIAnswerDelta(event.message_id, event.delta)
       break

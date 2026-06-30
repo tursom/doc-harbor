@@ -54,6 +54,7 @@ func newAIAgentWorkflowPolicy(version string) aiAgentWorkflowPolicy {
 			"contract",
 			"stage",
 			"provider_attempt",
+			"verification",
 			"citations",
 			"answer_delta",
 			"message_done",
