@@ -315,25 +315,26 @@ type aiDiagnosticsScanRun struct {
 }
 
 type aiDiagnosticsStep struct {
-	ID                  int64  `json:"id"`
-	RunID               int64  `json:"run_id"`
-	ParentStepID        int64  `json:"parent_step_id"`
-	AgentName           string `json:"agent_name"`
-	StepType            string `json:"step_type"`
-	Status              string `json:"status"`
-	ToolName            string `json:"tool_name"`
-	TaskClass           string `json:"task_class"`
-	Model               string `json:"model"`
-	ProviderName        string `json:"provider_name"`
-	ModelRouteReason    string `json:"model_route_reason"`
-	EscalatedFromStepID int64  `json:"escalated_from_step_id"`
-	TokenInput          int    `json:"token_input"`
-	TokenOutput         int    `json:"token_output"`
-	EstimatedCost       string `json:"estimated_cost"`
-	LatencyMS           int    `json:"latency_ms"`
-	ErrorMessage        string `json:"error_message"`
-	CreatedAt           string `json:"created_at"`
-	FinishedAt          string `json:"finished_at"`
+	ID                  int64          `json:"id"`
+	RunID               int64          `json:"run_id"`
+	ParentStepID        int64          `json:"parent_step_id"`
+	AgentName           string         `json:"agent_name"`
+	StepType            string         `json:"step_type"`
+	Status              string         `json:"status"`
+	ToolName            string         `json:"tool_name"`
+	TaskClass           string         `json:"task_class"`
+	Model               string         `json:"model"`
+	ProviderName        string         `json:"provider_name"`
+	ModelRouteReason    string         `json:"model_route_reason"`
+	EscalatedFromStepID int64          `json:"escalated_from_step_id"`
+	TokenInput          int            `json:"token_input"`
+	TokenOutput         int            `json:"token_output"`
+	EstimatedCost       string         `json:"estimated_cost"`
+	LatencyMS           int            `json:"latency_ms"`
+	ErrorMessage        string         `json:"error_message"`
+	Summary             map[string]any `json:"summary,omitempty"`
+	CreatedAt           string         `json:"created_at"`
+	FinishedAt          string         `json:"finished_at"`
 }
 
 type aiDiagnosticsRunQuery struct {
@@ -395,6 +396,7 @@ type aiRetrievalResult struct {
 	EvidenceBundle    *aiEvidenceBundle         `json:"evidence_bundle,omitempty"`
 	Coverage          *aiContractCoverageReport `json:"coverage,omitempty"`
 	Rounds            []aiRetrievalRoundPlan    `json:"rounds,omitempty"`
+	Curation          *aiEvidenceCurationResult `json:"-"`
 }
 
 type aiConversationContext struct {
@@ -412,6 +414,8 @@ type aiQuestionPreparation struct {
 	GeneratedSearchTerms []string
 	TaskFrame            *aiTaskFrame
 	Contract             *aiEvidenceContract
+	EvidenceBundle       *aiEvidenceBundle
+	Coverage             *aiContractCoverageReport
 }
 
 type aiEvidence struct {
@@ -3724,11 +3728,180 @@ func sanitizeAIDiagnosticsSteps(steps []AIAgentStep) []aiDiagnosticsStep {
 			EstimatedCost:       step.EstimatedCost,
 			LatencyMS:           step.LatencyMS,
 			ErrorMessage:        sanitizeProviderError(step.ErrorMessage),
+			Summary:             sanitizeAIDiagnosticsStepSummary(step),
 			CreatedAt:           step.CreatedAt,
 			FinishedAt:          step.FinishedAt,
 		})
 	}
 	return out
+}
+
+func sanitizeAIDiagnosticsStepSummary(step AIAgentStep) map[string]any {
+	if step.AgentName == "evidence_curator" {
+		if summary := sanitizeAIDiagnosticsEvidenceCuratorSummary(step.OutputJSON); len(summary) > 0 {
+			return summary
+		}
+	}
+
+	summary := map[string]any{}
+	if inputSummary, ok := extractAIDiagnosticsExplicitSummary(step.InputJSON); ok {
+		summary["input"] = inputSummary
+	}
+	if outputSummary, ok := extractAIDiagnosticsExplicitSummary(step.OutputJSON); ok {
+		summary["output"] = outputSummary
+	}
+	if len(summary) == 0 {
+		return nil
+	}
+	return summary
+}
+
+func sanitizeAIDiagnosticsEvidenceCuratorSummary(raw string) map[string]any {
+	payload, ok := decodeAIDiagnosticsSummaryJSON(raw)
+	if !ok {
+		return nil
+	}
+	fields, ok := payload.(map[string]any)
+	if !ok {
+		return nil
+	}
+	summary := map[string]any{}
+	for _, key := range []string{"evidence_bundle", "coverage", "annotations", "included_count", "excluded_count"} {
+		if value, exists := fields[key]; exists {
+			summary[key] = sanitizeAIDiagnosticsSummaryValue(value, 0)
+		}
+	}
+	if len(summary) == 0 {
+		return nil
+	}
+	return summary
+}
+
+func extractAIDiagnosticsExplicitSummary(raw string) (any, bool) {
+	payload, ok := decodeAIDiagnosticsSummaryJSON(raw)
+	if !ok {
+		return nil, false
+	}
+	fields, ok := payload.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	for _, key := range []string{
+		"input_summary_json",
+		"output_summary_json",
+		"summary_json",
+		"payload_summary_json",
+		"input_summary",
+		"output_summary",
+		"summary",
+		"payload_summary",
+	} {
+		if value, exists := fields[key]; exists {
+			return sanitizeAIDiagnosticsSummaryValue(decodeAIDiagnosticsNestedSummary(value), 0), true
+		}
+	}
+	return nil, false
+}
+
+func decodeAIDiagnosticsNestedSummary(value any) any {
+	text, ok := value.(string)
+	if !ok {
+		return value
+	}
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[") {
+		return value
+	}
+	decoded, ok := decodeAIDiagnosticsSummaryJSON(trimmed)
+	if !ok {
+		return value
+	}
+	return decoded
+}
+
+func decodeAIDiagnosticsSummaryJSON(raw string) (any, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, false
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	var payload any
+	if err := decoder.Decode(&payload); err != nil {
+		return nil, false
+	}
+	return payload, true
+}
+
+func sanitizeAIDiagnosticsSummaryValue(value any, depth int) any {
+	if depth > 8 {
+		return "[truncated]"
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		out := map[string]any{}
+		for key, nested := range typed {
+			if aiDiagnosticsSummaryKeySensitive(key) {
+				continue
+			}
+			out[key] = sanitizeAIDiagnosticsSummaryValue(nested, depth+1)
+		}
+		return out
+	case []any:
+		limit := len(typed)
+		if limit > 50 {
+			limit = 50
+		}
+		out := make([]any, 0, limit+1)
+		for i := 0; i < limit; i++ {
+			out = append(out, sanitizeAIDiagnosticsSummaryValue(typed[i], depth+1))
+		}
+		if len(typed) > limit {
+			out = append(out, map[string]any{"truncated_count": len(typed) - limit})
+		}
+		return out
+	case string:
+		return sanitizeAIDiagnosticsSummaryString(typed)
+	default:
+		return typed
+	}
+}
+
+func aiDiagnosticsSummaryKeySensitive(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	normalized = strings.ReplaceAll(normalized, " ", "_")
+	if strings.Contains(normalized, "api_key") ||
+		strings.Contains(normalized, "apikey") ||
+		strings.Contains(normalized, "api_token") ||
+		strings.Contains(normalized, "apitoken") ||
+		strings.Contains(normalized, "authorization") ||
+		strings.Contains(normalized, "bearer") ||
+		strings.Contains(normalized, "secret") ||
+		strings.Contains(normalized, "credential") {
+		return true
+	}
+	switch normalized {
+	case "token", "access_token", "accesstoken", "refresh_token", "refreshtoken", "id_token", "idtoken", "auth_token", "authtoken":
+		return true
+	default:
+		return strings.HasSuffix(normalized, "_token")
+	}
+}
+
+func sanitizeAIDiagnosticsSummaryString(value string) string {
+	value = strings.TrimSpace(whitespacePattern.ReplaceAllString(value, " "))
+	for _, pattern := range []*regexp.Regexp{
+		diagnosticsSummaryAuthHeaderPattern,
+		diagnosticsSummaryBearerPattern,
+		diagnosticsSummarySensitiveKVPattern,
+		diagnosticsSummarySecretPhrasePattern,
+		diagnosticsSummaryJWTPattern,
+		secretTokenPattern,
+	} {
+		value = pattern.ReplaceAllString(value, "[redacted]")
+	}
+	return truncate(value, 500)
 }
 
 func aiRunDurationMS(run AIAgentRun) int64 {
@@ -4003,6 +4176,10 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 		return aiQuestionResult{}, err
 	}
 	applyAIConversationContext(&retrieval, prepared)
+	prepared.EvidenceBundle = retrieval.EvidenceBundle
+	prepared.Coverage = retrieval.Coverage
+	checkpoint = buildAIAgentRunCheckpoint(scope, active.Config.Chat.Routing.DefaultTaskClass, prepared)
+	checkpointJSON = encodeJSON(checkpoint)
 	_ = insertAIStep(ctx, s.db, AIAgentStep{
 		RunID:      run.ID,
 		AgentName:  "retrieval",
@@ -4010,10 +4187,15 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 		Status:     "success",
 		ToolName:   "search_code_evidence",
 		InputJSON:  encodeJSON(map[string]any{"source_mode": retrieval.Scope.SourceMode, "repo_ids": retrieval.Scope.RepoIDs}),
-		OutputJSON: encodeJSON(map[string]any{"evidence_count": len(retrieval.Evidence), "service_candidate_count": len(retrieval.ServiceCandidates)}),
+		OutputJSON: encodeJSON(map[string]any{"evidence_count": len(retrieval.Evidence), "service_candidate_count": len(retrieval.ServiceCandidates), "excluded_evidence_count": len(retrieval.EvidenceBundle.Excluded)}),
 		CreatedAt:  nowString(),
 		FinishedAt: nowString(),
 	})
+	if retrieval.Curation != nil {
+		curatorStep := buildAIEvidenceCuratorStep(retrieval.TaskFrame, retrieval.Contract, *retrieval.Curation, len(retrieval.Curation.Annotations))
+		curatorStep.RunID = run.ID
+		_ = insertAIStep(ctx, s.db, curatorStep)
+	}
 
 	var modelResult aiModelResult
 	if len(retrieval.Evidence) == 0 {
@@ -4251,6 +4433,11 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 		return nil
 	}
 	applyAIConversationContext(&retrieval, prepared)
+	prepared.EvidenceBundle = retrieval.EvidenceBundle
+	prepared.Coverage = retrieval.Coverage
+	checkpoint = buildAIAgentRunCheckpoint(scope, active.Config.Chat.Routing.DefaultTaskClass, prepared)
+	checkpointJSON = encodeJSON(checkpoint)
+	run.CheckpointJSON = checkpointJSON
 	if err := insertAIStep(ctx, s.db, AIAgentStep{
 		RunID:      run.ID,
 		AgentName:  "retrieval",
@@ -4258,11 +4445,18 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 		Status:     "success",
 		ToolName:   "search_code_evidence",
 		InputJSON:  encodeJSON(map[string]any{"source_mode": retrieval.Scope.SourceMode, "repo_ids": retrieval.Scope.RepoIDs}),
-		OutputJSON: encodeJSON(map[string]any{"evidence_count": len(retrieval.Evidence), "service_candidate_count": len(retrieval.ServiceCandidates)}),
+		OutputJSON: encodeJSON(map[string]any{"evidence_count": len(retrieval.Evidence), "service_candidate_count": len(retrieval.ServiceCandidates), "excluded_evidence_count": len(retrieval.EvidenceBundle.Excluded)}),
 		CreatedAt:  nowString(),
 		FinishedAt: nowString(),
 	}); err != nil {
 		return err
+	}
+	if retrieval.Curation != nil {
+		curatorStep := buildAIEvidenceCuratorStep(retrieval.TaskFrame, retrieval.Contract, *retrieval.Curation, len(retrieval.Curation.Annotations))
+		curatorStep.RunID = run.ID
+		if err := insertAIStep(ctx, s.db, curatorStep); err != nil {
+			return err
+		}
 	}
 	if err := emit("stage", aiStreamStageEvent{
 		Stage:          currentState,
@@ -5128,22 +5322,53 @@ func (s *Server) retrieveAIEvidenceWithTaskFrame(ctx context.Context, question s
 	if len(evidence) > maxChunks {
 		evidence = evidence[:maxChunks]
 	}
+	effectiveFrame := frame
+	if effectiveFrame == nil {
+		generatedFrame := aiTaskFrame{
+			Intent:     aiTaskIntentFromLegacy(intent),
+			KnownTerms: append([]string(nil), terms...),
+		}
+		effectiveFrame = &generatedFrame
+	}
+	effectiveContract := contract
+	if effectiveContract == nil {
+		generatedContract := buildAIEvidenceContract(*effectiveFrame)
+		effectiveContract = &generatedContract
+	}
+	curation := curateAIEvidence(effectiveFrame, effectiveContract, evidence)
+	evidence = curation.Evidence
 	candidates := buildAIServiceCandidates(repos, evidence)
 	plan := map[string]any{
-		"intent":             intent,
-		"source_mode":        scope.SourceMode,
-		"repo_mode":          scope.RepoMode,
-		"terms":              terms,
-		"chunker_version":    aiChunkerVersion,
-		"candidate_branches": strings.Contains(scope.SourceMode, "branch"),
+		"intent":                  intent,
+		"source_mode":             scope.SourceMode,
+		"repo_mode":               scope.RepoMode,
+		"terms":                   terms,
+		"chunker_version":         aiChunkerVersion,
+		"candidate_branches":      strings.Contains(scope.SourceMode, "branch"),
+		"raw_evidence_count":      len(curation.Annotations),
+		"curated_evidence_count":  len(evidence),
+		"excluded_evidence_count": len(curation.ExcludedEvidence),
+		"evidence_bundle":         curation.Bundle,
+		"curator_coverage":        curation.Coverage,
 	}
-	if frame != nil {
-		plan["task_frame"] = frame
+	if effectiveFrame != nil {
+		plan["task_frame"] = effectiveFrame
 	}
-	if contract != nil {
-		plan["evidence_contract"] = summarizeAIEvidenceContract(*contract)
+	if effectiveContract != nil {
+		plan["evidence_contract"] = summarizeAIEvidenceContract(*effectiveContract)
 	}
-	return aiRetrievalResult{Intent: intent, Scope: scope, Plan: plan, Evidence: evidence, ServiceCandidates: candidates, TaskFrame: frame, Contract: contract}, nil
+	return aiRetrievalResult{
+		Intent:            intent,
+		Scope:             scope,
+		Plan:              plan,
+		Evidence:          evidence,
+		ServiceCandidates: candidates,
+		TaskFrame:         effectiveFrame,
+		Contract:          effectiveContract,
+		EvidenceBundle:    &curation.Bundle,
+		Coverage:          &curation.Coverage,
+		Curation:          &curation,
+	}, nil
 }
 
 func (s *Server) currentFileEvidence(ctx context.Context, current *AICurrentFileScope, terms []string) (aiEvidence, error) {
@@ -6554,10 +6779,15 @@ func openAICompatibleChatURL(baseURL string) (string, error) {
 }
 
 var (
-	secretTokenPattern = regexp.MustCompile(`sk-[A-Za-z0-9_-]{8,}`)
-	authHeaderPattern  = regexp.MustCompile(`(?i)authorization[^\n\r,]*`)
-	bearerTokenPattern = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`)
-	whitespacePattern  = regexp.MustCompile(`\s+`)
+	secretTokenPattern                    = regexp.MustCompile(`sk-[A-Za-z0-9_-]{8,}`)
+	authHeaderPattern                     = regexp.MustCompile(`(?i)authorization[^\n\r,]*`)
+	bearerTokenPattern                    = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`)
+	whitespacePattern                     = regexp.MustCompile(`\s+`)
+	diagnosticsSummaryAuthHeaderPattern   = regexp.MustCompile(`(?i)authorization\s*[:=]\s*(?:bearer\s+)?[A-Za-z0-9._~+/=-]+`)
+	diagnosticsSummaryBearerPattern       = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`)
+	diagnosticsSummarySensitiveKVPattern  = regexp.MustCompile(`(?i)(?:api[_-]?key|secret|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|token)\s*[:=]\s*["']?[^"',\s}]+`)
+	diagnosticsSummarySecretPhrasePattern = regexp.MustCompile(`(?i)\bsecret\s+[A-Za-z0-9._~+/=-]+`)
+	diagnosticsSummaryJWTPattern          = regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`)
 )
 
 func sanitizeProviderError(message string) string {

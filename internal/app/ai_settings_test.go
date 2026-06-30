@@ -595,6 +595,14 @@ func TestAIQuestionEndpointKeepsLegacyFieldsAndWritesShadowCheckpoint(t *testing
 	if !ok || evidenceContract["contract_id"] != "document_qa.v1" {
 		t.Fatalf("run checkpoint missing evidence contract: %+v", checkpoint)
 	}
+	evidenceBundle, ok := checkpoint["evidence_bundle"].(map[string]any)
+	if !ok || evidenceBundle["bundle_id"] == "" {
+		t.Fatalf("run checkpoint missing evidence bundle: %+v", checkpoint)
+	}
+	curatorCoverage, ok := checkpoint["curator_coverage"].(map[string]any)
+	if !ok || curatorCoverage["contract_id"] != "document_qa.v1" {
+		t.Fatalf("run checkpoint missing curator coverage: %+v", checkpoint)
+	}
 	if result.Run.Status != "insufficient_evidence" || result.Run.VerificationStatus != "fail" {
 		t.Fatalf("no-evidence run status = %s/%s, want insufficient_evidence/fail", result.Run.Status, result.Run.VerificationStatus)
 	}
@@ -605,7 +613,7 @@ func TestAIQuestionEndpointKeepsLegacyFieldsAndWritesShadowCheckpoint(t *testing
 	if err != nil {
 		t.Fatalf("list run steps: %v", err)
 	}
-	var foundCoordinator, foundTaskFramer, foundContractBuilder bool
+	var foundCoordinator, foundTaskFramer, foundContractBuilder, foundEvidenceCurator bool
 	for _, step := range steps {
 		if step.AgentName == "coordinator" && strings.Contains(step.OutputJSON, `"agent_workflow_version":"v2-shadow"`) {
 			foundCoordinator = true
@@ -623,6 +631,12 @@ func TestAIQuestionEndpointKeepsLegacyFieldsAndWritesShadowCheckpoint(t *testing
 			}
 			foundContractBuilder = true
 		}
+		if step.AgentName == "evidence_curator" && step.StepType == "deterministic" {
+			if !strings.Contains(step.OutputJSON, `"evidence_bundle"`) || !strings.Contains(step.OutputJSON, `"coverage"`) {
+				t.Fatalf("evidence_curator step missing bundle or coverage: %s", step.OutputJSON)
+			}
+			foundEvidenceCurator = true
+		}
 	}
 	if !foundCoordinator {
 		t.Fatalf("coordinator checkpoint step missing workflow version: %+v", steps)
@@ -632,6 +646,9 @@ func TestAIQuestionEndpointKeepsLegacyFieldsAndWritesShadowCheckpoint(t *testing
 	}
 	if !foundContractBuilder {
 		t.Fatalf("contract_builder step missing evidence contract: %+v", steps)
+	}
+	if !foundEvidenceCurator {
+		t.Fatalf("evidence_curator step missing curator output: %+v", steps)
 	}
 }
 
@@ -1052,6 +1069,58 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert task framer step: %v", err)
 	}
+	curatorOutput := map[string]any{
+		"evidence_bundle": map[string]any{
+			"bundle_id": "curated-document_qa.v1",
+			"coverage":  map[string]string{"cited_documents": aiEvidenceCoveragePartial},
+			"excluded": []map[string]any{{
+				"evidence_id":        3,
+				"reason":             aiEvidenceExcludedReasonTestFixtureNonTestTask,
+				"evidence_type":      "test_fixture",
+				"source_reliability": aiEvidenceReliabilityExcludedTestFixtureNonTest,
+				"repo_name":          "doc-harbor",
+				"file_path":          "internal/app/alpha_test.go",
+				"source_scope":       "smart_latest",
+				"redaction_exercise": "Authorization: Bearer raw-diagnostics-token api_key=sk-test-curator-secret token=raw-diagnostics-token secret raw-secret",
+				"authorization_note": "Bearer raw-diagnostics-token",
+				"api_key":            "sk-test-curator-secret",
+				"access_token":       "raw-diagnostics-token",
+			}},
+		},
+		"coverage": map[string]any{
+			"contract_id": "document_qa.v1",
+			"status":      aiEvidenceCoveragePartial,
+			"next_action": "contract_checker",
+		},
+		"annotations": []map[string]any{{
+			"evidence_id":        3,
+			"repo_name":          "doc-harbor",
+			"file_path":          "internal/app/alpha_test.go",
+			"source_scope":       "smart_latest",
+			"evidence_type":      "test_fixture",
+			"source_reliability": aiEvidenceReliabilityExcludedTestFixtureNonTest,
+			"excluded_reason":    aiEvidenceExcludedReasonTestFixtureNonTestTask,
+			"reason_detail":      "Authorization: Bearer raw-diagnostics-token api_key=sk-test-curator-secret token=raw-diagnostics-token secret raw-secret",
+			"api_key":            "sk-test-curator-secret",
+			"token":              "raw-diagnostics-token",
+		}},
+		"included_count": 1,
+		"excluded_count": 1,
+		"api_key":        "sk-test-curator-secret",
+		"Authorization":  "Bearer raw-diagnostics-token",
+		"access_token":   "raw-diagnostics-token",
+	}
+	if err := insertAIStep(ctx, server.db, AIAgentStep{
+		RunID:      aliceRunID,
+		AgentName:  "evidence_curator",
+		StepType:   "deterministic",
+		Status:     "success",
+		OutputJSON: encodeJSON(curatorOutput),
+		CreatedAt:  aliceStarted,
+		FinishedAt: aliceFinished,
+	}); err != nil {
+		t.Fatalf("insert evidence curator step: %v", err)
+	}
 	if _, err := insertAIServiceCandidate(ctx, server.db, AIServiceCandidate{
 		RunID:         aliceRunID,
 		MessageID:     aliceAssistant.ID,
@@ -1117,7 +1186,7 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 			t.Fatalf("diagnostics detail missing %s: %s", required, body)
 		}
 	}
-	for _, forbidden := range []string{"input_json", "output_json", "secret prompt", "secret output", "api_key", "api_key_secret_id", "sk-test"} {
+	for _, forbidden := range []string{"input_json", "output_json", "secret prompt", "secret output", "api_key", "api_key_secret_id", "sk-test", "raw-diagnostics-token", "raw-secret", "Authorization", "Bearer"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("diagnostics detail leaked %s: %s", forbidden, body)
 		}
@@ -1129,14 +1198,35 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 	if len(detailResp.DataSources.Repositories) != 1 || detailResp.DataSources.Repositories[0].ID != repo.ID {
 		t.Fatalf("run data sources were not narrowed by scope: %+v", detailResp.DataSources.Repositories)
 	}
-	var foundTaskFramer bool
+	var foundTaskFramer, foundEvidenceCurator bool
 	for _, step := range detailResp.Steps {
 		if step.AgentName == "task_framer" && step.StepType == "deterministic" {
 			foundTaskFramer = true
 		}
+		if step.AgentName == "evidence_curator" && step.StepType == "deterministic" {
+			foundEvidenceCurator = true
+			summaryJSON, err := json.Marshal(step.Summary)
+			if err != nil {
+				t.Fatalf("marshal curator summary: %v", err)
+			}
+			summary := string(summaryJSON)
+			for _, required := range []string{`"evidence_bundle"`, `"coverage"`, `"annotations"`, `"excluded_count":1`, aiEvidenceExcludedReasonTestFixtureNonTestTask, `"file_path":"internal/app/alpha_test.go"`} {
+				if !strings.Contains(summary, required) {
+					t.Fatalf("curator summary missing %s: %s", required, summary)
+				}
+			}
+			for _, forbidden := range []string{"api_key", "sk-test-curator-secret", "raw-diagnostics-token", "raw-secret", "Authorization", "Bearer", `"token"`} {
+				if strings.Contains(summary, forbidden) {
+					t.Fatalf("curator summary leaked %s: %s", forbidden, summary)
+				}
+			}
+		}
 	}
 	if !foundTaskFramer {
 		t.Fatalf("diagnostics detail missing task_framer step: %+v", detailResp.Steps)
+	}
+	if !foundEvidenceCurator {
+		t.Fatalf("diagnostics detail missing evidence_curator step: %+v", detailResp.Steps)
 	}
 	if detailResp.DataSources.CurrentFile == nil || detailResp.DataSources.CurrentFile.FilePath != "docs/README.md" {
 		t.Fatalf("run data sources missing current file: %+v", detailResp.DataSources.CurrentFile)
@@ -1518,12 +1608,12 @@ func findCurrentSteamGameVersionPrice(versionType string, targetID int, countryC
 	if len(retrieval.Evidence) == 0 {
 		t.Fatal("retrieval returned no evidence")
 	}
+	if retrieval.EvidenceBundle == nil || retrieval.Coverage == nil {
+		t.Fatalf("retrieval missing curator bundle or coverage: %+v", retrieval)
+	}
 	for i, evidence := range retrieval.Evidence {
-		if i >= 3 {
-			break
-		}
 		if evidence.Repo.Name == "文档服务" && aiPathLooksTest(evidence.Citation.FilePath) {
-			t.Fatalf("test fixture ranked too high at %d: %+v", i, evidence)
+			t.Fatalf("test fixture remained as core evidence at %d: %+v", i, evidence)
 		}
 	}
 
@@ -1532,10 +1622,16 @@ func findCurrentSteamGameVersionPrice(versionType string, targetID int, countryC
 		switch evidence.Citation.FilePath {
 		case "models/steam_game_price.go":
 			if strings.Contains(evidence.Content, "steam_game_price") && strings.Contains(evidence.Content, "price_in_cents_with_discount") {
+				if evidence.EvidenceType != "orm_model" {
+					t.Fatalf("model evidence type = %q, want orm_model: %+v", evidence.EvidenceType, evidence)
+				}
 				foundModel = true
 			}
 		case "core/db/mysql_methods/steam_game_current_version_price.go":
 			if strings.Contains(evidence.Content, "country_code") && strings.Contains(evidence.Content, "package_id") && strings.Contains(evidence.Content, "is_sell") {
+				if evidence.EvidenceType != "read_path" {
+					t.Fatalf("read path evidence type = %q, want read_path: %+v", evidence.EvidenceType, evidence)
+				}
 				foundReadPath = true
 			}
 		}

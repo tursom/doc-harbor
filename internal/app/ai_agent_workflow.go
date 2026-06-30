@@ -102,6 +102,8 @@ func buildAIAgentRunCheckpoint(scope AIQuestionScope, taskClass string, prepared
 		"effective_question":     truncate(prepared.SearchQuestion, 800),
 		"task_frame":             prepared.TaskFrame,
 		"evidence_contract":      prepared.Contract,
+		"evidence_bundle":        prepared.EvidenceBundle,
+		"curator_coverage":       prepared.Coverage,
 		"generated_terms":        prepared.GeneratedSearchTerms,
 		"protected_main_path":    policy.ProtectedMainPath,
 		"sse_compatibility":      policy.SSECompatibilityEvents,

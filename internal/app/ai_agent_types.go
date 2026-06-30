@@ -41,6 +41,7 @@ type aiEvidenceBundle struct {
 
 type aiEvidenceGroup struct {
 	Key               string  `json:"key"`
+	GroupKey          string  `json:"group_key,omitempty"`
 	EvidenceIDs       []int64 `json:"evidence_ids"`
 	Summary           string  `json:"summary,omitempty"`
 	EvidenceType      string  `json:"evidence_type,omitempty"`
@@ -48,8 +49,15 @@ type aiEvidenceGroup struct {
 }
 
 type aiEvidenceExclusion struct {
-	EvidenceID int64  `json:"evidence_id"`
-	Reason     string `json:"reason"`
+	EvidenceID        int64  `json:"evidence_id"`
+	Reason            string `json:"reason"`
+	GroupKey          string `json:"group_key,omitempty"`
+	EvidenceType      string `json:"evidence_type,omitempty"`
+	SourceReliability string `json:"source_reliability,omitempty"`
+	RepoID            int64  `json:"repo_id,omitempty"`
+	RepoName          string `json:"repo_name,omitempty"`
+	FilePath          string `json:"file_path,omitempty"`
+	SourceScope       string `json:"source_scope,omitempty"`
 }
 
 type aiContractCoverageReport struct {

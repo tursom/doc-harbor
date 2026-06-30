@@ -196,3 +196,239 @@ func TestAIAgentRetrievalResultLegacyJSONCompatibility(t *testing.T) {
 		t.Fatalf("legacy chat message missing question block: %s", messages[1].Content)
 	}
 }
+
+func TestAIAgentEvidenceCuratorAnnotatesTypesAndExcludesNonTestFixtures(t *testing.T) {
+	frame := aiTaskFrame{
+		Intent:     aiTaskIntentDatabaseDirectUpdateForTest,
+		UserGoal:   "给出测试用途的数据库直接修改方案",
+		KnownTerms: []string{"entity_records", "amount_cents", "lookup_code"},
+	}
+	contract := buildAIEvidenceContract(frame)
+	raw := []aiEvidence{
+		{
+			Repo: Repository{Name: "doc-harbor"},
+			Citation: AIMessageCitation{
+				RepoID:      1,
+				SourceScope: "smart_latest",
+				FilePath:    "internal/app/ai_settings_test.go",
+				LineStart:   10,
+				LineEnd:     20,
+			},
+			Content: `func TestNoisyFixture(t *testing.T) {
+	_ = "entity_records amount_cents lookup_code"
+}`,
+			Score: 99,
+		},
+		{
+			Repo: Repository{Name: "service-a"},
+			Citation: AIMessageCitation{
+				RepoID:      2,
+				SourceScope: "smart_latest",
+				FilePath:    "models/entity_record.go",
+				LineStart:   1,
+				LineEnd:     20,
+			},
+			Content: "func (EntityRecord) TableName() string { return \"entity_records\" }\ntype EntityRecord struct {\nAmountCents int `gorm:\"column:amount_cents\"`\nLookupCode string `gorm:\"column:lookup_code\"`\n}",
+			Score:   20,
+		},
+		{
+			Repo: Repository{Name: "service-a"},
+			Citation: AIMessageCitation{
+				RepoID:      2,
+				SourceScope: "smart_latest",
+				FilePath:    "migrations/20260630_entity_records.sql",
+				LineStart:   1,
+				LineEnd:     8,
+			},
+			Content: "ALTER TABLE entity_records ADD COLUMN amount_cents BIGINT NOT NULL DEFAULT 0;",
+			Score:   19,
+		},
+		{
+			Repo: Repository{Name: "service-a"},
+			Citation: AIMessageCitation{
+				RepoID:      2,
+				SourceScope: "smart_latest",
+				FilePath:    "repository/entity_record_repository.go",
+				LineStart:   3,
+				LineEnd:     16,
+			},
+			Content: "func FindEntityRecord(db *gorm.DB, lookupCode string) {\n	db.Where(\"lookup_code = ?\", lookupCode).Where(\"deleted_at IS NULL\").Find(&record)\n}",
+			Score:   18,
+		},
+	}
+
+	curation := curateAIEvidence(&frame, &contract, raw)
+	if len(curation.ExcludedEvidence) != 1 || curation.ExcludedEvidence[0].EvidenceType != "test_fixture" {
+		t.Fatalf("non-test task should exclude the test fixture with annotation: %+v", curation.ExcludedEvidence)
+	}
+	if curation.ExcludedEvidence[0].ExcludedReason != aiEvidenceExcludedReasonTestFixtureNonTestTask {
+		t.Fatalf("excluded reason = %q", curation.ExcludedEvidence[0].ExcludedReason)
+	}
+	for _, evidence := range curation.Evidence {
+		if evidence.Repo.Name == "doc-harbor" && strings.HasSuffix(evidence.Citation.FilePath, "_test.go") {
+			t.Fatalf("test fixture remained as core evidence: %+v", evidence)
+		}
+	}
+
+	assertCuratedType := func(filePath, wantType string) {
+		t.Helper()
+		for _, evidence := range curation.Evidence {
+			if evidence.Citation.FilePath == filePath {
+				if evidence.EvidenceType != wantType {
+					t.Fatalf("%s evidence_type = %q, want %q", filePath, evidence.EvidenceType, wantType)
+				}
+				if evidence.GroupKey == "" || evidence.SourceReliability == "" || len(evidence.ContractKeys) == 0 {
+					t.Fatalf("%s missing curator annotation: %+v", filePath, evidence)
+				}
+				return
+			}
+		}
+		t.Fatalf("curated evidence missing %s: %+v", filePath, curation.Evidence)
+	}
+	assertCuratedType("models/entity_record.go", "orm_model")
+	assertCuratedType("migrations/20260630_entity_records.sql", "migration_sql")
+	assertCuratedType("repository/entity_record_repository.go", "read_path")
+	if curation.Bundle.Coverage["table_identity"] == "" || curation.Coverage.Status == "" {
+		t.Fatalf("curator coverage missing required keys: bundle=%+v report=%+v", curation.Bundle, curation.Coverage)
+	}
+
+	step := buildAIEvidenceCuratorStep(&frame, &contract, curation, len(raw))
+	for _, want := range []string{aiEvidenceExcludedReasonTestFixtureNonTestTask, `"evidence_type":"test_fixture"`, `"file_path":"internal/app/ai_settings_test.go"`} {
+		if !strings.Contains(step.OutputJSON, want) {
+			t.Fatalf("curator step output missing %s: %s", want, step.OutputJSON)
+		}
+	}
+}
+
+func TestAIAgentEvidenceCuratorDoesNotTreatLatestContestAsTestFocus(t *testing.T) {
+	frame := aiTaskFrame{
+		Intent:     aiTaskIntentDocumentQA,
+		UserGoal:   "Explain the latest contest rule update",
+		KnownTerms: []string{"latest", "contest", "rule"},
+	}
+	if aiTaskFrameLooksTestFocused(frame) {
+		t.Fatalf("latest/contest should not make a non-test task test-focused: %+v", frame)
+	}
+	contract := buildAIEvidenceContract(frame)
+	raw := []aiEvidence{
+		{
+			Repo: Repository{Name: "doc-harbor"},
+			Citation: AIMessageCitation{
+				RepoID:      1,
+				SourceScope: "smart_latest",
+				FilePath:    "internal/app/contest_rules_test.go",
+				LineStart:   1,
+				LineEnd:     12,
+			},
+			Content: `func TestContestRules(t *testing.T) {
+	_ = "latest contest fixture"
+}`,
+			Score: 99,
+		},
+		{
+			Repo: Repository{Name: "doc-harbor"},
+			Citation: AIMessageCitation{
+				RepoID:      1,
+				SourceScope: "smart_latest",
+				FilePath:    "docs/contest_rules.md",
+				LineStart:   1,
+				LineEnd:     6,
+			},
+			Content: "# Contest rules\n\nLatest contest rule update.",
+			Score:   10,
+		},
+	}
+
+	curation := curateAIEvidence(&frame, &contract, raw)
+	if len(curation.ExcludedEvidence) != 1 || curation.ExcludedEvidence[0].Citation.FilePath != "internal/app/contest_rules_test.go" {
+		t.Fatalf("latest/contest non-test task should exclude test fixture: %+v", curation.ExcludedEvidence)
+	}
+	for _, evidence := range curation.Evidence {
+		if strings.HasSuffix(evidence.Citation.FilePath, "_test.go") {
+			t.Fatalf("test fixture remained as core evidence: %+v", evidence)
+		}
+	}
+}
+
+func TestAIAgentEvidenceCuratorAllowsTestFocusedFixtures(t *testing.T) {
+	frame := aiTaskFrame{
+		Intent:     aiTaskIntentDocumentQA,
+		UserGoal:   "说明测试用例覆盖了哪些输入",
+		KnownTerms: []string{"测试", "fixture"},
+	}
+	contract := buildAIEvidenceContract(frame)
+	raw := []aiEvidence{{
+		Repo: Repository{Name: "service-a"},
+		Citation: AIMessageCitation{
+			RepoID:      1,
+			SourceScope: "smart_latest",
+			FilePath:    "internal/app/entity_test.go",
+			LineStart:   1,
+			LineEnd:     12,
+		},
+		Content: "func TestEntityLookup(t *testing.T) { fixture := \"lookup_code\"; _ = fixture }",
+		Score:   10,
+	}}
+
+	curation := curateAIEvidence(&frame, &contract, raw)
+	if len(curation.Evidence) != 1 || len(curation.ExcludedEvidence) != 0 {
+		t.Fatalf("test-focused task should keep test fixture: included=%+v excluded=%+v", curation.Evidence, curation.ExcludedEvidence)
+	}
+	evidence := curation.Evidence[0]
+	if evidence.EvidenceType != "test_fixture" || evidence.SourceReliability != aiEvidenceReliabilityTestFixtureForTestTask {
+		t.Fatalf("test fixture annotation = %+v", evidence)
+	}
+}
+
+func TestAIAgentEvidenceCuratorGroupsBranchCandidateDuplicates(t *testing.T) {
+	frame := aiTaskFrame{Intent: aiTaskIntentDocumentQA, KnownTerms: []string{"endpoint"}}
+	contract := buildAIEvidenceContract(frame)
+	content := "# Endpoint\n\nThe endpoint accepts an identifier and returns status."
+	raw := []aiEvidence{
+		{
+			Repo: Repository{Name: "service-a"},
+			Citation: AIMessageCitation{
+				RepoID:      1,
+				SourceScope: "branch_candidate",
+				Branch:      "feature/api",
+				CommitSHA:   "branchsha",
+				FilePath:    "docs/endpoint.md",
+			},
+			Content: content,
+			Score:   100,
+		},
+		{
+			Repo: Repository{Name: "service-a"},
+			Citation: AIMessageCitation{
+				RepoID:      1,
+				SourceScope: "smart_latest",
+				Branch:      "main",
+				CommitSHA:   "mainsha",
+				FilePath:    "docs/endpoint.md",
+			},
+			Content: content,
+			Score:   10,
+		},
+	}
+
+	curation := curateAIEvidence(&frame, &contract, raw)
+	if len(curation.Evidence) != 2 {
+		t.Fatalf("branch candidate should be retained: %+v", curation.Evidence)
+	}
+	if curation.Evidence[0].Citation.SourceScope != "smart_latest" {
+		t.Fatalf("smart_latest evidence should lead the duplicate group: %+v", curation.Evidence)
+	}
+	if curation.Evidence[0].GroupKey == "" || curation.Evidence[0].GroupKey != curation.Evidence[1].GroupKey {
+		t.Fatalf("duplicates should share group_key: %+v", curation.Evidence)
+	}
+	var foundMergedGroup bool
+	for _, group := range curation.Bundle.Groups {
+		if group.Key == "cited_documents" && len(group.EvidenceIDs) == 2 {
+			foundMergedGroup = true
+			break
+		}
+	}
+	if !foundMergedGroup {
+		t.Fatalf("bundle did not merge duplicate branch evidence: %+v", curation.Bundle.Groups)
+	}
+}
