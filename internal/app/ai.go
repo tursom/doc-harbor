@@ -401,9 +401,10 @@ type aiConversationContext struct {
 }
 
 type aiQuestionPreparation struct {
-	SearchQuestion string
-	Scope          AIQuestionScope
-	Conversation   aiConversationContext
+	SearchQuestion       string
+	Scope                AIQuestionScope
+	Conversation         aiConversationContext
+	GeneratedSearchTerms []string
 }
 
 type aiEvidence struct {
@@ -3953,6 +3954,9 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 	if err != nil {
 		return aiQuestionResult{}, err
 	}
+	prepared, plannerStep := s.expandAIQuestionForRetrieval(ctx, active.Config, prepared)
+	plannerStep.RunID = run.ID
+	_ = insertAIStep(ctx, s.db, plannerStep)
 	_ = insertAIStep(ctx, s.db, AIAgentStep{
 		RunID:     run.ID,
 		AgentName: "coordinator",
@@ -3964,6 +3968,7 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 			"task_class":         active.Config.Chat.Routing.DefaultTaskClass,
 			"conversation":       prepared.Conversation,
 			"effective_question": truncate(prepared.SearchQuestion, 800),
+			"generated_terms":    prepared.GeneratedSearchTerms,
 		}),
 		CreatedAt:  run.StartedAt,
 		FinishedAt: nowString(),
@@ -4154,6 +4159,11 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 			ErrorMessage:         message,
 		})
 	}()
+	prepared, plannerStep := s.expandAIQuestionForRetrieval(ctx, active.Config, prepared)
+	plannerStep.RunID = run.ID
+	if err := insertAIStep(ctx, s.db, plannerStep); err != nil {
+		return err
+	}
 	if err := insertAIStep(ctx, s.db, AIAgentStep{
 		RunID:     run.ID,
 		AgentName: "coordinator",
@@ -4165,6 +4175,7 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 			"task_class":         active.Config.Chat.Routing.DefaultTaskClass,
 			"conversation":       prepared.Conversation,
 			"effective_question": truncate(prepared.SearchQuestion, 800),
+			"generated_terms":    prepared.GeneratedSearchTerms,
 		}),
 		CreatedAt:  run.StartedAt,
 		FinishedAt: nowString(),
@@ -4600,7 +4611,49 @@ func (s *Server) prepareAIQuestion(ctx context.Context, sessionID int64, questio
 	return prepared, nil
 }
 
+func (s *Server) expandAIQuestionForRetrieval(ctx context.Context, cfg AIConfigData, prepared aiQuestionPreparation) (aiQuestionPreparation, AIAgentStep) {
+	step := AIAgentStep{
+		AgentName:  "query_planner",
+		StepType:   "model_call",
+		ToolName:   "generate_search_terms",
+		InputJSON:  encodeJSON(map[string]any{"question": truncate(prepared.SearchQuestion, 800)}),
+		CreatedAt:  nowString(),
+		FinishedAt: nowString(),
+	}
+	if !cfg.Enabled {
+		step.Status = "skipped"
+		step.OutputJSON = encodeJSON(map[string]any{"reason": "ai_disabled"})
+		return prepared, step
+	}
+	result, terms, err := s.generateAIQueryTerms(ctx, cfg, prepared.SearchQuestion)
+	if err != nil {
+		step.Status = "failed"
+		step.ErrorMessage = sanitizeProviderError(err.Error())
+		return prepared, step
+	}
+	step.Status = "success"
+	step.Model = result.Model
+	step.ProviderName = result.ProviderName
+	step.ModelRouteReason = result.ModelRouteJSON
+	step.TokenInput = result.PromptTokens
+	step.TokenOutput = result.CompletionTokens
+	step.OutputJSON = encodeJSON(map[string]any{"terms": terms})
+	if len(terms) == 0 {
+		return prepared, step
+	}
+	prepared.GeneratedSearchTerms = terms
+	prepared.SearchQuestion = strings.TrimSpace(prepared.SearchQuestion + "\n" + strings.Join(terms, " "))
+	return prepared, step
+}
+
 func applyAIConversationContext(retrieval *aiRetrievalResult, prepared aiQuestionPreparation) {
+	if len(prepared.GeneratedSearchTerms) > 0 {
+		if retrieval.Plan == nil {
+			retrieval.Plan = map[string]any{}
+		}
+		retrieval.Plan["model_generated_terms"] = prepared.GeneratedSearchTerms
+		retrieval.Plan["effective_question"] = truncate(prepared.SearchQuestion, 800)
+	}
 	if !prepared.Conversation.FollowUp {
 		return
 	}
@@ -5216,7 +5269,7 @@ func (s *Server) searchRepoSmartLatestEvidence(ctx context.Context, repo Reposit
 			continue
 		}
 		score += 12
-		snippet, startLine, endLine := aiSnippet(content, terms, intent == "api_integration")
+		snippet, startLine, endLine := aiSnippet(content, terms, intent == "api_integration" || aiPathLooksCode(candidate.FilePath))
 		if strings.TrimSpace(snippet) == "" {
 			continue
 		}
@@ -5251,6 +5304,10 @@ func (s *Server) searchRepoRefEvidence(ctx context.Context, repo Repository, tar
 	if err != nil {
 		return nil, err
 	}
+	contentPathScores, err := s.git.grepPathScores(ctx, s.git.repoPath(repo.ID), target.CommitSHA, terms)
+	if err != nil {
+		contentPathScores = map[string]float64{}
+	}
 	candidates := make([]aiFileCandidate, 0, len(entries))
 	for _, entry := range entries {
 		if entry.Type != "blob" || aiShouldSkipPath(entry.Path, indexCfg) {
@@ -5260,6 +5317,9 @@ func (s *Server) searchRepoRefEvidence(ctx context.Context, repo Repository, tar
 			continue
 		}
 		score, matched := aiPathScore(entry.Path, terms, intent)
+		if matchLines := contentPathScores[entry.Path]; matchLines > 0 {
+			score += min(matchLines, 10) * 4
+		}
 		if score <= 0 && intent != "api_integration" && intent != "cross_service" {
 			continue
 		}
@@ -5282,7 +5342,7 @@ func (s *Server) searchRepoRefEvidence(ctx context.Context, repo Repository, tar
 			continue
 		}
 		matchedTerms := mergeTerms(candidate.Terms, contentTerms)
-		snippet, startLine, endLine := aiSnippet(content, terms, intent == "api_integration")
+		snippet, startLine, endLine := aiSnippet(content, terms, intent == "api_integration" || aiPathLooksCode(candidate.Entry.Path))
 		if strings.TrimSpace(snippet) == "" {
 			continue
 		}
@@ -5414,6 +5474,15 @@ func aiShouldSkipPath(filePath string, cfg AIIndexConfig) bool {
 	return false
 }
 
+func aiPathLooksCode(filePath string) bool {
+	switch extension(filePath) {
+	case ".go", ".ts", ".tsx", ".js", ".jsx", ".vue", ".java", ".kt", ".py", ".rb", ".php", ".cs", ".rs", ".proto", ".graphql":
+		return true
+	default:
+		return false
+	}
+}
+
 func aiLooksText(data []byte) bool {
 	if len(data) == 0 {
 		return true
@@ -5446,25 +5515,41 @@ func aiSnippet(content string, terms []string, preferCode bool) (string, int, in
 			lowerTerms = append(lowerTerms, strings.ToLower(term))
 		}
 	}
+	type hit struct {
+		Index int
+		Score float64
+	}
+	hits := []hit{}
 	for i, line := range lines {
 		lower := strings.ToLower(line)
-		matched := false
-		for _, term := range lowerTerms {
-			if strings.Contains(lower, term) {
-				matched = true
-				break
-			}
-		}
-		if !matched && preferCode {
-			matched = aiLineLooksLikeRoute(lower)
-		}
-		if !matched {
+		score := aiSnippetLineScore(lower, lowerTerms, preferCode)
+		if score <= 0 {
 			continue
 		}
-		for j := max(0, i-2); j <= min(len(lines)-1, i+3); j++ {
+		hits = append(hits, hit{Index: i, Score: score})
+	}
+	sort.SliceStable(hits, func(i, j int) bool {
+		if hits[i].Score != hits[j].Score {
+			return hits[i].Score > hits[j].Score
+		}
+		return hits[i].Index < hits[j].Index
+	})
+	before, after, maxLines := 2, 3, 18
+	if preferCode {
+		before, after, maxLines = 3, 6, 28
+	}
+	for _, item := range hits {
+		if preferCode {
+			if declaration := aiNearestDeclarationLine(lines, item.Index); declaration >= 0 {
+				for j := declaration; j <= min(len(lines)-1, declaration+2); j++ {
+					indexes[j] = struct{}{}
+				}
+			}
+		}
+		for j := max(0, item.Index-before); j <= min(len(lines)-1, item.Index+after); j++ {
 			indexes[j] = struct{}{}
 		}
-		if len(indexes) >= 18 {
+		if len(indexes) >= maxLines {
 			break
 		}
 	}
@@ -5499,6 +5584,40 @@ func aiSnippet(content string, terms []string, preferCode bool) (string, int, in
 		}
 	}
 	return b.String(), selected[0] + 1, selected[len(selected)-1] + 1
+}
+
+func aiSnippetLineScore(lower string, lowerTerms []string, preferCode bool) float64 {
+	score := 0.0
+	for _, term := range lowerTerms {
+		count := strings.Count(lower, term)
+		if count == 0 {
+			continue
+		}
+		weight := 1.0 + float64(min(len([]rune(term)), 8))/8.0
+		score += float64(min(count, 3)) * weight
+	}
+	if preferCode && aiLineLooksLikeRoute(lower) {
+		score += 1.5
+	}
+	return score
+}
+
+func aiNearestDeclarationLine(lines []string, index int) int {
+	for i := index; i >= max(0, index-120); i-- {
+		if aiLineLooksLikeDeclaration(strings.ToLower(strings.TrimSpace(lines[i]))) {
+			return i
+		}
+	}
+	return -1
+}
+
+func aiLineLooksLikeDeclaration(lower string) bool {
+	for _, prefix := range []string{"func ", "function ", "export function ", "async function ", "def ", "class ", "type ", "interface ", "service ", "rpc "} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func aiLineLooksLikeRoute(lower string) bool {
@@ -5656,14 +5775,17 @@ func classifyAIIntent(question string) string {
 }
 
 func dedupeAIEvidence(items []aiEvidence) []aiEvidence {
-	seen := map[string]struct{}{}
+	seen := map[string]int{}
 	out := make([]aiEvidence, 0, len(items))
 	for _, item := range items {
 		key := fmt.Sprintf("%d:%s:%s:%d:%d", item.Citation.RepoID, item.Citation.CommitSHA, item.Citation.FilePath, item.Citation.LineStart, item.Citation.LineEnd)
-		if _, ok := seen[key]; ok {
+		if existingIndex, ok := seen[key]; ok {
+			if out[existingIndex].Citation.SourceScope == "branch_candidate" && item.Citation.SourceScope == "smart_latest" {
+				out[existingIndex] = item
+			}
 			continue
 		}
-		seen[key] = struct{}{}
+		seen[key] = len(out)
 		out = append(out, item)
 	}
 	return out
@@ -5729,6 +5851,47 @@ func aiCandidateReason(terms []string, items []aiEvidence) string {
 	return "候选服务"
 }
 
+func (s *Server) generateAIQueryTerms(ctx context.Context, cfg AIConfigData, question string) (aiModelResult, []string, error) {
+	messages := []aiChatMessage{
+		{Role: "system", Content: "你是代码和文档检索前的查询规划器。只返回 JSON，不要回答用户问题。JSON 格式为 {\"terms\":[\"...\"]}。terms 应该是短检索词，优先选择可能出现在代码标识符、接口名、文件名、注释或文档中的词；可以包含从用户问题现场推断出的同义表达、英文标识符写法或缩写；不要加入问题没有依据的具体服务、业务、接口或模块名。"},
+		{Role: "user", Content: truncate(question, 1200)},
+	}
+	result, err := s.callRoutedAIChat(ctx, cfg, messages, 0, 256)
+	if err != nil {
+		return result, nil, err
+	}
+	terms := parseAIQueryPlannerTerms(result.Content)
+	return result, terms, nil
+}
+
+func parseAIQueryPlannerTerms(content string) []string {
+	content = strings.TrimSpace(content)
+	if strings.HasPrefix(content, "```") {
+		content = strings.TrimPrefix(content, "```json")
+		content = strings.TrimPrefix(content, "```")
+		content = strings.TrimSpace(strings.TrimSuffix(content, "```"))
+	}
+	var parsed struct {
+		Terms []string `json:"terms"`
+	}
+	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+		return nil
+	}
+	cleaned := make([]string, 0, len(parsed.Terms))
+	for _, term := range parsed.Terms {
+		term = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(term, "\n", " "), "\t", " "))
+		if len([]rune(term)) < 2 || len([]rune(term)) > 64 {
+			continue
+		}
+		cleaned = append(cleaned, term)
+	}
+	terms := uniqueTerms(cleaned)
+	if len(terms) > 16 {
+		terms = terms[:16]
+	}
+	return terms
+}
+
 func (s *Server) generateAIAnswer(ctx context.Context, cfg AIConfigVersion, question string, retrieval aiRetrievalResult) aiModelResult {
 	start := time.Now()
 	if !cfg.Config.Enabled {
@@ -5770,11 +5933,14 @@ func aiModelFallbackForError(question string, retrieval aiRetrievalResult, start
 }
 
 func (s *Server) callRoutedAIModel(ctx context.Context, cfg AIConfigData, question string, retrieval aiRetrievalResult) (aiModelResult, error) {
+	return s.callRoutedAIChat(ctx, cfg, buildAIChatMessages(question, retrieval), 0.2, 0)
+}
+
+func (s *Server) callRoutedAIChat(ctx context.Context, cfg AIConfigData, messages []aiChatMessage, temperature float64, maxTokens int) (aiModelResult, error) {
 	taskClass := cfg.Chat.Routing.DefaultTaskClass
 	if taskClass == "" {
 		taskClass = "standard"
 	}
-	messages := buildAIChatMessages(question, retrieval)
 	failures := []map[string]any{}
 	attemptOrder := []string{}
 	visited := map[string]struct{}{}
@@ -5807,7 +5973,7 @@ func (s *Server) callRoutedAIModel(ctx context.Context, cfg AIConfigData, questi
 				failures = append(failures, aiProviderFailure(provider, sanitizeProviderError(err.Error())))
 				continue
 			}
-			resp, err := s.callOpenAICompatible(ctx, provider, apiKey, messages)
+			resp, err := s.callOpenAICompatibleWithOptions(ctx, provider, apiKey, messages, temperature, maxTokens)
 			if err != nil {
 				if errors.Is(ctx.Err(), context.Canceled) {
 					return aiModelResult{}, err

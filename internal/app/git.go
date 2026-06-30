@@ -198,6 +198,50 @@ func (g *Git) showFile(ctx context.Context, repoPath, commit, filePath string) (
 	return g.runBytes(ctx, repoPath, "show", commit+":"+filePath)
 }
 
+func (g *Git) grepPathScores(ctx context.Context, repoPath, commit string, terms []string) (map[string]float64, error) {
+	scores := map[string]float64{}
+	if !gitSafeCommit(commit) || len(terms) == 0 {
+		return scores, nil
+	}
+	args := []string{"grep", "--count", "-i", "-F", "-I"}
+	for _, term := range terms {
+		term = strings.TrimSpace(term)
+		if term == "" {
+			continue
+		}
+		args = append(args, "-e", term)
+	}
+	if len(args) == 6 {
+		return scores, nil
+	}
+	args = append(args, commit, "--")
+	out, err := g.runBytes(ctx, repoPath, args...)
+	if err != nil {
+		if strings.Contains(err.Error(), "exit status 1") {
+			return scores, nil
+		}
+		return nil, err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimPrefix(line, commit+":")
+		sep := strings.LastIndex(line, ":")
+		if sep <= 0 || sep == len(line)-1 {
+			continue
+		}
+		path := line[:sep]
+		path = normalizeRepoPath(path)
+		if path == "" {
+			continue
+		}
+		count, err := strconv.Atoi(strings.TrimSpace(line[sep+1:]))
+		if err != nil || count <= 0 {
+			continue
+		}
+		scores[path] += float64(count)
+	}
+	return scores, nil
+}
+
 func (g *Git) lastCommitForPath(ctx context.Context, repoPath, commit, filePath string) (lastCommit, error) {
 	out, err := g.run(ctx, repoPath, "log", "-1", "--format=%H%x00%cI", commit, "--", filePath)
 	if err != nil {

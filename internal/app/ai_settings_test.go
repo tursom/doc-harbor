@@ -1007,6 +1007,138 @@ func TestAIRetrievalUsesSmartLatestDocsAcrossBranches(t *testing.T) {
 	}
 }
 
+func TestAIRefRetrievalKeepsContentMatchedCodePastPathNoise(t *testing.T) {
+	requireGit(t)
+
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	sourceRepo := createTestGitRepo(t)
+	for i := 0; i < 220; i++ {
+		writeScanPathTestFile(t, sourceRepo, "doc/价格补偿-"+strconv.Itoa(i)+".md", "# 价格补偿\n\n这里只描述 Steam 价格补偿和价格表同步。\n")
+	}
+	writeScanPathTestFile(t, sourceRepo, "core/handle/inventory.go", `package handle
+
+import "strings"
+
+type AddGameCdkInventoryRequest struct {
+	Price string
+}
+
+type UpdateGameInventoryStatusRequest struct {
+	InventoryIds []int64
+	SellStatus   string
+	Price        string
+}
+
+func AddGameCdkInventory(req AddGameCdkInventoryRequest) {
+	// 基础参数校验：这里的价格仅用于添加 CDK 库存，不是修改已售卖库存的基础价格。
+	priceText := strings.TrimSpace(req.Price)
+	if priceText == "" {
+		return
+	}
+	if !strings.Contains(priceText, ".") {
+		return
+	}
+}
+
+`+strings.Repeat("// 价格补偿噪声：Steam 价格表同步失败后会重试，不涉及卖家库存改价。\n", 80)+`
+func UpdateGameInventoryStatus(req UpdateGameInventoryStatusRequest) {
+	targetStatus := strings.ToLower(strings.TrimSpace(req.SellStatus))
+	hasStatusUpdate := targetStatus != ""
+	priceText := strings.TrimSpace(req.Price)
+	hasPriceUpdate := priceText != ""
+	targetPrice := priceText
+	if !hasStatusUpdate && !hasPriceUpdate {
+		return
+	}
+	priceUpdateInventoryIDs := make([]int64, 0, len(req.InventoryIds))
+	for _, inventoryID := range req.InventoryIds {
+		if hasPriceUpdate {
+			priceUpdateInventoryIDs = append(priceUpdateInventoryIDs, inventoryID)
+		}
+	}
+	if hasPriceUpdate {
+		priceTargets := ListSellerGoodsSKUPriceTargetsByInventoryIDs(priceUpdateInventoryIDs)
+		BatchUpdateSellerGoodsSKUPriceByTargets(targetPrice, priceTargets)
+	}
+}
+
+func ListSellerGoodsSKUPriceTargetsByInventoryIDs(inventoryIDs []int64) []string {
+	return nil
+}
+
+func BatchUpdateSellerGoodsSKUPriceByTargets(price string, targets []string) {
+}
+`)
+	runTestGit(t, sourceRepo, "add", ".")
+	runTestGit(t, sourceRepo, "commit", "-m", "add noisy price docs and inventory price update")
+
+	repo, err := createRepository(ctx, server.db, Repository{
+		Name:                  "game-service",
+		Slug:                  "game-service",
+		RepoURL:               sourceRepo,
+		DefaultBranch:         "main",
+		TrackedBranches:       []string{"*"},
+		LatestIncludeBranches: []string{"*"},
+		ScanPaths:             []ScanPath{{Path: ".", Enabled: true}},
+		Enabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("create repository: %v", err)
+	}
+	if _, err := server.scanner.Scan(ctx, repo.ID, "manual"); err != nil {
+		t.Fatalf("scan repository: %v", err)
+	}
+
+	plannerServer := newAIAnswerModelTestServer(t, http.StatusOK, `{"choices":[{"message":{"role":"assistant","content":"{\"terms\":[\"UpdateGameInventoryStatus\",\"Price\",\"BatchUpdateSellerGoodsSKUPriceByTargets\"]}"}}],"usage":{"prompt_tokens":3,"completion_tokens":4}}`)
+	secret, err := server.createOrUpdateAISecret(ctx, 0, aiSecretRequest{Name: "query-planner-api-key", SecretType: "api_key", Value: "sk-test-query-planner"}, "test")
+	if err != nil {
+		t.Fatalf("create planner secret: %v", err)
+	}
+	cfg := defaultAIConfig()
+	cfg.Enabled = true
+	cfg.Chat.Providers = []AIProvider{{
+		ProviderKey:           "query-planner",
+		Name:                  "QueryPlanner",
+		Priority:              10,
+		ProviderType:          "openai_compatible",
+		BaseURL:               plannerServer.URL,
+		Model:                 "query-planner-model",
+		APIKeySecretID:        secret.ID,
+		CostTier:              "low",
+		RequestTimeoutSeconds: 5,
+		MaxRPM:                60,
+	}}
+	cfg.Chat.Routing = buildDefaultRouting(ctx, server.db, cfg.Chat.Providers)
+	cfg.Chat.MaxContextChunks = 8
+	prepared, plannerStep := server.expandAIQuestionForRetrieval(ctx, cfg, aiQuestionPreparation{
+		SearchQuestion: "如何修改游戏售卖的基础价格",
+		Scope: AIQuestionScope{
+			RepoMode:   "global",
+			SourceMode: "smart_latest_with_branch_candidates",
+		},
+	})
+	if plannerStep.Status != "success" || !strings.Contains(strings.Join(prepared.GeneratedSearchTerms, ","), "batchupdate") {
+		t.Fatalf("query planner did not generate expected code terms: step=%+v prepared=%+v", plannerStep, prepared)
+	}
+	retrieval, err := server.retrieveAIEvidence(ctx, prepared.SearchQuestion, AIQuestionScope{
+		RepoMode:   "global",
+		SourceMode: "smart_latest_with_branch_candidates",
+	}, cfg)
+	if err != nil {
+		t.Fatalf("retrieve evidence: %v", err)
+	}
+
+	for _, evidence := range retrieval.Evidence {
+		if evidence.Citation.FilePath == "core/handle/inventory.go" &&
+			strings.Contains(evidence.Content, "UpdateGameInventoryStatus") &&
+			strings.Contains(evidence.Content, "BatchUpdateSellerGoodsSKUPriceByTargets") {
+			return
+		}
+	}
+	t.Fatalf("retrieval missed inventory price update code: %+v", retrieval.Evidence)
+}
+
 func TestAIQueryTermsDeriveChinesePhrasesWithoutBusinessDictionary(t *testing.T) {
 	terms := strings.Join(aiQueryTerms("你好，认证模块支持哪些外部接入接口？"), ",")
 	for _, want := range []string{"认证模块", "外部", "接入", "接口"} {
@@ -1016,6 +1148,13 @@ func TestAIQueryTermsDeriveChinesePhrasesWithoutBusinessDictionary(t *testing.T)
 	}
 	if strings.Contains(terms, ",游,") || strings.Contains(terms, ",戏,") {
 		t.Fatalf("terms should not rely on noisy single-character matches: %q", terms)
+	}
+
+	priceTerms := strings.Join(aiQueryTerms("如何修改游戏售卖的基础价格"), ",")
+	for _, forbidden := range []string{"update", "price", "base", "游戏服务", "通用商户"} {
+		if strings.Contains(priceTerms, forbidden) {
+			t.Fatalf("terms should not contain static semantic aliases or business dictionary entries: %q", priceTerms)
+		}
 	}
 }
 
@@ -1373,7 +1512,12 @@ func newAIAnswerModelTestServer(t *testing.T, status int, responseBody string) *
 func newAIStreamModelTestServer(t *testing.T, chunks []string, includeUsage bool) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requireAIStreamRequest(t, r)
+		payload := requireAIModelRequest(t, r)
+		if payload["stream"] != true {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"terms\":[]}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, chunk := range chunks {
 			_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"` + chunk + `"}}]}` + "\n\n"))
@@ -1393,7 +1537,7 @@ func newAIStreamModelTestServer(t *testing.T, chunks []string, includeUsage bool
 func newAIStreamHTTPErrorTestServer(t *testing.T, status int, responseBody string) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requireAIStreamRequest(t, r)
+		requireAIModelRequest(t, r)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(responseBody))
@@ -1405,7 +1549,12 @@ func newAIStreamHTTPErrorTestServer(t *testing.T, status int, responseBody strin
 func newAIStreamBrokenAfterDeltaTestServer(t *testing.T, firstChunk string) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requireAIStreamRequest(t, r)
+		payload := requireAIModelRequest(t, r)
+		if payload["stream"] != true {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"terms\":[]}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"` + firstChunk + `"}}]}` + "\n\n"))
 		if flusher, ok := w.(http.Flusher); ok {
@@ -1419,6 +1568,14 @@ func newAIStreamBrokenAfterDeltaTestServer(t *testing.T, firstChunk string) *htt
 
 func requireAIStreamRequest(t *testing.T, r *http.Request) {
 	t.Helper()
+	payload := requireAIModelRequest(t, r)
+	if payload["stream"] != true {
+		t.Fatalf("stream = %v, want true", payload["stream"])
+	}
+}
+
+func requireAIModelRequest(t *testing.T, r *http.Request) map[string]any {
+	t.Helper()
 	if r.URL.Path != "/chat/completions" {
 		t.Fatalf("path = %s, want /chat/completions", r.URL.Path)
 	}
@@ -1429,12 +1586,10 @@ func requireAIStreamRequest(t *testing.T, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode model request: %v", err)
 	}
-	if payload["stream"] != true {
-		t.Fatalf("stream = %v, want true", payload["stream"])
-	}
 	if payload["model"] == "" {
-		t.Fatalf("model is required in stream request")
+		t.Fatalf("model is required in model request")
 	}
+	return payload
 }
 
 func createAIStreamEvidenceRepo(t *testing.T, server *Server) Repository {
