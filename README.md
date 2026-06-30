@@ -2,7 +2,7 @@
 
 DocHarbor 是一个独立的 Git 文档浏览服务。系统按仓库配置 clone bare mirror，扫描指定目录下的文档文件，提供智能最新视图、按分支浏览、Markdown/Mermaid 预览、单文件下载、Git 历史和扫描记录。
 
-需求来源见 [DocHarbor 产品需求与设计文档](doc/DocHarbor产品需求与设计文档.md)。完整操作说明见 [DocHarbor 使用手册](doc/DocHarbor使用手册.md)。AI 问答扩展设计见 [DocHarbor AI 问答功能设计文档](doc/DocHarbor%20AI问答功能设计文档.md)。
+需求来源见 [DocHarbor 产品需求与设计文档](doc/DocHarbor产品需求与设计文档.md)。完整操作说明见 [DocHarbor 使用手册](doc/DocHarbor使用手册.md)。AI 问答扩展设计见 [DocHarbor AI 问答功能设计文档](doc/DocHarbor%20AI问答功能设计文档.md)，Agent 重构方案见 [DocHarbor AI Agent 架构重构设计文档](doc/DocHarbor%20AI%20Agent架构重构设计文档.md)。
 
 ## 功能范围
 

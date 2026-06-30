@@ -397,6 +397,144 @@ func TestAIMessagesResponseIncludesPersistedEvidencePanelData(t *testing.T) {
 	}
 }
 
+func TestAIAgentWorkflowPolicyDefaultsToShadowAndKeepsCompatibility(t *testing.T) {
+	policy := defaultAIAgentWorkflowPolicy()
+	if policy.Version != aiAgentWorkflowVersionV2Shadow || policy.Mode != "shadow" || policy.AnswerMode != "legacy" {
+		t.Fatalf("default workflow policy should be v2 shadow legacy, got %+v", policy)
+	}
+	active := newAIAgentWorkflowPolicy(aiAgentWorkflowVersionV2Active)
+	if active.Version != aiAgentWorkflowVersionV2Active || active.Mode != "active" || active.AnswerMode != "agent_workflow" {
+		t.Fatalf("active workflow policy cannot express v2-active: %+v", active)
+	}
+
+	checkpoint := buildAIAgentRunCheckpoint(AIQuestionScope{RepoMode: "global"}, "standard", aiQuestionPreparation{
+		SearchQuestion:       "接口参数是什么？",
+		GeneratedSearchTerms: []string{"接口", "参数"},
+	})
+	if checkpoint["agent_workflow_version"] != aiAgentWorkflowVersionV2Shadow || checkpoint["answer_mode"] != "legacy" {
+		t.Fatalf("checkpoint should default to shadow legacy: %+v", checkpoint)
+	}
+	failurePolicy, ok := checkpoint["failure_policy"].(map[string]aiAgentWorkflowFailurePolicy)
+	if !ok {
+		t.Fatalf("checkpoint failure policy has unexpected type: %#v", checkpoint["failure_policy"])
+	}
+	for node, wantFallback := range map[string]string{
+		"task_frame":       "legacy_intent_and_retrieval",
+		"contract_builder": "legacy_answer",
+		"evidence_curator": "legacy_answer",
+		"contract_checker": "legacy_answer",
+		"answer_verifier":  "conservative_answer_or_local_evidence_summary",
+	} {
+		if failurePolicy[node].Fallback != wantFallback || failurePolicy[node].Record == "" {
+			t.Fatalf("fallback for %s = %+v, want fallback %s", node, failurePolicy[node], wantFallback)
+		}
+	}
+	events, ok := checkpoint["sse_compatibility"].([]string)
+	if !ok {
+		t.Fatalf("checkpoint sse compatibility has unexpected type: %#v", checkpoint["sse_compatibility"])
+	}
+	for _, event := range []string{"run_started", "stage", "provider_attempt", "citations", "answer_delta", "message_done"} {
+		if !testStringSliceContains(events, event) {
+			t.Fatalf("checkpoint missing legacy SSE event %s: %+v", event, events)
+		}
+	}
+}
+
+func TestAIRunCheckpointDefaultsToShadowAndSurvivesFailedFinish(t *testing.T) {
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	session, err := createAISession(ctx, server.db, "checkpoint", "", AIQuestionScope{RepoMode: "global"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	userMsg, err := insertAIMessage(ctx, server.db, AIMessage{SessionID: session.ID, Role: "user", Content: "question"})
+	if err != nil {
+		t.Fatalf("insert user message: %v", err)
+	}
+	run, err := createAIRun(ctx, server.db, session.ID, userMsg.ID, AIConfigVersion{
+		Version:    1,
+		Config:     defaultAIConfig(),
+		ConfigHash: "checkpoint-test",
+	}, AIQuestionScope{RepoMode: "global"})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	initial := decodeAICheckpointForTest(t, run.CheckpointJSON)
+	if initial["agent_workflow_version"] != aiAgentWorkflowVersionV2Shadow || initial["answer_mode"] != "legacy" {
+		t.Fatalf("initial checkpoint missing shadow workflow: %+v", initial)
+	}
+
+	if err := finishAIRun(ctx, server.db, run.ID, AIAgentRun{
+		Status:       "failed",
+		CurrentState: "task_frame",
+		ScopeJSON:    encodeJSON(AIQuestionScope{RepoMode: "global"}),
+		ErrorMessage: "task frame failed",
+	}); err != nil {
+		t.Fatalf("finish run: %v", err)
+	}
+	finished, err := getAIRun(ctx, server.db, run.ID)
+	if err != nil {
+		t.Fatalf("get finished run: %v", err)
+	}
+	preserved := decodeAICheckpointForTest(t, finished.CheckpointJSON)
+	if preserved["agent_workflow_version"] != aiAgentWorkflowVersionV2Shadow || preserved["answer_mode"] != "legacy" {
+		t.Fatalf("failed finish should preserve initial workflow checkpoint: %+v", preserved)
+	}
+}
+
+func TestAIQuestionEndpointKeepsLegacyFieldsAndWritesShadowCheckpoint(t *testing.T) {
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	session, err := createAISession(ctx, server.db, "新的 AI 问答", "", AIQuestionScope{RepoMode: "global"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	recorder := doJSON(t, server, http.MethodPost, "/api/ai/sessions/"+strconv.FormatInt(session.ID, 10)+"/messages", map[string]any{
+		"question":       "没有证据的问题",
+		"scope_override": AIQuestionScope{RepoMode: "global"},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, required := range []string{`"run":`, `"message":`, `"service_candidates":[]`, `"citations":[]`} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("legacy response missing %s: %s", required, body)
+		}
+	}
+	if strings.Contains(body, "api_key") || strings.Contains(body, "sk-test") {
+		t.Fatalf("question response leaked secret-like content: %s", body)
+	}
+	var result aiQuestionResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode question response: %v", err)
+	}
+	checkpoint := decodeAICheckpointForTest(t, result.Run.CheckpointJSON)
+	if checkpoint["agent_workflow_version"] != aiAgentWorkflowVersionV2Shadow || checkpoint["answer_mode"] != "legacy" {
+		t.Fatalf("run checkpoint should use shadow legacy workflow: %+v", checkpoint)
+	}
+	if result.Run.Status != "insufficient_evidence" || result.Run.VerificationStatus != "fail" {
+		t.Fatalf("no-evidence run status = %s/%s, want insufficient_evidence/fail", result.Run.Status, result.Run.VerificationStatus)
+	}
+	if !strings.Contains(result.Run.VerificationReportJSON, `"agent_workflow_version":"v2-shadow"`) {
+		t.Fatalf("verification report missing workflow version: %s", result.Run.VerificationReportJSON)
+	}
+	steps, err := listAIRunSteps(ctx, server.db, result.Run.ID)
+	if err != nil {
+		t.Fatalf("list run steps: %v", err)
+	}
+	var foundCoordinator bool
+	for _, step := range steps {
+		if step.AgentName == "coordinator" && strings.Contains(step.OutputJSON, `"agent_workflow_version":"v2-shadow"`) {
+			foundCoordinator = true
+		}
+	}
+	if !foundCoordinator {
+		t.Fatalf("coordinator checkpoint step missing workflow version: %+v", steps)
+	}
+}
+
 func TestAccessTokenDefaultTTLAndRemoteRead(t *testing.T) {
 	server := newWebhookTestServer(t)
 	ctx := context.Background()
@@ -1139,6 +1277,150 @@ func BatchUpdateSellerGoodsSKUPriceByTargets(price string, targets []string) {
 	t.Fatalf("retrieval missed inventory price update code: %+v", retrieval.Evidence)
 }
 
+func TestAIDatabaseChangeRetrievalPrefersSchemaAndReadPathOverTestFixtures(t *testing.T) {
+	requireGit(t)
+
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+
+	noisyRepo := createTestGitRepo(t)
+	writeScanPathTestFile(t, noisyRepo, "internal/app/ai_settings_test.go", `package app
+
+`+strings.Repeat("// 数据库 修改 游戏 价格 update price sql 如何修改游戏售卖的基础价格\n", 50)+`
+func TestNoisyGamePriceFixture(t *testing.T) {
+	_ = "fake fixture only"
+}
+`)
+	runTestGit(t, noisyRepo, "add", ".")
+	runTestGit(t, noisyRepo, "commit", "-m", "add noisy ai fixture")
+	noisy, err := createRepository(ctx, server.db, Repository{
+		Name:                  "文档服务",
+		Slug:                  "doc-harbor",
+		RepoURL:               noisyRepo,
+		DefaultBranch:         "main",
+		TrackedBranches:       []string{"*"},
+		LatestIncludeBranches: []string{"*"},
+		ScanPaths:             []ScanPath{{Path: ".", Enabled: true}},
+		Enabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("create noisy repository: %v", err)
+	}
+	if _, err := server.scanner.Scan(ctx, noisy.ID, "manual"); err != nil {
+		t.Fatalf("scan noisy repository: %v", err)
+	}
+
+	businessRepo := createTestGitRepo(t)
+	writeScanPathTestFile(t, businessRepo, "models/steam_game_price.go", `package models
+
+func (SteamGamePrice) TableName() string {
+	return "steam_game_price"
+}
+
+// SteamGamePrice steam游戏价格表
+type SteamGamePrice struct {
+	SteamAppID               int    `+"`"+`gorm:"column:steam_app_id" json:"steam_app_id"`+"`"+`
+	CountryCode              string `+"`"+`gorm:"column:country_code" json:"country_code"`+"`"+`
+	IsSell                   int    `+"`"+`gorm:"column:is_sell" json:"is_sell"`+"`"+`
+	PackageID                int    `+"`"+`gorm:"column:package_id" json:"package_id"`+"`"+`
+	PriceInCentsWithDiscount int    `+"`"+`gorm:"column:price_in_cents_with_discount" json:"price_in_cents_with_discount"`+"`"+`
+	Type                     string `+"`"+`gorm:"column:type" json:"type"`+"`"+`
+	BundleID                 int    `+"`"+`gorm:"column:bundle_id" json:"bundle_id"`+"`"+`
+}
+`)
+	writeScanPathTestFile(t, businessRepo, "core/db/mysql_methods/steam_game_current_version_price.go", `package mysql_methods
+
+func findCurrentSteamGameVersionPrice(versionType string, targetID int, countryCode string) {
+	db := global.DB.
+		Model(&models.SteamGamePrice{}).
+		Where("country_code = ?", countryCode).
+		Where("type = ?", versionType).
+		Where("is_sell = ?", 1)
+
+	switch versionType {
+	case models.SteamGamePriceType.Game, models.SteamGamePriceType.DLC:
+		db = db.Where("package_id = ?", targetID)
+	case models.SteamGamePriceType.Bundle:
+		db = db.Where("bundle_id = ?", targetID)
+	}
+	db.Order("last_modified DESC, id DESC").Limit(1).Find(&price)
+}
+`)
+	writeScanPathTestFile(t, businessRepo, "version/mysql/v2.1.2.game.sql", `ALTER TABLE steam_game_price
+    ADD INDEX idx_sgp_pkg_country_sell_mod_id (
+    package_id,
+    country_code,
+    is_sell,
+    last_modified,
+    id
+);
+`)
+	runTestGit(t, businessRepo, "add", ".")
+	runTestGit(t, businessRepo, "commit", "-m", "add steam game price schema")
+	business, err := createRepository(ctx, server.db, Repository{
+		Name:                  "游戏交易服务",
+		Slug:                  "game-trade",
+		RepoURL:               businessRepo,
+		DefaultBranch:         "main",
+		TrackedBranches:       []string{"*"},
+		LatestIncludeBranches: []string{"*"},
+		ScanPaths:             []ScanPath{{Path: ".", Enabled: true}},
+		Enabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("create business repository: %v", err)
+	}
+	if _, err := server.scanner.Scan(ctx, business.ID, "manual"); err != nil {
+		t.Fatalf("scan business repository: %v", err)
+	}
+
+	cfg := defaultAIConfig()
+	cfg.Chat.MaxContextChunks = 8
+	retrieval, err := server.retrieveAIEvidence(ctx, "我想在数据库里直接修改游戏的价格 steam_game_prices SteamGamePrice steam_game_price price_in_cents_with_discount package_id country_code is_sell SELECT UPDATE", AIQuestionScope{
+		RepoMode:   "global",
+		SourceMode: "smart_latest_with_branch_candidates",
+	}, cfg)
+	if err != nil {
+		t.Fatalf("retrieve evidence: %v", err)
+	}
+	if retrieval.Intent != "database_change" {
+		t.Fatalf("intent = %q, want database_change", retrieval.Intent)
+	}
+	if len(retrieval.Evidence) == 0 {
+		t.Fatal("retrieval returned no evidence")
+	}
+	for i, evidence := range retrieval.Evidence {
+		if i >= 3 {
+			break
+		}
+		if evidence.Repo.Name == "文档服务" && aiPathLooksTest(evidence.Citation.FilePath) {
+			t.Fatalf("test fixture ranked too high at %d: %+v", i, evidence)
+		}
+	}
+
+	var foundModel, foundReadPath bool
+	for _, evidence := range retrieval.Evidence {
+		switch evidence.Citation.FilePath {
+		case "models/steam_game_price.go":
+			if strings.Contains(evidence.Content, "steam_game_price") && strings.Contains(evidence.Content, "price_in_cents_with_discount") {
+				foundModel = true
+			}
+		case "core/db/mysql_methods/steam_game_current_version_price.go":
+			if strings.Contains(evidence.Content, "country_code") && strings.Contains(evidence.Content, "package_id") && strings.Contains(evidence.Content, "is_sell") {
+				foundReadPath = true
+			}
+		}
+	}
+	if !foundModel || !foundReadPath {
+		t.Fatalf("retrieval missed model/read-path evidence: model=%v readPath=%v evidence=%+v", foundModel, foundReadPath, retrieval.Evidence)
+	}
+
+	messages := buildAIChatMessages("我想在数据库里直接修改游戏的价格", retrieval)
+	if !strings.Contains(messages[0].Content, "SELECT/UPDATE") || !strings.Contains(messages[0].Content, "不要仅因为证据里没有现成 UPDATE 语句") {
+		t.Fatalf("system prompt should allow evidence-backed SQL examples: %s", messages[0].Content)
+	}
+}
+
 func TestAIQueryTermsDeriveChinesePhrasesWithoutBusinessDictionary(t *testing.T) {
 	terms := strings.Join(aiQueryTerms("你好，认证模块支持哪些外部接入接口？"), ",")
 	for _, want := range []string{"认证模块", "外部", "接入", "接口"} {
@@ -1163,6 +1445,12 @@ func TestAIQueryTermsSplitsMixedChineseAndIdentifierTokens(t *testing.T) {
 	for _, want := range []string{"alpha", "签发", "token", "格式"} {
 		if !strings.Contains(terms, want) {
 			t.Fatalf("terms %q missing %q", terms, want)
+		}
+	}
+	tableTerms := strings.Join(aiQueryTerms("steam_game_prices 表怎么 update？"), ",")
+	for _, want := range []string{"steam_game_prices", "steam_game_price", "prices", "price"} {
+		if !strings.Contains(tableTerms, want) {
+			t.Fatalf("table terms %q missing %q", tableTerms, want)
 		}
 	}
 }
@@ -1738,6 +2026,24 @@ func insertDiagnosticsRunForTest(t *testing.T, server *Server, sessionID, userMe
 		t.Fatalf("diagnostics run id: %v", err)
 	}
 	return id
+}
+
+func decodeAICheckpointForTest(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	var checkpoint map[string]any
+	if err := json.Unmarshal([]byte(raw), &checkpoint); err != nil {
+		t.Fatalf("decode ai checkpoint %q: %v", raw, err)
+	}
+	return checkpoint
+}
+
+func testStringSliceContains(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 func countAISecrets(t *testing.T, server *Server) int {
