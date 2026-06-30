@@ -343,6 +343,8 @@ http://127.0.0.1:14220
 docker pull ghcr.io/tursom/doc-harbor:latest
 ```
 
+DocHarbor 镜像默认使用 `tini` 作为入口，`docker-compose.yml` 也启用了 `init: true`。这个 init 进程用于回收 Git 命令产生的孤儿子进程，生产部署不要移除；如果运行平台覆盖镜像入口，需要同步提供等价 init/reaper。已经存在的 `git <defunct>` 僵尸进程需要重启当前容器后才会清理。
+
 ### 13.2 常用环境变量
 
 | 环境变量 | 默认值 | 说明 |

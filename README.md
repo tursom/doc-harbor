@@ -224,6 +224,8 @@ docker compose up --build
 
 服务启动后访问 `http://127.0.0.1:14220`。生产环境建议放在 Pangolin 之后，由 Pangolin 负责登录、访问控制和配置页访问策略。
 
+DocHarbor 容器会通过 `tini` / Compose `init: true` 回收 Git 命令产生的孤儿子进程。生产部署不要移除镜像入口中的 init 进程；如果平台覆盖了 `ENTRYPOINT`，需要提供等价的 init/reaper。已经存在的 `git <defunct>` 僵尸进程不能单独 kill 清理，需要重启当前容器。
+
 ## 安全边界
 
 - API 不维护用户和权限，鉴权交给 Pangolin。

@@ -17,7 +17,7 @@ COPY internal ./internal
 RUN CGO_ENABLED=1 go build -o /out/doc-harbor ./cmd/doc-harbor
 
 FROM alpine:3.23
-RUN apk add --no-cache ca-certificates git openssh-client tzdata && \
+RUN apk add --no-cache ca-certificates git openssh-client tini tzdata && \
     printf '[credential]\n\thelper = store --file /credentials/.git-credentials\n' > /etc/gitconfig
 WORKDIR /app
 COPY --from=api /out/doc-harbor /app/doc-harbor
@@ -30,4 +30,4 @@ ENV DATA_DIR=/data \
     GIT_CONFIG_GLOBAL=/credentials/.gitconfig
 VOLUME ["/data"]
 EXPOSE 14220
-ENTRYPOINT ["/app/doc-harbor"]
+ENTRYPOINT ["/sbin/tini", "--", "/app/doc-harbor"]

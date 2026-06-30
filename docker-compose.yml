@@ -2,6 +2,7 @@ services:
   doc-harbor:
     image: ghcr.io/tursom/doc-harbor:latest
     build: .
+    init: true
     ports:
       - "14220:14220"
     environment:
