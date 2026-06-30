@@ -6426,7 +6426,7 @@ func aiHanRuns(value string) []string {
 
 func aiStopTerm(value string) bool {
 	switch value {
-	case "你好", "您好", "需要", "哪些", "什么", "页面", "怎么", "如何", "the", "and", "for", "with":
+	case "你好", "您好", "需要", "哪些", "什么", "页面", "怎么", "如何", "the", "and", "for", "with", "in", "of", "to":
 		return true
 	default:
 		return false
@@ -6466,6 +6466,8 @@ func classifyAIIntent(question string) string {
 		return "cross_service"
 	case strings.Contains(q, "分支") || strings.Contains(q, "新接口") || strings.Contains(q, "开发中"):
 		return "branch_lookup"
+	case aiQuestionAsksChangeGuidance(q):
+		return "code_path"
 	default:
 		return "document_qa"
 	}
@@ -6481,6 +6483,26 @@ func aiQuestionAsksDatabaseChange(q string) bool {
 		strings.Contains(q, "更新") || strings.Contains(q, "改成") || strings.Contains(q, "写入") ||
 		strings.Contains(q, "update")
 	return hasDatabaseContext && hasChangeAction
+}
+
+func aiQuestionAsksChangeGuidance(q string) bool {
+	hasQuestionShape := strings.Contains(q, "如何") || strings.Contains(q, "怎么") ||
+		strings.Contains(q, "怎样") || strings.Contains(q, "在哪") || strings.Contains(q, "哪里")
+	hasChangeAction := strings.Contains(q, "修改") || strings.Contains(q, "调整") ||
+		strings.Contains(q, "改成") || strings.Contains(q, "变更") || strings.Contains(q, "更新") ||
+		strings.Contains(q, "配置") || strings.Contains(q, "update") || strings.Contains(q, "change")
+	if !hasQuestionShape || !hasChangeAction {
+		return false
+	}
+	for _, marker := range []string{
+		"价格", "价钱", "金额", "基础价", "字段", "配置", "状态", "比例", "费率",
+		"price", "amount", "field", "config", "status", "rate",
+	} {
+		if strings.Contains(q, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func dedupeAIEvidence(items []aiEvidence) []aiEvidence {
@@ -6562,7 +6584,7 @@ func aiCandidateReason(terms []string, items []aiEvidence) string {
 
 func (s *Server) generateAIQueryTerms(ctx context.Context, cfg AIConfigData, question string, frame *aiTaskFrame) (aiModelResult, []string, error) {
 	messages := []aiChatMessage{
-		{Role: "system", Content: "你是代码和文档检索前的查询规划器。只返回 JSON，不要回答用户问题。JSON 格式为 {\"terms\":[\"...\"]}。terms 应该是短检索词，优先选择可能出现在代码标识符、接口名、文件名、注释或文档中的词；可以包含从用户问题现场推断出的同义表达、英文标识符写法或缩写。当问题明确要求 SQL、数据库、数据表、字段或直接修改数据时，生成可能出现的表名、模型名、字段名、查询条件、单复数和 snake_case/CamelCase 写法，以及 SELECT/UPDATE 等 SQL 检索词。不要加入问题没有依据的具体服务、业务、接口或模块名。"},
+		{Role: "system", Content: "你是代码和文档检索前的查询规划器。只返回 JSON，不要回答用户问题。JSON 格式为 {\"terms\":[\"...\"]}。terms 应该是短检索词，优先选择可能出现在代码标识符、接口名、文件名、注释或文档中的词；可以包含从用户问题现场推断出的同义表达、英文标识符写法或缩写。用户询问如何修改、配置或调整某类数据时，优先生成与原问题概念直接对应的通用技术词和字段式写法；当问题明确要求 SQL、数据库、数据表、字段或直接修改数据时，生成可能出现的表名、模型名、字段名、查询条件、单复数和 snake_case/CamelCase 写法，以及 SELECT/UPDATE 等 SQL 检索词。不要加入问题没有依据的具体服务、业务、接口或模块名。"},
 		{Role: "user", Content: truncate(question, 1200)},
 	}
 	result, err := s.callRoutedAIChat(ctx, cfg, messages, 0, 256)
@@ -6766,6 +6788,8 @@ func aiQueryPlannerGenericTerm(value string) bool {
 
 var aiQueryPlannerGenericTermSet = map[string]struct{}{
 	"api":          {},
+	"amount":       {},
+	"base":         {},
 	"body":         {},
 	"branch":       {},
 	"cache":        {},
@@ -6774,12 +6798,16 @@ var aiQueryPlannerGenericTermSet = map[string]struct{}{
 	"column":       {},
 	"commit":       {},
 	"compensation": {},
+	"config":       {},
 	"contract":     {},
 	"controller":   {},
+	"cents":        {},
+	"currency":     {},
 	"dao":          {},
 	"database":     {},
 	"db":           {},
 	"delete":       {},
+	"discount":     {},
 	"doc":          {},
 	"docs":         {},
 	"dto":          {},
@@ -6806,6 +6834,7 @@ var aiQueryPlannerGenericTermSet = map[string]struct{}{
 	"parameter":    {},
 	"path":         {},
 	"post":         {},
+	"price":        {},
 	"proto":        {},
 	"put":          {},
 	"query":        {},
@@ -6818,10 +6847,13 @@ var aiQueryPlannerGenericTermSet = map[string]struct{}{
 	"route":        {},
 	"router":       {},
 	"rpc":          {},
+	"sale":         {},
 	"schema":       {},
 	"select":       {},
+	"sell":         {},
 	"service":      {},
 	"sql":          {},
+	"status":       {},
 	"struct":       {},
 	"table":        {},
 	"update":       {},
@@ -7415,6 +7447,28 @@ func localEvidenceAnswer(question string, retrieval aiRetrievalResult, modelFail
 	} else {
 		for _, candidate := range retrieval.ServiceCandidates {
 			fmt.Fprintf(&b, "- %s：%s，证据 %d 条，%s。\n", candidate.ServiceName, candidate.Confidence, candidate.EvidenceCount, candidate.Reason)
+		}
+	}
+	if len(retrieval.Evidence) > 0 {
+		b.WriteString("\n高信号证据摘录\n\n")
+		limit := min(len(retrieval.Evidence), 5)
+		for i := 0; i < limit; i++ {
+			evidence := retrieval.Evidence[i]
+			c := evidence.Citation
+			label := "智能最新"
+			if c.SourceScope == "branch_candidate" {
+				label = "功能分支候选"
+			}
+			snippet := strings.TrimSpace(evidence.Content)
+			if snippet == "" {
+				snippet = strings.TrimSpace(c.QuoteText)
+			}
+			snippet = truncate(snippet, 900)
+			if snippet == "" {
+				continue
+			}
+			fmt.Fprintf(&b, "- [C%d] %s / %s，%s，%s:%d-%d\n\n```text\n%s\n```\n\n",
+				i+1, evidence.Repo.Name, c.Branch, label, c.FilePath, c.LineStart, c.LineEnd, snippet)
 		}
 	}
 	b.WriteString("\n引用来源\n\n")

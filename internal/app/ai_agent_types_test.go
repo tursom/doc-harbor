@@ -142,6 +142,60 @@ func TestAIAgentEvidenceContractBuilderTemplates(t *testing.T) {
 	}
 }
 
+func TestAIQuestionChangeGuidanceUsesCodePathIntentAndGenericTerms(t *testing.T) {
+	question := "如何修改游戏售卖的基础价格"
+	if got := classifyAITaskIntent(question); got != aiTaskIntentCodePathExplanation {
+		t.Fatalf("task intent = %q, want %q", got, aiTaskIntentCodePathExplanation)
+	}
+	if got := aiTaskIntentFromLegacy(classifyAIIntent(question)); got != aiTaskIntentCodePathExplanation {
+		t.Fatalf("legacy intent mapping = %q, want %q", got, aiTaskIntentCodePathExplanation)
+	}
+
+	plannerTerms := filterAIQueryPlannerTerms(parseAIQueryPlannerTerms(`{"terms":["price","base_price","sell_price","update","SteamGamePrice"]}`), question, nil)
+	for _, want := range []string{"price", "base_price", "sell_price", "update"} {
+		if !stringSliceContains(plannerTerms, want) {
+			t.Fatalf("generic planner term %q missing from %v", want, plannerTerms)
+		}
+	}
+	if stringSliceContains(plannerTerms, "steamgameprice") {
+		t.Fatalf("planner filter accepted unsupported concrete term: %v", plannerTerms)
+	}
+
+	terms := aiQueryTerms(question)
+	for _, forbidden := range []string{"steam", "game", "price", "base", "update"} {
+		if stringSliceContains(terms, forbidden) {
+			t.Fatalf("deterministic query terms should not inject semantic alias %q: %v", forbidden, terms)
+		}
+	}
+
+	dbQuestion := "我想在数据库里直接修改游戏的价格"
+	if got := classifyAITaskIntent(dbQuestion); got != aiTaskIntentDatabaseDirectUpdateForTest {
+		t.Fatalf("database task intent = %q, want %q", got, aiTaskIntentDatabaseDirectUpdateForTest)
+	}
+}
+
+func TestLocalEvidenceAnswerIncludesEvidenceSnippets(t *testing.T) {
+	answer := localEvidenceAnswer("如何修改价格", aiRetrievalResult{
+		Evidence: []aiEvidence{{
+			Repo: Repository{Name: "service-a"},
+			Citation: AIMessageCitation{
+				SourceScope: "smart_latest",
+				Branch:      "main",
+				CommitSHA:   "abcdef123456",
+				FilePath:    "models/item_price.go",
+				LineStart:   10,
+				LineEnd:     12,
+			},
+			Content: "10: func (ItemPrice) TableName() string {\n11:     return \"item_price\"\n12: }",
+		}},
+	}, false)
+	for _, want := range []string{"高信号证据摘录", "models/item_price.go:10-12", "return \"item_price\""} {
+		if !strings.Contains(answer, want) {
+			t.Fatalf("local evidence answer missing %q:\n%s", want, answer)
+		}
+	}
+}
+
 func TestAIAgentCoverageReportJSONSerialization(t *testing.T) {
 	report := aiContractCoverageReport{
 		ContractID:         "database_direct_update_for_test.v1",
@@ -693,6 +747,23 @@ func TestAIAnswerVerificationEvidencePollutionAndBranchScope(t *testing.T) {
 	branchCandidateUnconfirmed := verifyAIAnswerWithContext(frame, contract, coverage, branchBundle, "功能分支候选，尚未确认合入主分支或上线 [C1]", aiAnswerVerificationContext{EvidenceCount: 1, RetrievalRound: aiRetrievalMaxRounds})
 	if stringSliceContains(branchCandidateUnconfirmed.FailedChecks, "branch_scope_mismatch") || !stringSliceContains(branchCandidateUnconfirmed.PassedChecks, "branch_scope") {
 		t.Fatalf("branch candidate unconfirmed report = %+v", branchCandidateUnconfirmed)
+	}
+
+	mixedBundle := aiVerifierBundleForTest(coverage, aiEvidenceReliabilityHighSmartLatest)
+	mixedBundle.Groups = append(mixedBundle.Groups, aiEvidenceGroup{
+		Key:               "current_fact",
+		EvidenceIDs:       []int64{2},
+		Summary:           "branch candidate evidence",
+		EvidenceType:      "code",
+		SourceReliability: aiEvidenceReliabilityMediumBranchCandidate,
+	})
+	mixedSourceLabels := verifyAIAnswerWithContext(frame, contract, coverage, mixedBundle, "引用来源：智能最新 [C1]；功能分支候选 [C2]。", aiAnswerVerificationContext{EvidenceCount: 2, RetrievalRound: aiRetrievalMaxRounds})
+	if stringSliceContains(mixedSourceLabels.FailedChecks, "branch_scope_mismatch") || !stringSliceContains(mixedSourceLabels.PassedChecks, "branch_scope") {
+		t.Fatalf("mixed source labels should not fail branch scope: %+v", mixedSourceLabels)
+	}
+	mixedPromotion := verifyAIAnswerWithContext(frame, contract, coverage, mixedBundle, "功能分支候选已合入主分支，当前最新事实见 [C2]。", aiAnswerVerificationContext{EvidenceCount: 2, RetrievalRound: aiRetrievalMaxRounds})
+	if !stringSliceContains(mixedPromotion.FailedChecks, "branch_scope_mismatch") {
+		t.Fatalf("mixed branch promotion report = %+v", mixedPromotion)
 	}
 }
 

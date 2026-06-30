@@ -159,7 +159,7 @@ func verifyAIAnswerWithContext(frame aiTaskFrame, contract aiEvidenceContract, c
 		pass("no_test_fixture_pollution")
 	}
 
-	if aiAnswerHasBranchCandidateEvidence(bundle) && aiAnswerPromotesBranchCandidateAsLatest(answer) {
+	if aiAnswerHasBranchCandidateEvidence(bundle) && aiAnswerPromotesBranchCandidateAsLatest(answer, bundle) {
 		fail("branch_scope_mismatch", "branch-candidate evidence is presented as smart-latest or merged fact")
 	} else {
 		pass("branch_scope")
@@ -514,7 +514,24 @@ func aiAnswerHasBranchCandidateEvidence(bundle aiEvidenceBundle) bool {
 	return false
 }
 
-func aiAnswerPromotesBranchCandidateAsLatest(answer string) bool {
+func aiAnswerHasSmartLatestEvidence(bundle aiEvidenceBundle) bool {
+	for _, group := range bundle.Groups {
+		switch group.SourceReliability {
+		case aiEvidenceReliabilityHighSmartLatest, aiEvidenceReliabilityHighCurrentFile:
+			return true
+		}
+	}
+	for _, excluded := range bundle.Excluded {
+		switch excluded.SourceReliability {
+		case aiEvidenceReliabilityHighSmartLatest, aiEvidenceReliabilityHighCurrentFile:
+			return true
+		}
+	}
+	return false
+}
+
+func aiAnswerPromotesBranchCandidateAsLatest(answer string, bundle aiEvidenceBundle) bool {
+	hasSmartLatestEvidence := aiAnswerHasSmartLatestEvidence(bundle)
 	for _, marker := range aiAnswerBranchPromotionMarkers {
 		searchFrom := 0
 		for {
@@ -524,9 +541,23 @@ func aiAnswerPromotesBranchCandidateAsLatest(answer string) bool {
 			}
 			index += searchFrom
 			if !aiAnswerBranchPromotionMarkerNegated(answer, index) {
+				if hasSmartLatestEvidence && !aiAnswerBranchPromotionClauseMentionsBranchCandidate(answer, index) {
+					searchFrom = index + len(marker)
+					continue
+				}
 				return true
 			}
 			searchFrom = index + len(marker)
+		}
+	}
+	return false
+}
+
+func aiAnswerBranchPromotionClauseMentionsBranchCandidate(answer string, markerIndex int) bool {
+	clause := aiAnswerClauseAroundIndex(answer, markerIndex)
+	for _, marker := range []string{"功能分支候选", "候选分支", "branch_candidate", "branch candidate"} {
+		if strings.Contains(clause, marker) {
+			return true
 		}
 	}
 	return false
@@ -536,6 +567,19 @@ func aiAnswerBranchPromotionMarkerNegated(answer string, markerIndex int) bool {
 	if markerIndex <= 0 {
 		return false
 	}
+	context := aiAnswerClausePrefixBeforeIndex(answer, markerIndex)
+	for _, marker := range aiAnswerBranchScopeNegationMarkers {
+		if strings.Contains(context, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func aiAnswerClausePrefixBeforeIndex(answer string, markerIndex int) string {
+	if markerIndex <= 0 {
+		return ""
+	}
 	prefix := answer[:markerIndex]
 	clauseStart := -1
 	for _, separator := range aiAnswerBranchScopeSeparators {
@@ -543,16 +587,34 @@ func aiAnswerBranchPromotionMarkerNegated(answer string, markerIndex int) bool {
 			clauseStart = index + len(separator)
 		}
 	}
-	context := prefix
 	if clauseStart >= 0 && clauseStart < len(prefix) {
-		context = prefix[clauseStart:]
+		return prefix[clauseStart:]
 	}
-	for _, marker := range aiAnswerBranchScopeNegationMarkers {
-		if strings.Contains(context, marker) {
-			return true
+	return prefix
+}
+
+func aiAnswerClauseAroundIndex(answer string, markerIndex int) string {
+	if markerIndex < 0 {
+		return ""
+	}
+	start := 0
+	prefix := answer[:markerIndex]
+	for _, separator := range aiAnswerBranchScopeSeparators {
+		if index := strings.LastIndex(prefix, separator); index >= 0 && index+len(separator) > start {
+			start = index + len(separator)
 		}
 	}
-	return false
+	end := len(answer)
+	suffix := answer[markerIndex:]
+	for _, separator := range aiAnswerBranchScopeSeparators {
+		if index := strings.Index(suffix, separator); index >= 0 && markerIndex+index < end {
+			end = markerIndex + index
+		}
+	}
+	if start > end {
+		return ""
+	}
+	return answer[start:end]
 }
 
 func aiAnswerLooksUnsupportedRefusal(answerLower, intent string, coverage aiContractCoverageReport) bool {

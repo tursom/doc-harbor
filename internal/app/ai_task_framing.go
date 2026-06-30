@@ -126,6 +126,8 @@ func aiTaskIntentFromLegacy(intent string) string {
 		return aiTaskIntentCrossServiceImpact
 	case "branch_lookup":
 		return aiTaskIntentBranchLookup
+	case "code_path":
+		return aiTaskIntentCodePathExplanation
 	case "test_lookup", "document_qa":
 		return aiTaskIntentDocumentQA
 	default:
@@ -198,6 +200,9 @@ func aiQuestionAsksCrossServiceImpact(q string) bool {
 }
 
 func aiQuestionAsksCodePathExplanation(q string) bool {
+	if aiQuestionAsksChangeGuidance(q) {
+		return true
+	}
 	return strings.Contains(q, "代码") || strings.Contains(q, "在哪里实现") || strings.Contains(q, "在哪实现") ||
 		strings.Contains(q, "调用链") || strings.Contains(q, "链路") || strings.Contains(q, "入口") ||
 		strings.Contains(q, "实现路径") || strings.Contains(q, "code path")
