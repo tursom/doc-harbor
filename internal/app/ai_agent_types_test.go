@@ -303,6 +303,207 @@ func TestAIEvidenceContractCheckerDatabaseDirectUpdateMissingFieldUnits(t *testi
 	}
 }
 
+func TestAIAnswerPolicyDatabaseRequiredCoveredAllowsPlaceholderSQL(t *testing.T) {
+	frame := aiTaskFrame{Intent: aiTaskIntentDatabaseDirectUpdateForTest, UserGoal: "测试环境直接改价"}
+	contract := buildAIEvidenceContract(frame)
+	coverage := aiCoverageReportForTest(contract, nil, map[string]string{
+		"rollback_plan": aiEvidenceCoverageMissing,
+	})
+
+	policy := buildAIAnswerPolicy(frame, contract, coverage)
+	if policy.AnswerMode != aiAnswerModeDeterministicAllowed || !policy.DeterministicOperationStepsAllowed || !policy.RequiredCovered {
+		t.Fatalf("covered database policy should allow deterministic placeholder SQL: %+v", policy)
+	}
+	if !policy.MustExplainRiskOrCompensationGaps || !strings.Contains(strings.Join(policy.Constraints, "\n"), "SELECT/UPDATE") {
+		t.Fatalf("policy should allow placeholder SQL and explain recommended gaps: %+v", policy)
+	}
+
+	retrieval := aiAnswerComposerRetrievalForTest(frame, contract, coverage, []aiEvidence{{
+		Repo: Repository{Name: "service-a"},
+		Citation: AIMessageCitation{
+			ID:          1,
+			RepoID:      1,
+			SourceScope: "smart_latest",
+			Branch:      "main",
+			FilePath:    "models/item_record.go",
+			LineStart:   1,
+			LineEnd:     20,
+		},
+		Content:           "func (ItemRecord) TableName() string { return \"item_records\" }\nPriceCents int `gorm:\"column:price_cents\"`\nLookupCode string `gorm:\"column:lookup_code\"`",
+		EvidenceType:      "orm_model",
+		SourceReliability: aiEvidenceReliabilityHighSmartLatest,
+		ContractKeys:      []string{"table_identity", "update_fields", "field_units", "where_conditions"},
+	}})
+	messages := buildAIChatMessages("数据库里直接改价用于测试", retrieval)
+	combined := messages[0].Content + "\n" + messages[1].Content
+	for _, want := range []string{
+		"SELECT/UPDATE",
+		"不要仅因为证据里没有现成 UPDATE 语句",
+		"Coverage Report",
+		"Answer Policy",
+		`"evidence_sufficiency_source":"coverage_report"`,
+		"recommended missing/partial",
+	} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("composer prompt missing %s:\n%s", want, combined)
+		}
+	}
+}
+
+func TestAIAnswerPolicyDatabaseRequiredMissingBlocksDeterministicUpdate(t *testing.T) {
+	frame := aiTaskFrame{Intent: aiTaskIntentDatabaseDirectUpdateForTest, UserGoal: "测试环境直接改价"}
+	contract := buildAIEvidenceContract(frame)
+	coverage := aiCoverageReportForTest(contract, map[string]string{
+		"field_units": aiEvidenceCoverageMissing,
+	}, nil)
+
+	policy := buildAIAnswerPolicy(frame, contract, coverage)
+	if policy.AnswerMode != aiAnswerModeRequiredGaps || policy.DeterministicOperationStepsAllowed || !policy.MustListConfirmedFactsAndGapsOnly {
+		t.Fatalf("missing required policy should block deterministic UPDATE: %+v", policy)
+	}
+	if !stringSliceContains(policy.RequiredGaps, "field_units") {
+		t.Fatalf("policy missing field_units required gap: %+v", policy)
+	}
+
+	retrieval := aiAnswerComposerRetrievalForTest(frame, contract, coverage, nil)
+	messages := buildAIChatMessages("数据库里直接改价用于测试", retrieval)
+	combined := messages[0].Content + "\n" + messages[1].Content
+	for _, want := range []string{
+		"不得输出确定 UPDATE",
+		"只能列已确认事实和缺口",
+		`"required_gaps":["field_units"]`,
+		"Answer Composer 不得自行猜测",
+	} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("composer prompt missing %s:\n%s", want, combined)
+		}
+	}
+	if strings.Contains(messages[0].Content, "可以给 SELECT/UPDATE 占位符示例") {
+		t.Fatalf("missing required prompt should not allow SELECT/UPDATE examples: %s", messages[0].Content)
+	}
+}
+
+func TestAIAnswerPolicyConflictAndForbiddenRules(t *testing.T) {
+	frame := aiTaskFrame{Intent: aiTaskIntentAPIIntegration, UserGoal: "确认接口接入方式"}
+	contract := buildAIEvidenceContract(frame)
+	conflictCoverage := aiCoverageReportForTest(contract, map[string]string{
+		"route_or_rpc": aiEvidenceCoverageConflict,
+	}, nil)
+
+	conflictPolicy := buildAIAnswerPolicy(frame, contract, conflictCoverage)
+	if conflictPolicy.AnswerMode != aiAnswerModeConflictFirst || !conflictPolicy.MustStartWithConflict || conflictPolicy.DeterministicAnswerAllowed {
+		t.Fatalf("conflict policy should require conflict-first answer: %+v", conflictPolicy)
+	}
+
+	forbiddenCoverage := aiCoverageReportForTest(contract, map[string]string{
+		"route_or_rpc": aiEvidenceCoverageForbidden,
+	}, nil)
+	forbiddenPolicy := buildAIAnswerPolicy(frame, contract, forbiddenCoverage)
+	if forbiddenPolicy.AnswerMode != aiAnswerModeBlockedForbidden || forbiddenPolicy.AnswerAllowed || !forbiddenPolicy.MustBlockDeterminateAnswer {
+		t.Fatalf("forbidden policy should block determinate answer: %+v", forbiddenPolicy)
+	}
+}
+
+func TestAIAnswerComposerAPIIntegrationRequiresPathRequestResponseCitations(t *testing.T) {
+	frame := aiTaskFrame{Intent: aiTaskIntentAPIIntegration, UserGoal: "前端接入下单接口"}
+	contract := buildAIEvidenceContract(frame)
+	coverage := aiCoverageReportForTest(contract, nil, nil)
+	retrieval := aiAnswerComposerRetrievalForTest(frame, contract, coverage, []aiEvidence{{
+		Repo: Repository{Name: "order-service"},
+		Citation: AIMessageCitation{
+			ID:          1,
+			RepoID:      2,
+			SourceScope: "smart_latest",
+			Branch:      "main",
+			FilePath:    "internal/router/order.go",
+			LineStart:   10,
+			LineEnd:     40,
+		},
+		Content:           "POST /api/orders CreateOrderRequest{sku_id, quantity} CreateOrderResponse{order_no, status}",
+		EvidenceType:      "route",
+		SourceReliability: aiEvidenceReliabilityHighSmartLatest,
+		ContractKeys:      []string{"route_or_rpc", "request_fields", "response_fields"},
+	}})
+
+	messages := buildAIChatMessages("下单页面要接哪个接口，参数和返回是什么？", retrieval)
+	combined := messages[0].Content + "\n" + messages[1].Content
+	for _, want := range []string{
+		"每个接口路径、请求字段、响应字段都必须有引用",
+		"每个请求字段都必须引用",
+		"每个响应字段都必须引用",
+		`"route_or_rpc"`,
+		`"request_fields"`,
+		`"response_fields"`,
+		"[C1]",
+	} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("api composer prompt missing %s:\n%s", want, combined)
+		}
+	}
+}
+
+func TestAIAnswerComposerBranchCandidateMarksFunctionalBranchCandidate(t *testing.T) {
+	frame := aiTaskFrame{Intent: aiTaskIntentBranchLookup, UserGoal: "确认功能在哪个分支"}
+	contract := buildAIEvidenceContract(frame)
+	coverage := aiCoverageReportForTest(contract, nil, nil)
+	retrieval := aiAnswerComposerRetrievalForTest(frame, contract, coverage, []aiEvidence{{
+		Repo: Repository{Name: "inventory-service"},
+		Citation: AIMessageCitation{
+			ID:          1,
+			RepoID:      3,
+			SourceScope: "branch_candidate",
+			Branch:      "feature/lock-stock",
+			CommitSHA:   "1234567890abcdef",
+			FilePath:    "internal/router/stock.go",
+			LineStart:   8,
+			LineEnd:     18,
+		},
+		Content:           "POST /api/stock/lock is implemented on this branch",
+		EvidenceType:      "route",
+		SourceReliability: aiEvidenceReliabilityMediumBranchCandidate,
+		ContractKeys:      []string{"branch_candidates", "source_scope", "commit_evidence"},
+	}})
+
+	messages := buildAIChatMessages("库存锁定的新接口在哪个分支？", retrieval)
+	combined := messages[0].Content + "\n" + messages[1].Content
+	if strings.Count(combined, "功能分支候选") < 2 {
+		t.Fatalf("branch candidate prompt should mark functional branch candidates:\n%s", combined)
+	}
+	if !strings.Contains(combined, `"evidence_sufficiency_source":"coverage_report"`) {
+		t.Fatalf("branch composer prompt missing policy sufficiency source:\n%s", combined)
+	}
+}
+
+func TestAIAnswerComposerStepsAndCheckpointSummaries(t *testing.T) {
+	frame := aiTaskFrame{Intent: aiTaskIntentDocumentQA, UserGoal: "说明文档事实"}
+	contract := buildAIEvidenceContract(frame)
+	coverage := aiCoverageReportForTest(contract, nil, nil)
+	retrieval := aiAnswerComposerRetrievalForTest(frame, contract, coverage, nil)
+	prepared := prepareAIAnswerComposer("这个文档说明了什么？", &retrieval)
+
+	policyStep := buildAIAnswerPolicyStep(&prepared.Frame, &prepared.Contract, &prepared.Coverage, prepared.Policy)
+	composerStep := buildAIAnswerComposerStep("这个文档说明了什么？", retrieval, prepared.Policy, prepared.Summary)
+	for _, step := range []AIAgentStep{policyStep, composerStep} {
+		if !strings.Contains(step.OutputJSON, "answer_policy") && !strings.Contains(step.OutputJSON, "composer") {
+			t.Fatalf("step should include answer policy/composer summary: %+v", step)
+		}
+		if !strings.Contains(step.OutputJSON, "coverage_report") && step.AgentName == "answer_composer" {
+			t.Fatalf("composer step should record coverage/policy prompt inputs: %s", step.OutputJSON)
+		}
+	}
+	checkpoint := buildAIAgentRunCheckpoint(AIQuestionScope{RepoMode: "global"}, "standard", aiQuestionPreparation{
+		Scope:            AIQuestionScope{RepoMode: "global"},
+		TaskFrame:        &prepared.Frame,
+		Contract:         &prepared.Contract,
+		ContractCoverage: &prepared.Coverage,
+		AnswerPolicy:     &prepared.Policy,
+		AnswerComposer:   &prepared.Summary,
+	})
+	if checkpoint["answer_policy"] == nil || checkpoint["answer_composer"] == nil {
+		t.Fatalf("checkpoint missing answer policy/composer summaries: %+v", checkpoint)
+	}
+}
+
 func TestAIAgentRetrievalResultLegacyJSONCompatibility(t *testing.T) {
 	retrieval := aiRetrievalResult{
 		TaskFrame:      &aiTaskFrame{},
@@ -562,4 +763,88 @@ func aiContractCoverageItemsByKeyForTest(report aiContractCoverageReport) map[st
 		items[item.Key] = item
 	}
 	return items
+}
+
+func aiCoverageReportForTest(contract aiEvidenceContract, requiredOverrides map[string]string, recommendedOverrides map[string]string) aiContractCoverageReport {
+	report := aiContractCoverageReport{
+		ContractID:         contract.ContractID,
+		Status:             "pass",
+		Coverage:           map[string]string{},
+		Items:              []aiContractCoverageItem{},
+		Covered:            []string{},
+		Partial:            []string{},
+		MissingRequired:    []string{},
+		MissingRecommended: []string{},
+		ForbiddenMatched:   []string{},
+		NextAction:         aiEvidenceCheckerNextActionLegacyAnswer,
+		Details:            map[string]string{},
+	}
+	for _, requirement := range contract.Required {
+		status := aiEvidenceCoverageCovered
+		if requiredOverrides != nil && requiredOverrides[requirement.Key] != "" {
+			status = requiredOverrides[requirement.Key]
+		}
+		appendAIContractCoverageItem(&report, aiContractCoverageItem{
+			Key:         requirement.Key,
+			Requirement: aiEvidenceCheckerRequirementRequired,
+			Status:      status,
+			EvidenceIDs: []int64{1},
+			Reason:      "test coverage",
+			Confidence:  0.95,
+		})
+	}
+	for _, requirement := range contract.Recommended {
+		status := aiEvidenceCoverageCovered
+		if recommendedOverrides != nil && recommendedOverrides[requirement.Key] != "" {
+			status = recommendedOverrides[requirement.Key]
+		}
+		appendAIContractCoverageItem(&report, aiContractCoverageItem{
+			Key:         requirement.Key,
+			Requirement: aiEvidenceCheckerRequirementRecommended,
+			Status:      status,
+			EvidenceIDs: []int64{1},
+			Reason:      "test coverage",
+			Confidence:  0.9,
+		})
+	}
+	finalizeAIContractCoverageReport(&report)
+	return report
+}
+
+func aiAnswerComposerRetrievalForTest(frame aiTaskFrame, contract aiEvidenceContract, coverage aiContractCoverageReport, evidence []aiEvidence) aiRetrievalResult {
+	groups := make([]aiEvidenceGroup, 0, len(coverage.Items))
+	for _, item := range coverage.Items {
+		groups = append(groups, aiEvidenceGroup{
+			Key:               item.Key,
+			EvidenceIDs:       append([]int64(nil), item.EvidenceIDs...),
+			Summary:           item.Reason,
+			EvidenceType:      "test",
+			SourceReliability: aiEvidenceReliabilityHighSmartLatest,
+		})
+	}
+	bundle := aiEvidenceBundle{
+		BundleID: "test-bundle",
+		Coverage: coverage.Coverage,
+		Groups:   groups,
+	}
+	return aiRetrievalResult{
+		Intent:           frame.Intent,
+		Scope:            AIQuestionScope{RepoMode: "global", SourceMode: "smart_latest_with_branch_candidates"},
+		Plan:             map[string]any{},
+		Evidence:         evidence,
+		TaskFrame:        &frame,
+		Contract:         &contract,
+		EvidenceBundle:   &bundle,
+		Coverage:         &coverage,
+		ContractCoverage: &coverage,
+	}
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
