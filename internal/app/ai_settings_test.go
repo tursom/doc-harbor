@@ -1554,7 +1554,7 @@ func BatchUpdateSellerGoodsSKUPriceByTargets(price string, targets []string) {
 		t.Fatalf("scan repository: %v", err)
 	}
 
-	plannerServer := newAIAnswerModelTestServer(t, http.StatusOK, `{"choices":[{"message":{"role":"assistant","content":"{\"terms\":[\"UpdateGameInventoryStatus\",\"Price\",\"BatchUpdateSellerGoodsSKUPriceByTargets\"]}"}}],"usage":{"prompt_tokens":3,"completion_tokens":4}}`)
+	plannerServer := newAIAnswerModelTestServer(t, http.StatusOK, `{"choices":[{"message":{"role":"assistant","content":"{\"terms\":[\"UpdateGameInventoryStatus\",\"inventory\",\"Price\",\"handler\",\"BatchUpdateSellerGoodsSKUPriceByTargets\"]}"}}],"usage":{"prompt_tokens":3,"completion_tokens":4}}`)
 	secret, err := server.createOrUpdateAISecret(ctx, 0, aiSecretRequest{Name: "query-planner-api-key", SecretType: "api_key", Value: "sk-test-query-planner"}, "test")
 	if err != nil {
 		t.Fatalf("create planner secret: %v", err)
@@ -1576,14 +1576,24 @@ func BatchUpdateSellerGoodsSKUPriceByTargets(price string, targets []string) {
 	cfg.Chat.Routing = buildDefaultRouting(ctx, server.db, cfg.Chat.Providers)
 	cfg.Chat.MaxContextChunks = 8
 	prepared, plannerStep := server.expandAIQuestionForRetrieval(ctx, cfg, aiQuestionPreparation{
-		SearchQuestion: "如何修改游戏售卖的基础价格",
+		SearchQuestion: "如何修改游戏售卖 inventory price 的基础价格",
 		Scope: AIQuestionScope{
 			RepoMode:   "global",
 			SourceMode: "smart_latest_with_branch_candidates",
 		},
 	})
-	if plannerStep.Status != "success" || !strings.Contains(strings.Join(prepared.GeneratedSearchTerms, ","), "batchupdate") {
-		t.Fatalf("query planner did not generate expected code terms: step=%+v prepared=%+v", plannerStep, prepared)
+	if plannerStep.Status != "success" {
+		t.Fatalf("query planner status = %s, want success: step=%+v", plannerStep.Status, plannerStep)
+	}
+	for _, forbidden := range []string{"updategameinventorystatus", "batchupdatesellergoodsskupricebytargets"} {
+		if testStringSliceContains(prepared.GeneratedSearchTerms, forbidden) {
+			t.Fatalf("query planner accepted unsupported concrete code term %q: step=%+v prepared=%+v", forbidden, plannerStep, prepared)
+		}
+	}
+	for _, want := range []string{"inventory", "price", "handler"} {
+		if !testStringSliceContains(prepared.GeneratedSearchTerms, want) {
+			t.Fatalf("query planner filtered supported term %q: step=%+v prepared=%+v", want, plannerStep, prepared)
+		}
 	}
 	retrieval, err := server.retrieveAIEvidence(ctx, prepared.SearchQuestion, AIQuestionScope{
 		RepoMode:   "global",
@@ -1601,6 +1611,24 @@ func BatchUpdateSellerGoodsSKUPriceByTargets(price string, targets []string) {
 		}
 	}
 	t.Fatalf("retrieval missed inventory price update code: %+v", retrieval.Evidence)
+}
+
+func TestAIQueryPlannerFiltersUnsupportedConcreteTerms(t *testing.T) {
+	frame := &aiTaskFrame{
+		KnownTerms:     []string{"widget metric", "tenant_id"},
+		GeneratedTerms: []string{"LoadWidgetMetric"},
+	}
+	terms := filterAIQueryPlannerTerms(parseAIQueryPlannerTerms(`{"terms":["UpdateGameInventoryStatus","BatchUpdateSellerGoodsSKUPriceByTargets","widget_metric","WidgetMetricRequest","handler","tenant_id","LoadWidgetMetric","request_response","response"]}`), "How does widget metric request use tenant_id?", frame)
+	for _, forbidden := range []string{"updategameinventorystatus", "batchupdatesellergoodsskupricebytargets"} {
+		if testStringSliceContains(terms, forbidden) {
+			t.Fatalf("unsupported concrete code term %q was accepted: %v", forbidden, terms)
+		}
+	}
+	for _, want := range []string{"widget_metric", "widgetmetricrequest", "handler", "tenant_id", "loadwidgetmetric", "request_response", "response"} {
+		if !testStringSliceContains(terms, want) {
+			t.Fatalf("supported planner term %q was filtered: %v", want, terms)
+		}
+	}
 }
 
 func TestAIDatabaseChangeRetrievalPrefersSchemaAndReadPathOverTestFixtures(t *testing.T) {
@@ -1751,6 +1779,288 @@ func findCurrentSteamGameVersionPrice(versionType string, targetID int, countryC
 	if !strings.Contains(messages[0].Content, "SELECT/UPDATE") || !strings.Contains(messages[0].Content, "不要仅因为证据里没有现成 UPDATE 语句") {
 		t.Fatalf("system prompt should allow evidence-backed SQL examples: %s", messages[0].Content)
 	}
+}
+
+func TestAIAgentRetrievalOrchestratorAddsSecondRoundForMissingSchemaEvidence(t *testing.T) {
+	requireGit(t)
+
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	createAIRetrievalOrchestratorRepo(t, server, true)
+
+	frame := aiTaskFrame{
+		Intent:          aiTaskIntentDatabaseDirectUpdateForTest,
+		UserGoal:        "confirm test-only direct data update evidence",
+		AnswerShape:     "sql_steps_with_risk",
+		ScopeStrategy:   "selected_repositories",
+		TargetArtifacts: []string{"table", "orm_model", "update_fields", "read_path", "field_units"},
+		KnownTerms:      []string{"loadwidgetmetric", "widgetmetric", "metric_cents", "tenant_id"},
+	}
+	contract := buildAIEvidenceContract(frame)
+	cfg := defaultAIConfig()
+	cfg.Chat.MaxContextChunks = 8
+	retrieval, err := server.retrieveAIEvidenceWithTaskFrame(ctx, "LoadWidgetMetric metric_cents tenant_id", AIQuestionScope{
+		RepoMode:   "global",
+		SourceMode: "smart_latest",
+	}, cfg, &frame, &contract)
+	if err != nil {
+		t.Fatalf("retrieve orchestrated evidence: %v", err)
+	}
+	if len(retrieval.Rounds) < 2 {
+		t.Fatalf("retrieval rounds = %+v, want at least two rounds", retrieval.Rounds)
+	}
+	if got := retrieval.Rounds[0].CoverageDelta["read_path"]; !strings.Contains(got, "covered") {
+		t.Fatalf("round 1 should cover read_path, delta=%+v", retrieval.Rounds[0].CoverageDelta)
+	}
+	if got := retrieval.Rounds[0].CoverageDelta["table_identity"]; !strings.Contains(got, "missing") {
+		t.Fatalf("round 1 should still miss table_identity, delta=%+v", retrieval.Rounds[0].CoverageDelta)
+	}
+	if retrieval.Rounds[1].NewEvidenceCount <= 0 {
+		t.Fatalf("round 2 should add evidence: %+v", retrieval.Rounds[1])
+	}
+	if got := retrieval.Rounds[1].CoverageDelta["table_identity"]; !strings.Contains(got, "covered") {
+		t.Fatalf("round 2 should cover table_identity, delta=%+v", retrieval.Rounds[1].CoverageDelta)
+	}
+	if retrieval.ContractCoverage == nil || retrieval.ContractCoverage.Coverage["table_identity"] != aiEvidenceCoverageCovered || retrieval.ContractCoverage.Coverage["field_units"] != aiEvidenceCoverageCovered {
+		t.Fatalf("final coverage did not include schema/field-unit evidence: %+v", retrieval.ContractCoverage)
+	}
+	var foundModelOrMigration bool
+	for _, evidence := range retrieval.Evidence {
+		switch evidence.EvidenceType {
+		case "orm_model", "migration_sql":
+			foundModelOrMigration = true
+		}
+	}
+	if !foundModelOrMigration {
+		t.Fatalf("orchestrator did not retain ORM or migration evidence: %+v", retrieval.Evidence)
+	}
+	for _, search := range retrieval.Rounds[1].Searches {
+		for _, hint := range search.PathHints {
+			if !testStringSliceContains([]string{"models", "migration", "db", "router", "proto", "handler", "client", "docs"}, hint) {
+				t.Fatalf("round 2 used non-generic path hint %q in search %+v", hint, search)
+			}
+		}
+	}
+	if len(retrieval.RetrievalRoundSteps) != len(retrieval.Rounds) {
+		t.Fatalf("round steps = %d, rounds = %d", len(retrieval.RetrievalRoundSteps), len(retrieval.Rounds))
+	}
+	for _, step := range retrieval.RetrievalRoundSteps {
+		if step.StepType != "retrieval_round" || !strings.Contains(step.OutputJSON, `"coverage_delta"`) || !strings.Contains(step.OutputJSON, `"new_evidence_count"`) || !strings.Contains(step.OutputJSON, `"searches"`) {
+			t.Fatalf("retrieval round step missing diagnostics fields: %+v", step)
+		}
+	}
+}
+
+func TestAIAgentRetrievalOrchestratorCompletedWithGapsDiagnostics(t *testing.T) {
+	requireGit(t)
+
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	createAIRetrievalOrchestratorRepo(t, server, false)
+	session, err := createAISession(ctx, server.db, "orchestrator gaps", "", AIQuestionScope{RepoMode: "global"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	recorder := doJSON(t, server, http.MethodPost, "/api/ai/sessions/"+strconv.FormatInt(session.ID, 10)+"/messages", map[string]any{
+		"question": "我想在数据库里直接修改 widget metric_cents，读取链路是 LoadWidgetMetric，WHERE 需要 tenant_id 和 widget_id",
+		"scope_override": AIQuestionScope{
+			RepoMode:   "global",
+			SourceMode: "smart_latest",
+		},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("question status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var result aiQuestionResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode question response: %v", err)
+	}
+	if result.Run.Status != aiWorkflowStatusCompletedWithGaps || result.Run.VerificationStatus != aiWorkflowStatusCompletedWithGaps {
+		t.Fatalf("run status = %s/%s, want completed_with_gaps", result.Run.Status, result.Run.VerificationStatus)
+	}
+	if strings.Contains(result.Message.Content, "UPDATE ") {
+		t.Fatalf("completed_with_gaps local answer should not include deterministic UPDATE: %s", result.Message.Content)
+	}
+	checkpoint := decodeAICheckpointForTest(t, result.Run.CheckpointJSON)
+	coverage, ok := checkpoint["contract_coverage"].(map[string]any)
+	if !ok || coverage["status"] != aiWorkflowStatusCompletedWithGaps || coverage["next_action"] != aiWorkflowStatusCompletedWithGaps {
+		t.Fatalf("checkpoint coverage missing completed_with_gaps: %+v", checkpoint["contract_coverage"])
+	}
+	if !strings.Contains(result.Run.VerificationReportJSON, `"workflow_status":"completed_with_gaps"`) {
+		t.Fatalf("verification report missing completed_with_gaps: %s", result.Run.VerificationReportJSON)
+	}
+	steps, err := listAIRunSteps(ctx, server.db, result.Run.ID)
+	if err != nil {
+		t.Fatalf("list run steps: %v", err)
+	}
+	var roundSteps int
+	for _, step := range steps {
+		if step.StepType != "retrieval_round" {
+			continue
+		}
+		roundSteps++
+		if !strings.Contains(step.OutputJSON, `"reason"`) || !strings.Contains(step.OutputJSON, `"searches"`) || !strings.Contains(step.OutputJSON, `"coverage_delta"`) {
+			t.Fatalf("retrieval_round step missing output detail: %s", step.OutputJSON)
+		}
+	}
+	if roundSteps != aiRetrievalMaxRounds {
+		t.Fatalf("retrieval_round step count = %d, want %d", roundSteps, aiRetrievalMaxRounds)
+	}
+
+	diagnosticsToken := issueAccessTokenForTest(t, server, accessTokenScope{}, time.Hour, accessTokenCapabilityAIDiagnosticsRead)
+	detail := doAuthorizedJSON(t, server, http.MethodGet, "/api/access/ai/diagnostics/runs/"+strconv.FormatInt(result.Run.ID, 10), diagnosticsToken, nil)
+	if detail.Code != http.StatusOK {
+		t.Fatalf("diagnostics detail status = %d, want %d; body=%s", detail.Code, http.StatusOK, detail.Body.String())
+	}
+	var detailResp aiDiagnosticsRunDetailResponse
+	if err := json.Unmarshal(detail.Body.Bytes(), &detailResp); err != nil {
+		t.Fatalf("decode diagnostics detail: %v", err)
+	}
+	var foundRoundSummary bool
+	for _, step := range detailResp.Steps {
+		if step.StepType != "retrieval_round" {
+			continue
+		}
+		summaryJSON, err := json.Marshal(step.Summary)
+		if err != nil {
+			t.Fatalf("marshal retrieval round summary: %v", err)
+		}
+		summary := string(summaryJSON)
+		if strings.Contains(summary, `"reason"`) && strings.Contains(summary, `"searches"`) && strings.Contains(summary, `"coverage_delta"`) {
+			foundRoundSummary = true
+		}
+	}
+	if !foundRoundSummary {
+		t.Fatalf("diagnostics detail missing retrieval_round summary: %+v", detailResp.Steps)
+	}
+}
+
+func TestAIRetrievalQueryPlannerFailureFallsBackToDeterministicTerms(t *testing.T) {
+	requireGit(t)
+
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	repoDir := createTestGitRepo(t)
+	writeScanPathTestFile(t, repoDir, "docs/widget-notes.md", "# Widget Notes\n\nAlphaWidget supports deterministic lookup through LoadWidgetMetric.\n")
+	runTestGit(t, repoDir, "add", ".")
+	runTestGit(t, repoDir, "commit", "-m", "add widget notes")
+	repo, err := createRepository(ctx, server.db, Repository{
+		Name:                  "widget-docs",
+		Slug:                  "widget-docs",
+		RepoURL:               repoDir,
+		DefaultBranch:         "main",
+		TrackedBranches:       []string{"main"},
+		LatestIncludeBranches: []string{"main"},
+		ScanPaths:             []ScanPath{{Path: ".", Enabled: true}},
+		Enabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("create repository: %v", err)
+	}
+	if _, err := server.scanner.Scan(ctx, repo.ID, "manual"); err != nil {
+		t.Fatalf("scan repository: %v", err)
+	}
+
+	plannerServer := newAIAnswerModelTestServer(t, http.StatusTooManyRequests, `{"error":"rate limit sk-test-query-planner-fail-12345678"}`)
+	secret, err := server.createOrUpdateAISecret(ctx, 0, aiSecretRequest{Name: "failing-query-planner-key", SecretType: "api_key", Value: "sk-test-query-planner-fail"}, "test")
+	if err != nil {
+		t.Fatalf("create planner secret: %v", err)
+	}
+	cfg := defaultAIConfig()
+	cfg.Enabled = true
+	cfg.Chat.Providers = []AIProvider{{
+		ProviderKey:           "query-planner",
+		Name:                  "QueryPlanner",
+		Priority:              10,
+		ProviderType:          "openai_compatible",
+		BaseURL:               plannerServer.URL,
+		Model:                 "query-planner-model",
+		APIKeySecretID:        secret.ID,
+		CostTier:              "low",
+		RequestTimeoutSeconds: 5,
+		MaxRPM:                60,
+	}}
+	cfg.Chat.Routing = buildDefaultRouting(ctx, server.db, cfg.Chat.Providers)
+	prepared, plannerStep := server.expandAIQuestionForRetrieval(ctx, cfg, aiQuestionPreparation{
+		SearchQuestion: "AlphaWidget LoadWidgetMetric lookup",
+		Scope: AIQuestionScope{
+			RepoMode:   "global",
+			SourceMode: "smart_latest",
+		},
+	})
+	if plannerStep.Status != "failed" {
+		t.Fatalf("planner step status = %s, want failed", plannerStep.Status)
+	}
+	if strings.Contains(plannerStep.ErrorMessage, "sk-test-query-planner-fail") {
+		t.Fatalf("planner error leaked API key: %s", plannerStep.ErrorMessage)
+	}
+	retrieval, err := server.retrieveAIEvidence(ctx, prepared.SearchQuestion, prepared.Scope, cfg)
+	if err != nil {
+		t.Fatalf("retrieval after planner failure: %v", err)
+	}
+	if len(retrieval.Evidence) == 0 || len(retrieval.Rounds) == 0 {
+		t.Fatalf("deterministic fallback retrieval found no evidence: %+v", retrieval)
+	}
+	if retrieval.Rounds[0].PlannerStatus != "deterministic" || !strings.Contains(retrieval.Rounds[0].QuerySource, "task_frame_known_terms") {
+		t.Fatalf("round 1 did not record deterministic fallback source: %+v", retrieval.Rounds[0])
+	}
+}
+
+func createAIRetrievalOrchestratorRepo(t *testing.T, server *Server, includeSchema bool) Repository {
+	t.Helper()
+	ctx := context.Background()
+	repoDir := createTestGitRepo(t)
+	writeScanPathTestFile(t, repoDir, "internal/db/widget_metric_reader.go", `package db
+
+type WidgetMetric struct{}
+
+func LoadWidgetMetric(tenantID, widgetID int64) {
+	db.Model(&WidgetMetric{}).
+		Where("tenant_id = ?", tenantID).
+		Where("widget_id = ?", widgetID).
+		First(&WidgetMetric{})
+}
+`)
+	if includeSchema {
+		writeScanPathTestFile(t, repoDir, "models/widget_metric.go", `package models
+
+func (WidgetMetric) TableName() string {
+	return "widget_metric"
+}
+
+type WidgetMetric struct {
+	TenantID    int64 `+"`"+`gorm:"column:tenant_id"`+"`"+`
+	WidgetID    int64 `+"`"+`gorm:"column:widget_id"`+"`"+`
+	MetricCents int64 `+"`"+`gorm:"column:metric_cents"`+"`"+` // stored in cents
+}
+`)
+		writeScanPathTestFile(t, repoDir, "migrations/001_widget_metric.sql", `CREATE TABLE widget_metric (
+    tenant_id BIGINT NOT NULL,
+    widget_id BIGINT NOT NULL,
+    metric_cents BIGINT NOT NULL COMMENT 'stored in cents',
+    UNIQUE KEY uk_widget_metric (tenant_id, widget_id)
+);
+`)
+	}
+	runTestGit(t, repoDir, "add", ".")
+	runTestGit(t, repoDir, "commit", "-m", "add widget metric evidence")
+	repo, err := createRepository(ctx, server.db, Repository{
+		Name:                  "widget-service",
+		Slug:                  "widget-service",
+		RepoURL:               repoDir,
+		DefaultBranch:         "main",
+		TrackedBranches:       []string{"main"},
+		LatestIncludeBranches: []string{"main"},
+		ScanPaths:             []ScanPath{{Path: ".", Enabled: true}},
+		Enabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("create repository: %v", err)
+	}
+	if _, err := server.scanner.Scan(ctx, repo.ID, "manual"); err != nil {
+		t.Fatalf("scan repository: %v", err)
+	}
+	return repo
 }
 
 func TestAIQueryTermsDeriveChinesePhrasesWithoutBusinessDictionary(t *testing.T) {

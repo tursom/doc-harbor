@@ -95,9 +95,14 @@ type aiAnswerVerificationReport struct {
 
 type aiRetrievalRoundPlan struct {
 	Round               int                      `json:"round"`
+	Intent              string                   `json:"intent,omitempty"`
 	Reason              string                   `json:"reason"`
 	MissingContractKeys []string                 `json:"missing_contract_keys,omitempty"`
 	Searches            []aiRetrievalRoundSearch `json:"searches"`
+	QuerySource         string                   `json:"query_source,omitempty"`
+	PlannerStatus       string                   `json:"planner_status,omitempty"`
+	NewEvidenceCount    int                      `json:"new_evidence_count"`
+	CoverageDelta       map[string]string        `json:"coverage_delta"`
 	NextAction          string                   `json:"next_action,omitempty"`
 }
 

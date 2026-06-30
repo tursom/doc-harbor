@@ -61,6 +61,7 @@ func (s *Server) frameAITask(ctx context.Context, cfg AIConfigData, question str
 		step.OutputJSON = encodeJSON(frame)
 		return frame, step
 	}
+	supplement.GeneratedTerms = filterAIQueryPlannerTerms(supplement.GeneratedTerms, strings.TrimSpace(question+"\n"+prepared.SearchQuestion), &frame)
 	mergeAITaskFrameSupplement(&frame, supplement)
 	step.Status = "success"
 	step.OutputJSON = encodeJSON(frame)

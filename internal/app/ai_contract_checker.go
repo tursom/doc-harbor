@@ -317,6 +317,11 @@ func buildAIShadowVerificationReport(verificationStatus string, citationCount in
 		report["contract_coverage"] = summarizeAIContractCoverageReport(*coverage)
 		report["contract_coverage_ok"] = coverage.Status == "pass"
 		report["unconfirmed_count"] = aiContractCoverageUnconfirmedRequiredCount(coverage)
+		if aiRetrievalHasCompletedGaps(coverage) {
+			report["workflow_status"] = aiWorkflowStatusCompletedWithGaps
+			report["next_action"] = aiWorkflowStatusCompletedWithGaps
+			report["answer_constraint"] = "list confirmed evidence and unresolved required gaps; do not provide deterministic operation steps"
+		}
 	}
 	return encodeJSON(report)
 }
