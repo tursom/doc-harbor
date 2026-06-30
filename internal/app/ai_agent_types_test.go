@@ -180,6 +180,129 @@ func TestAIAgentCoverageReportJSONSerialization(t *testing.T) {
 	}
 }
 
+func TestAIEvidenceContractCheckerStatusesAndUnconfirmedCount(t *testing.T) {
+	contract := aiEvidenceContract{
+		ContractID: "checker.v1",
+		Required: []aiEvidenceRequirement{
+			{Key: "covered_key", Description: "covered requirement"},
+			{Key: "partial_key", Description: "partial requirement"},
+			{Key: "missing_key", Description: "missing requirement"},
+			{Key: "conflict_key", Description: "conflicting requirement"},
+			{Key: "forbidden_key", Description: "forbidden requirement"},
+		},
+		Recommended: []aiEvidenceRequirement{
+			{Key: "recommended_key", Description: "recommended requirement"},
+		},
+		Forbidden: []string{"forbidden_marker"},
+	}
+	bundle := aiEvidenceBundle{
+		BundleID: "checker-bundle",
+		Coverage: map[string]string{
+			"covered_key":     aiEvidenceCoverageCovered,
+			"partial_key":     aiEvidenceCoveragePartial,
+			"conflict_key":    aiEvidenceCoverageConflict,
+			"forbidden_key":   aiEvidenceCoverageForbidden,
+			"recommended_key": aiEvidenceCoveragePartial,
+		},
+		Groups: []aiEvidenceGroup{
+			{Key: "covered_key", EvidenceIDs: []int64{1}, EvidenceType: "doc", SourceReliability: aiEvidenceReliabilityHighSmartLatest},
+			{Key: "partial_key", EvidenceIDs: []int64{2}, EvidenceType: "doc", SourceReliability: aiEvidenceReliabilityMediumBranchCandidate},
+			{Key: "conflict_key", EvidenceIDs: []int64{3}, EvidenceType: "doc", SourceReliability: aiEvidenceReliabilityHighSmartLatest, Summary: "conflict between sources"},
+			{Key: "forbidden_key", EvidenceIDs: []int64{4}, EvidenceType: "doc", SourceReliability: aiEvidenceReliabilityHighSmartLatest, Summary: "forbidden_marker"},
+			{Key: "recommended_key", EvidenceIDs: []int64{5}, EvidenceType: "doc", SourceReliability: aiEvidenceReliabilityMediumBranchCandidate},
+		},
+	}
+
+	report := checkAIEvidenceContract(contract, bundle)
+	items := aiContractCoverageItemsByKeyForTest(report)
+	for key, want := range map[string]string{
+		"covered_key":     aiEvidenceCoverageCovered,
+		"partial_key":     aiEvidenceCoveragePartial,
+		"missing_key":     aiEvidenceCoverageMissing,
+		"conflict_key":    aiEvidenceCoverageConflict,
+		"forbidden_key":   aiEvidenceCoverageForbidden,
+		"recommended_key": aiEvidenceCoveragePartial,
+	} {
+		item, ok := items[key]
+		if !ok {
+			t.Fatalf("coverage item missing %s: %+v", key, report.Items)
+		}
+		if item.Status != want || report.Coverage[key] != want {
+			t.Fatalf("%s status = item:%s coverage:%s, want %s; report=%+v", key, item.Status, report.Coverage[key], want, report)
+		}
+		if item.EvidenceIDs == nil || item.Reason == "" || item.Confidence < 0 {
+			t.Fatalf("%s missing required item fields: %+v", key, item)
+		}
+	}
+	if got := aiContractCoverageUnconfirmedRequiredCount(&report); got != 2 {
+		t.Fatalf("unconfirmed required count = %d, want 2; report=%+v", got, report)
+	}
+	if report.Status != aiEvidenceCoverageForbidden || report.NextAction != aiEvidenceCheckerNextActionRemove {
+		t.Fatalf("report status/next_action = %s/%s, want forbidden/remove; report=%+v", report.Status, report.NextAction, report)
+	}
+}
+
+func TestAIEvidenceContractCheckerDatabaseDirectUpdateMissingFieldUnits(t *testing.T) {
+	frame := aiTaskFrame{
+		Intent:     aiTaskIntentDatabaseDirectUpdateForTest,
+		UserGoal:   "给出测试用途的数据库直接修改方案",
+		KnownTerms: []string{"item_records", "price", "lookup_code"},
+	}
+	contract := buildAIEvidenceContract(frame)
+	raw := []aiEvidence{
+		{
+			Repo: Repository{Name: "service-a"},
+			Citation: AIMessageCitation{
+				RepoID:      2,
+				SourceScope: "smart_latest",
+				FilePath:    "models/item_record.go",
+				LineStart:   1,
+				LineEnd:     20,
+			},
+			Content: "func (ItemRecord) TableName() string { return \"item_records\" }\ntype ItemRecord struct {\nPrice int `gorm:\"column:price\"`\nLookupCode string `gorm:\"column:lookup_code\"`\n}",
+			Score:   20,
+		},
+		{
+			Repo: Repository{Name: "service-a"},
+			Citation: AIMessageCitation{
+				RepoID:      2,
+				SourceScope: "smart_latest",
+				FilePath:    "migrations/20260630_item_records.sql",
+				LineStart:   1,
+				LineEnd:     8,
+			},
+			Content: "ALTER TABLE item_records ADD COLUMN price BIGINT NOT NULL DEFAULT 0;",
+			Score:   19,
+		},
+		{
+			Repo: Repository{Name: "service-a"},
+			Citation: AIMessageCitation{
+				RepoID:      2,
+				SourceScope: "smart_latest",
+				FilePath:    "repository/item_record_repository.go",
+				LineStart:   3,
+				LineEnd:     16,
+			},
+			Content: "func FindItemRecord(db *gorm.DB, lookupCode string) {\n	db.Where(\"lookup_code = ?\", lookupCode).Find(&record)\n}",
+			Score:   18,
+		},
+	}
+
+	curation := curateAIEvidence(&frame, &contract, raw)
+	report := checkAIEvidenceContract(contract, curation.Bundle)
+	status := report.Coverage["field_units"]
+	if status != aiEvidenceCoverageMissing && status != aiEvidenceCoveragePartial {
+		t.Fatalf("field_units coverage = %q, want missing or partial; bundle=%+v report=%+v", status, curation.Bundle, report)
+	}
+	if got := aiContractCoverageUnconfirmedRequiredCount(&report); got <= 0 {
+		t.Fatalf("unconfirmed required count = %d, want > 0; report=%+v", got, report)
+	}
+	item := aiContractCoverageItemsByKeyForTest(report)["field_units"]
+	if item.Key != "field_units" || item.MissingDetail == "" {
+		t.Fatalf("field_units diagnostic item missing detail: %+v", item)
+	}
+}
+
 func TestAIAgentRetrievalResultLegacyJSONCompatibility(t *testing.T) {
 	retrieval := aiRetrievalResult{
 		TaskFrame:      &aiTaskFrame{},
@@ -431,4 +554,12 @@ func TestAIAgentEvidenceCuratorGroupsBranchCandidateDuplicates(t *testing.T) {
 	if !foundMergedGroup {
 		t.Fatalf("bundle did not merge duplicate branch evidence: %+v", curation.Bundle.Groups)
 	}
+}
+
+func aiContractCoverageItemsByKeyForTest(report aiContractCoverageReport) map[string]aiContractCoverageItem {
+	items := map[string]aiContractCoverageItem{}
+	for _, item := range report.Items {
+		items[item.Key] = item
+	}
+	return items
 }

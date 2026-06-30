@@ -60,16 +60,28 @@ type aiEvidenceExclusion struct {
 	SourceScope       string `json:"source_scope,omitempty"`
 }
 
+type aiContractCoverageItem struct {
+	Key           string  `json:"key"`
+	Requirement   string  `json:"requirement"`
+	Status        string  `json:"status"`
+	EvidenceIDs   []int64 `json:"evidence_ids"`
+	Reason        string  `json:"reason"`
+	MissingDetail string  `json:"missing_detail"`
+	Confidence    float64 `json:"confidence"`
+}
+
 type aiContractCoverageReport struct {
-	ContractID         string            `json:"contract_id,omitempty"`
-	Status             string            `json:"status"`
-	Covered            []string          `json:"covered"`
-	Partial            []string          `json:"partial"`
-	MissingRequired    []string          `json:"missing_required"`
-	MissingRecommended []string          `json:"missing_recommended,omitempty"`
-	ForbiddenMatched   []string          `json:"forbidden_matched,omitempty"`
-	NextAction         string            `json:"next_action"`
-	Details            map[string]string `json:"details,omitempty"`
+	ContractID         string                   `json:"contract_id,omitempty"`
+	Status             string                   `json:"status"`
+	Coverage           map[string]string        `json:"coverage,omitempty"`
+	Items              []aiContractCoverageItem `json:"items,omitempty"`
+	Covered            []string                 `json:"covered"`
+	Partial            []string                 `json:"partial"`
+	MissingRequired    []string                 `json:"missing_required"`
+	MissingRecommended []string                 `json:"missing_recommended,omitempty"`
+	ForbiddenMatched   []string                 `json:"forbidden_matched,omitempty"`
+	NextAction         string                   `json:"next_action"`
+	Details            map[string]string        `json:"details,omitempty"`
 }
 
 type aiAnswerVerificationReport struct {

@@ -19,6 +19,8 @@ const (
 	aiEvidenceCoverageCovered                       = "covered"
 	aiEvidenceCoveragePartial                       = "partial"
 	aiEvidenceCoverageMissing                       = "missing"
+	aiEvidenceCoverageConflict                      = "conflict"
+	aiEvidenceCoverageForbidden                     = "forbidden"
 	aiEvidenceCuratorNextActionContractChecker      = "contract_checker"
 	aiEvidenceCuratorNextActionRetrieveMissing      = "retrieve_missing_contract_keys"
 )
@@ -414,8 +416,10 @@ func aiEvidenceMatchesRequirement(evidence aiEvidence, requirement aiEvidenceReq
 		return evidence.Citation.CommitSHA != ""
 	case "table_identity":
 		return evidence.EvidenceType == "orm_model" || evidence.EvidenceType == "migration_sql" || evidence.EvidenceType == "doc"
-	case "update_fields", "field_units":
+	case "update_fields":
 		return evidence.EvidenceType == "orm_model" || evidence.EvidenceType == "migration_sql" || evidence.EvidenceType == "read_path"
+	case "field_units":
+		return aiEvidenceLooksLikeFieldUnitEvidence(evidence)
 	case "where_conditions":
 		return evidence.EvidenceType == "read_path" || evidence.EvidenceType == "migration_sql"
 	case "read_path", "verification_method":
@@ -429,6 +433,40 @@ func aiEvidenceMatchesRequirement(evidence aiEvidence, requirement aiEvidenceReq
 	}
 	for _, accepted := range requirement.AcceptedEvidenceTypes {
 		if aiEvidenceTypeAccepted(evidence, accepted, testFocused) {
+			return true
+		}
+	}
+	return false
+}
+
+func aiEvidenceLooksLikeFieldUnitEvidence(evidence aiEvidence) bool {
+	switch evidence.EvidenceType {
+	case "orm_model", "migration_sql", "read_path", "write_path", "code":
+	default:
+		return false
+	}
+	content := strings.ToLower(evidence.Content)
+	filePath := strings.ToLower(normalizeRepoPath(evidence.Citation.FilePath))
+	combined := filePath + " " + content
+	unitTokens := map[string]struct{}{
+		"unit": {}, "units": {}, "currency": {}, "decimal": {}, "precision": {}, "scale": {}, "ratio": {},
+		"percent": {}, "percentage": {}, "cents": {}, "fen": {}, "millisecond": {}, "milliseconds": {}, "seconds": {},
+	}
+	for _, token := range strings.FieldsFunc(combined, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		if _, ok := unitTokens[token]; ok {
+			return true
+		}
+	}
+	for _, marker := range []string{
+		"_cent", "_cents", "minor_unit", "minorunit", "_fen", "amount_fen",
+		"_ms", "_millis", "_sec", "_secs",
+		"_bytes", "_kb", "_mb", "_gb",
+		"单位", "换算", "分", "元", "毫秒", "秒", "字节", "百分比",
+		"/ 100", "/100", "* 100", "*100", "divide by 100", "multiply by 100",
+	} {
+		if strings.Contains(combined, marker) {
 			return true
 		}
 	}

@@ -241,6 +241,9 @@ type aiDiagnosticsRunDetailResponse struct {
 	UserMessage       AIMessage            `json:"user_message"`
 	AssistantMessage  AIMessage            `json:"assistant_message"`
 	Run               AIAgentRun           `json:"run"`
+	TaskFrame         any                  `json:"task_frame,omitempty"`
+	EvidenceContract  any                  `json:"evidence_contract,omitempty"`
+	ContractCoverage  any                  `json:"contract_coverage,omitempty"`
 	Steps             []aiDiagnosticsStep  `json:"steps"`
 	DataSources       aiDiagnosticsSources `json:"data_sources"`
 	ServiceCandidates []AIServiceCandidate `json:"service_candidates"`
@@ -416,6 +419,7 @@ type aiQuestionPreparation struct {
 	Contract             *aiEvidenceContract
 	EvidenceBundle       *aiEvidenceBundle
 	Coverage             *aiContractCoverageReport
+	ContractCoverage     *aiContractCoverageReport
 }
 
 type aiEvidence struct {
@@ -3450,7 +3454,7 @@ func scanAIDiagnosticsRunSummary(row repoScanner) (aiDiagnosticsRunSummary, erro
 		return aiDiagnosticsRunSummary{}, err
 	}
 	item.UserQuestion = truncate(item.UserQuestion, 500)
-	item.Run.ErrorMessage = sanitizeProviderError(item.Run.ErrorMessage)
+	item.Run = sanitizeAIDiagnosticsRun(item.Run)
 	item.DurationMS = aiRunDurationMS(item.Run)
 	return item, nil
 }
@@ -3636,6 +3640,7 @@ func (s *Server) getAIDiagnosticsRunDetail(ctx context.Context, runID int64, vie
 	if err != nil {
 		return aiDiagnosticsRunDetailResponse{}, err
 	}
+	taskFrame, evidenceContract, contractCoverage := extractAIDiagnosticsRunArtifacts(run, steps)
 	dataSources, err := s.buildAIDiagnosticsSources(ctx, aiScopeFromJSON(run.ScopeJSON))
 	if err != nil {
 		return aiDiagnosticsRunDetailResponse{}, err
@@ -3645,6 +3650,9 @@ func (s *Server) getAIDiagnosticsRunDetail(ctx context.Context, runID int64, vie
 		UserMessage:       userMessage,
 		AssistantMessage:  assistantMessage,
 		Run:               run,
+		TaskFrame:         taskFrame,
+		EvidenceContract:  evidenceContract,
+		ContractCoverage:  contractCoverage,
 		Steps:             sanitizeAIDiagnosticsSteps(steps),
 		DataSources:       dataSources,
 		ServiceCandidates: candidates,
@@ -3689,7 +3697,7 @@ func getAIDiagnosticsRunWithSession(ctx context.Context, db *sql.DB, runID int64
 		}
 		return AIAgentRun{}, AISession{}, err
 	}
-	run.ErrorMessage = sanitizeProviderError(run.ErrorMessage)
+	run = sanitizeAIDiagnosticsRun(run)
 	return run, session, nil
 }
 
@@ -3736,9 +3744,44 @@ func sanitizeAIDiagnosticsSteps(steps []AIAgentStep) []aiDiagnosticsStep {
 	return out
 }
 
+func sanitizeAIDiagnosticsRun(run AIAgentRun) AIAgentRun {
+	run.ErrorMessage = sanitizeProviderError(run.ErrorMessage)
+	run.RetrievalPlanJSON = sanitizeAIDiagnosticsJSONText(run.RetrievalPlanJSON, false)
+	run.VerificationReportJSON = sanitizeAIDiagnosticsJSONText(run.VerificationReportJSON, false)
+	run.CheckpointJSON = sanitizeAIDiagnosticsJSONText(run.CheckpointJSON, true)
+	run.ProviderFailoverJSON = sanitizeAIDiagnosticsJSONText(run.ProviderFailoverJSON, false)
+	run.ModelRouteJSON = sanitizeAIDiagnosticsJSONText(run.ModelRouteJSON, false)
+	run.EstimatedCostJSON = sanitizeAIDiagnosticsJSONText(run.EstimatedCostJSON, false)
+	return run
+}
+
+func sanitizeAIDiagnosticsJSONText(raw string, checkpoint bool) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	payload, ok := decodeAIDiagnosticsSummaryJSON(raw)
+	if !ok {
+		return sanitizeAIDiagnosticsSummaryString(raw)
+	}
+	if checkpoint {
+		if fields, ok := payload.(map[string]any); ok {
+			if evidenceContract, exists := fields["evidence_contract"]; exists {
+				fields["evidence_contract"] = summarizeAIDiagnosticsEvidenceContractArtifact(evidenceContract)
+			}
+		}
+	}
+	return encodeJSON(sanitizeAIDiagnosticsSummaryValue(payload, 0))
+}
+
 func sanitizeAIDiagnosticsStepSummary(step AIAgentStep) map[string]any {
 	if step.AgentName == "evidence_curator" {
 		if summary := sanitizeAIDiagnosticsEvidenceCuratorSummary(step.OutputJSON); len(summary) > 0 {
+			return summary
+		}
+	}
+	if step.AgentName == "contract_checker" {
+		if summary := sanitizeAIDiagnosticsContractCheckerSummary(step.OutputJSON); len(summary) > 0 {
 			return summary
 		}
 	}
@@ -3754,6 +3797,146 @@ func sanitizeAIDiagnosticsStepSummary(step AIAgentStep) map[string]any {
 		return nil
 	}
 	return summary
+}
+
+func extractAIDiagnosticsRunArtifacts(run AIAgentRun, steps []AIAgentStep) (any, any, any) {
+	var taskFrame any
+	var evidenceContract any
+	var contractCoverage any
+	if fields, ok := decodeAIDiagnosticsSummaryJSON(run.CheckpointJSON); ok {
+		if checkpoint, ok := fields.(map[string]any); ok {
+			taskFrame = checkpoint["task_frame"]
+			evidenceContract = checkpoint["evidence_contract"]
+			contractCoverage = checkpoint["contract_coverage"]
+		}
+	}
+	for _, step := range steps {
+		if !aiDiagnosticsArtifactPresent(taskFrame) && step.AgentName == "task_framer" {
+			if value, ok := decodeAIDiagnosticsSummaryJSON(step.OutputJSON); ok {
+				taskFrame = value
+			}
+		}
+		if !aiDiagnosticsArtifactPresent(evidenceContract) && step.AgentName == "contract_builder" {
+			if value, ok := decodeAIDiagnosticsSummaryJSON(step.OutputJSON); ok {
+				evidenceContract = value
+			}
+		}
+		if !aiDiagnosticsArtifactPresent(contractCoverage) && step.AgentName == "contract_checker" {
+			if value, ok := extractAIDiagnosticsCoverageFromChecker(step.OutputJSON); ok {
+				contractCoverage = value
+			}
+		}
+	}
+	return sanitizeAIDiagnosticsArtifact(taskFrame), sanitizeAIDiagnosticsArtifact(summarizeAIDiagnosticsEvidenceContractArtifact(evidenceContract)), sanitizeAIDiagnosticsArtifact(contractCoverage)
+}
+
+func aiDiagnosticsArtifactPresent(value any) bool {
+	if value == nil {
+		return false
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		return len(typed) > 0
+	case []any:
+		return len(typed) > 0
+	default:
+		return true
+	}
+}
+
+func sanitizeAIDiagnosticsArtifact(value any) any {
+	if !aiDiagnosticsArtifactPresent(value) {
+		return nil
+	}
+	return sanitizeAIDiagnosticsSummaryValue(value, 0)
+}
+
+func summarizeAIDiagnosticsEvidenceContractArtifact(value any) any {
+	fields, ok := value.(map[string]any)
+	if !ok {
+		return value
+	}
+	summary := map[string]any{}
+	for _, key := range []string{"contract_id", "intent"} {
+		if nested, exists := fields[key]; exists {
+			summary[key] = nested
+		}
+	}
+	for _, key := range []string{"required_keys", "recommended_keys"} {
+		if nested, exists := fields[key]; exists {
+			summary[key] = nested
+		}
+	}
+	if keys := aiDiagnosticsRequirementKeysFromArtifact(fields["required"]); len(keys) > 0 {
+		summary["required_keys"] = keys
+	}
+	if keys := aiDiagnosticsRequirementKeysFromArtifact(fields["recommended"]); len(keys) > 0 {
+		summary["recommended_keys"] = keys
+	}
+	if len(summary) == 0 {
+		return value
+	}
+	return summary
+}
+
+func aiDiagnosticsRequirementKeysFromArtifact(value any) []string {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	keys := []string{}
+	for _, item := range items {
+		fields, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		key, ok := fields["key"].(string)
+		if !ok {
+			continue
+		}
+		if key = strings.TrimSpace(key); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func sanitizeAIDiagnosticsContractCheckerSummary(raw string) map[string]any {
+	payload, ok := decodeAIDiagnosticsSummaryJSON(raw)
+	if !ok {
+		return nil
+	}
+	fields, ok := payload.(map[string]any)
+	if !ok {
+		return nil
+	}
+	summary := map[string]any{}
+	for _, key := range []string{"contract_coverage", "coverage", "summary"} {
+		if value, exists := fields[key]; exists {
+			summary[key] = sanitizeAIDiagnosticsSummaryValue(value, 0)
+		}
+	}
+	if len(summary) == 0 {
+		return nil
+	}
+	return summary
+}
+
+func extractAIDiagnosticsCoverageFromChecker(raw string) (any, bool) {
+	payload, ok := decodeAIDiagnosticsSummaryJSON(raw)
+	if !ok {
+		return nil, false
+	}
+	fields, ok := payload.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	for _, key := range []string{"contract_coverage", "coverage"} {
+		if value, exists := fields[key]; exists {
+			return value, true
+		}
+	}
+	return nil, false
 }
 
 func sanitizeAIDiagnosticsEvidenceCuratorSummary(raw string) map[string]any {
@@ -4196,6 +4379,18 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 		curatorStep.RunID = run.ID
 		_ = insertAIStep(ctx, s.db, curatorStep)
 	}
+	var contractCoverage *aiContractCoverageReport
+	if retrieval.Contract != nil && retrieval.EvidenceBundle != nil {
+		coverage := checkAIEvidenceContract(*retrieval.Contract, *retrieval.EvidenceBundle)
+		contractCoverage = &coverage
+		prepared.ContractCoverage = contractCoverage
+		retrieval.Plan["contract_coverage"] = summarizeAIContractCoverageReport(coverage)
+		checkerStep := buildAIContractCheckerStep(retrieval.Contract, retrieval.EvidenceBundle, coverage)
+		checkerStep.RunID = run.ID
+		_ = insertAIStep(ctx, s.db, checkerStep)
+		checkpoint = buildAIAgentRunCheckpoint(scope, active.Config.Chat.Routing.DefaultTaskClass, prepared)
+		checkpointJSON = encodeJSON(checkpoint)
+	}
 
 	var modelResult aiModelResult
 	if len(retrieval.Evidence) == 0 {
@@ -4255,29 +4450,24 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 		verificationStatus = "fail"
 	}
 	if err := finishAIRun(ctx, s.db, run.ID, AIAgentRun{
-		AssistantMessageID:    assistantMsg.ID,
-		Status:                status,
-		CurrentState:          "verify_answer",
-		Intent:                retrieval.Intent,
-		ScopeJSON:             encodeJSON(retrieval.Scope),
-		RetrievalPlanJSON:     encodeJSON(retrieval.Plan),
-		ServiceCandidateCount: len(candidates),
-		EvidenceCount:         len(citations),
-		CodeEvidenceCount:     countCodeEvidence(citations),
-		VerificationStatus:    verificationStatus,
-		VerificationReportJSON: encodeJSON(map[string]any{
-			"ok":                     verificationStatus == "pass",
-			"citation_count":         len(citations),
-			"agent_workflow_version": aiAgentWorkflowVersionV2Shadow,
-			"answer_mode":            "legacy",
-			"local_guardrails":       []string{"read_only_tools", "citations_required", "branch_scope_labeled"},
-		}),
-		CheckpointJSON:       checkpointJSON,
-		Model:                modelResult.Model,
-		ProviderName:         modelResult.ProviderName,
-		ProviderFailoverJSON: modelResult.FailoverJSON,
-		ModelRouteJSON:       modelResult.ModelRouteJSON,
-		FinishedAt:           nowString(),
+		AssistantMessageID:     assistantMsg.ID,
+		Status:                 status,
+		CurrentState:           "verify_answer",
+		Intent:                 retrieval.Intent,
+		ScopeJSON:              encodeJSON(retrieval.Scope),
+		RetrievalPlanJSON:      encodeJSON(retrieval.Plan),
+		ServiceCandidateCount:  len(candidates),
+		EvidenceCount:          len(citations),
+		CodeEvidenceCount:      countCodeEvidence(citations),
+		UnconfirmedCount:       aiContractCoverageUnconfirmedRequiredCount(contractCoverage),
+		VerificationStatus:     verificationStatus,
+		VerificationReportJSON: buildAIShadowVerificationReport(verificationStatus, len(citations), contractCoverage),
+		CheckpointJSON:         checkpointJSON,
+		Model:                  modelResult.Model,
+		ProviderName:           modelResult.ProviderName,
+		ProviderFailoverJSON:   modelResult.FailoverJSON,
+		ModelRouteJSON:         modelResult.ModelRouteJSON,
+		FinishedAt:             nowString(),
 	}); err != nil {
 		return aiQuestionResult{}, err
 	}
@@ -4458,6 +4648,21 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 			return err
 		}
 	}
+	var contractCoverage *aiContractCoverageReport
+	if retrieval.Contract != nil && retrieval.EvidenceBundle != nil {
+		coverage := checkAIEvidenceContract(*retrieval.Contract, *retrieval.EvidenceBundle)
+		contractCoverage = &coverage
+		prepared.ContractCoverage = contractCoverage
+		retrieval.Plan["contract_coverage"] = summarizeAIContractCoverageReport(coverage)
+		checkerStep := buildAIContractCheckerStep(retrieval.Contract, retrieval.EvidenceBundle, coverage)
+		checkerStep.RunID = run.ID
+		if err := insertAIStep(ctx, s.db, checkerStep); err != nil {
+			return err
+		}
+		checkpoint = buildAIAgentRunCheckpoint(scope, active.Config.Chat.Routing.DefaultTaskClass, prepared)
+		checkpointJSON = encodeJSON(checkpoint)
+		run.CheckpointJSON = checkpointJSON
+	}
 	if err := emit("stage", aiStreamStageEvent{
 		Stage:          currentState,
 		Status:         "success",
@@ -4609,23 +4814,25 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 				persistCtx, cancel := aiPersistenceContext(ctx)
 				_ = updateAIMessage(persistCtx, s.db, assistantMsg)
 				_ = finishAIRun(persistCtx, s.db, run.ID, AIAgentRun{
-					AssistantMessageID:    assistantMsg.ID,
-					Status:                "failed",
-					CurrentState:          currentState,
-					Intent:                retrieval.Intent,
-					ScopeJSON:             encodeJSON(retrieval.Scope),
-					RetrievalPlanJSON:     encodeJSON(retrieval.Plan),
-					ServiceCandidateCount: len(candidates),
-					EvidenceCount:         len(citations),
-					CodeEvidenceCount:     countCodeEvidence(citations),
-					VerificationStatus:    "fail",
-					Model:                 modelResult.Model,
-					ProviderName:          modelResult.ProviderName,
-					ProviderFailoverJSON:  modelResult.FailoverJSON,
-					ModelRouteJSON:        modelResult.ModelRouteJSON,
-					CheckpointJSON:        checkpointJSON,
-					FinishedAt:            nowString(),
-					ErrorMessage:          safeErr,
+					AssistantMessageID:     assistantMsg.ID,
+					Status:                 "failed",
+					CurrentState:           currentState,
+					Intent:                 retrieval.Intent,
+					ScopeJSON:              encodeJSON(retrieval.Scope),
+					RetrievalPlanJSON:      encodeJSON(retrieval.Plan),
+					ServiceCandidateCount:  len(candidates),
+					EvidenceCount:          len(citations),
+					CodeEvidenceCount:      countCodeEvidence(citations),
+					UnconfirmedCount:       aiContractCoverageUnconfirmedRequiredCount(contractCoverage),
+					VerificationStatus:     "fail",
+					VerificationReportJSON: buildAIShadowVerificationReport("fail", len(citations), contractCoverage),
+					Model:                  modelResult.Model,
+					ProviderName:           modelResult.ProviderName,
+					ProviderFailoverJSON:   modelResult.FailoverJSON,
+					ModelRouteJSON:         modelResult.ModelRouteJSON,
+					CheckpointJSON:         checkpointJSON,
+					FinishedAt:             nowString(),
+					ErrorMessage:           safeErr,
 				})
 				cancel()
 				completed = true
@@ -4667,29 +4874,24 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 		verificationStatus = "fail"
 	}
 	if err := finishAIRun(ctx, s.db, run.ID, AIAgentRun{
-		AssistantMessageID:    assistantMsg.ID,
-		Status:                status,
-		CurrentState:          "verify_answer",
-		Intent:                retrieval.Intent,
-		ScopeJSON:             encodeJSON(retrieval.Scope),
-		RetrievalPlanJSON:     encodeJSON(retrieval.Plan),
-		ServiceCandidateCount: len(candidates),
-		EvidenceCount:         len(citations),
-		CodeEvidenceCount:     countCodeEvidence(citations),
-		VerificationStatus:    verificationStatus,
-		VerificationReportJSON: encodeJSON(map[string]any{
-			"ok":                     verificationStatus == "pass",
-			"citation_count":         len(citations),
-			"agent_workflow_version": aiAgentWorkflowVersionV2Shadow,
-			"answer_mode":            "legacy",
-			"local_guardrails":       []string{"read_only_tools", "citations_required", "branch_scope_labeled"},
-		}),
-		CheckpointJSON:       checkpointJSON,
-		Model:                modelResult.Model,
-		ProviderName:         modelResult.ProviderName,
-		ProviderFailoverJSON: modelResult.FailoverJSON,
-		ModelRouteJSON:       modelResult.ModelRouteJSON,
-		FinishedAt:           nowString(),
+		AssistantMessageID:     assistantMsg.ID,
+		Status:                 status,
+		CurrentState:           "verify_answer",
+		Intent:                 retrieval.Intent,
+		ScopeJSON:              encodeJSON(retrieval.Scope),
+		RetrievalPlanJSON:      encodeJSON(retrieval.Plan),
+		ServiceCandidateCount:  len(candidates),
+		EvidenceCount:          len(citations),
+		CodeEvidenceCount:      countCodeEvidence(citations),
+		UnconfirmedCount:       aiContractCoverageUnconfirmedRequiredCount(contractCoverage),
+		VerificationStatus:     verificationStatus,
+		VerificationReportJSON: buildAIShadowVerificationReport(verificationStatus, len(citations), contractCoverage),
+		CheckpointJSON:         checkpointJSON,
+		Model:                  modelResult.Model,
+		ProviderName:           modelResult.ProviderName,
+		ProviderFailoverJSON:   modelResult.FailoverJSON,
+		ModelRouteJSON:         modelResult.ModelRouteJSON,
+		FinishedAt:             nowString(),
 	}); err != nil {
 		return err
 	}

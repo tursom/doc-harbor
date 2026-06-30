@@ -1069,6 +1069,89 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert task framer step: %v", err)
 	}
+	contract := buildAIEvidenceContract(taskFrame)
+	if err := insertAIStep(ctx, server.db, AIAgentStep{
+		RunID:      aliceRunID,
+		AgentName:  "contract_builder",
+		StepType:   "deterministic",
+		Status:     "success",
+		OutputJSON: encodeJSON(contract),
+		CreatedAt:  aliceStarted,
+		FinishedAt: aliceFinished,
+	}); err != nil {
+		t.Fatalf("insert contract builder step: %v", err)
+	}
+	contractCoverage := aiContractCoverageReport{
+		ContractID: contract.ContractID,
+		Status:     "missing_required",
+		Coverage: map[string]string{
+			"run_identity": aiEvidenceCoverageCovered,
+			"run_steps":    aiEvidenceCoveragePartial,
+			"citations":    aiEvidenceCoverageMissing,
+		},
+		Items: []aiContractCoverageItem{
+			{
+				Key:           "run_identity",
+				Requirement:   aiEvidenceCheckerRequirementRequired,
+				Status:        aiEvidenceCoverageCovered,
+				EvidenceIDs:   []int64{1},
+				Reason:        "run record exists",
+				MissingDetail: "",
+				Confidence:    0.95,
+			},
+			{
+				Key:           "run_steps",
+				Requirement:   aiEvidenceCheckerRequirementRequired,
+				Status:        aiEvidenceCoveragePartial,
+				EvidenceIDs:   []int64{2},
+				Reason:        "only partial step evidence is available",
+				MissingDetail: "Authorization: Bearer raw-diagnostics-token api_key=sk-test-checker-secret token=raw-diagnostics-token secret raw-secret",
+				Confidence:    0.55,
+			},
+			{
+				Key:           "citations",
+				Requirement:   aiEvidenceCheckerRequirementRequired,
+				Status:        aiEvidenceCoverageMissing,
+				EvidenceIDs:   []int64{},
+				Reason:        "missing accepted evidence",
+				MissingDetail: "need citation evidence for diagnostics",
+				Confidence:    0,
+			},
+		},
+		Covered:         []string{"run_identity"},
+		Partial:         []string{"run_steps"},
+		MissingRequired: []string{"run_steps", "citations"},
+		NextAction:      aiEvidenceCheckerNextActionRetrieve,
+		Details: map[string]string{
+			"run_steps": "Authorization: Bearer raw-diagnostics-token api_key=sk-test-checker-secret token=raw-diagnostics-token secret raw-secret",
+			"citations": "need citation evidence for diagnostics",
+		},
+	}
+	if err := insertAIStep(ctx, server.db, AIAgentStep{
+		RunID:     aliceRunID,
+		AgentName: "contract_checker",
+		StepType:  "deterministic",
+		Status:    "success",
+		InputJSON: encodeJSON(map[string]any{
+			"input_summary": map[string]any{
+				"contract": summarizeAIEvidenceContract(contract),
+				"api_key":  "sk-test-checker-secret",
+				"token":    "raw-diagnostics-token",
+			},
+		}),
+		OutputJSON: encodeJSON(map[string]any{
+			"contract_coverage": contractCoverage,
+			"summary": map[string]any{
+				"missing_required": []string{"run_steps", "citations"},
+				"next_action":      aiEvidenceCheckerNextActionRetrieve,
+				"token":            "raw-diagnostics-token",
+			},
+		}),
+		CreatedAt:  aliceStarted,
+		FinishedAt: aliceFinished,
+	}); err != nil {
+		t.Fatalf("insert contract checker step: %v", err)
+	}
 	curatorOutput := map[string]any{
 		"evidence_bundle": map[string]any{
 			"bundle_id": "curated-document_qa.v1",
@@ -1181,7 +1264,7 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 		t.Fatalf("diagnostics detail status = %d, want %d; body=%s", detail.Code, http.StatusOK, detail.Body.String())
 	}
 	body := detail.Body.String()
-	for _, required := range []string{`"user_message"`, `"assistant_message"`, `"steps"`, `"service_candidates"`, `"citations"`, `"model_route_json"`, `"provider_failover_json"`, "sk-[redacted]"} {
+	for _, required := range []string{`"user_message"`, `"assistant_message"`, `"task_frame"`, `"evidence_contract"`, `"contract_coverage"`, `"steps"`, `"service_candidates"`, `"citations"`, `"model_route_json"`, `"provider_failover_json"`, `"contract_checker"`, `"missing_required":["run_steps","citations"]`, "sk-[redacted]"} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("diagnostics detail missing %s: %s", required, body)
 		}
@@ -1198,10 +1281,31 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 	if len(detailResp.DataSources.Repositories) != 1 || detailResp.DataSources.Repositories[0].ID != repo.ID {
 		t.Fatalf("run data sources were not narrowed by scope: %+v", detailResp.DataSources.Repositories)
 	}
-	var foundTaskFramer, foundEvidenceCurator bool
+	if detailResp.TaskFrame == nil || detailResp.EvidenceContract == nil || detailResp.ContractCoverage == nil {
+		t.Fatalf("diagnostics detail missing top-level agent artifacts: %+v", detailResp)
+	}
+	var foundTaskFramer, foundEvidenceCurator, foundContractChecker bool
 	for _, step := range detailResp.Steps {
 		if step.AgentName == "task_framer" && step.StepType == "deterministic" {
 			foundTaskFramer = true
+		}
+		if step.AgentName == "contract_checker" && step.StepType == "deterministic" {
+			foundContractChecker = true
+			summaryJSON, err := json.Marshal(step.Summary)
+			if err != nil {
+				t.Fatalf("marshal contract checker summary: %v", err)
+			}
+			summary := string(summaryJSON)
+			for _, required := range []string{`"contract_coverage"`, `"items"`, `"key":"citations"`, `"status":"missing"`, `"evidence_ids":[]`, `"next_action":"retrieve_missing_contract_keys"`} {
+				if !strings.Contains(summary, required) {
+					t.Fatalf("contract checker summary missing %s: %s", required, summary)
+				}
+			}
+			for _, forbidden := range []string{"api_key", "sk-test-checker-secret", "raw-diagnostics-token", "raw-secret", "Authorization", "Bearer", `"token"`} {
+				if strings.Contains(summary, forbidden) {
+					t.Fatalf("contract checker summary leaked %s: %s", forbidden, summary)
+				}
+			}
 		}
 		if step.AgentName == "evidence_curator" && step.StepType == "deterministic" {
 			foundEvidenceCurator = true
@@ -1224,6 +1328,9 @@ func TestAccessTokenAIDiagnosticsRuns(t *testing.T) {
 	}
 	if !foundTaskFramer {
 		t.Fatalf("diagnostics detail missing task_framer step: %+v", detailResp.Steps)
+	}
+	if !foundContractChecker {
+		t.Fatalf("diagnostics detail missing contract_checker step: %+v", detailResp.Steps)
 	}
 	if !foundEvidenceCurator {
 		t.Fatalf("diagnostics detail missing evidence_curator step: %+v", detailResp.Steps)
