@@ -390,6 +390,11 @@ type aiRetrievalResult struct {
 	Evidence          []aiEvidence
 	ServiceCandidates []AIServiceCandidate
 	Conversation      aiConversationContext
+	TaskFrame         *aiTaskFrame              `json:"task_frame,omitempty"`
+	Contract          *aiEvidenceContract       `json:"contract,omitempty"`
+	EvidenceBundle    *aiEvidenceBundle         `json:"evidence_bundle,omitempty"`
+	Coverage          *aiContractCoverageReport `json:"coverage,omitempty"`
+	Rounds            []aiRetrievalRoundPlan    `json:"rounds,omitempty"`
 }
 
 type aiConversationContext struct {
@@ -408,11 +413,16 @@ type aiQuestionPreparation struct {
 }
 
 type aiEvidence struct {
-	Citation     AIMessageCitation
-	Repo         Repository
-	Content      string
-	MatchedTerms []string
-	Score        float64
+	Citation          AIMessageCitation
+	Repo              Repository
+	Content           string
+	MatchedTerms      []string
+	Score             float64
+	EvidenceType      string   `json:"evidence_type,omitempty"`
+	SourceReliability string   `json:"source_reliability,omitempty"`
+	ContractKeys      []string `json:"contract_keys,omitempty"`
+	ExcludedReason    string   `json:"excluded_reason,omitempty"`
+	GroupKey          string   `json:"group_key,omitempty"`
 }
 
 type aiRefTarget struct {
