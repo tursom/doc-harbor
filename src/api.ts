@@ -295,6 +295,13 @@ export function blobURL(repoID: number, commit: string, filePath: string, inline
   })}`
 }
 
+export function inlineBlobURL(repoID: number, commit: string, filePath: string) {
+  return `/api/repos/${repoID}/blob/inline/${encodeURIComponent(commit)}/${filePath
+    .split('/')
+    .map((part) => encodeURIComponent(part))
+    .join('/')}`
+}
+
 export function htmlPreviewURL(repoID: number, versionID: number) {
   return `/html-preview?${new URLSearchParams({
     repo: String(repoID),

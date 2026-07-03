@@ -159,6 +159,10 @@ func (s *Server) handleRepoSubroutes(w http.ResponseWriter, r *http.Request) {
 	case "path-events":
 		s.handlePathEvents(w, r, repoID)
 	case "blob":
+		if len(parts) > 3 && parts[2] == "inline" {
+			s.handleBlobInlinePath(w, r, repoID, parts[3], strings.Join(parts[4:], "/"))
+			return
+		}
 		s.handleBlob(w, r, repoID, len(parts) > 2 && parts[2] == "download")
 	default:
 		writeError(w, errNotFound("not found"))
@@ -659,6 +663,30 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request, repoID int64
 		"mime_type":  mimeType(filePath),
 		"content":    string(data),
 	})
+}
+
+func (s *Server) handleBlobInlinePath(w http.ResponseWriter, r *http.Request, repoID int64, commit, filePath string) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	filePath = normalizeRepoPath(filePath)
+	if !gitSafeCommit(commit) || filePath == "" || filePath == "." {
+		writeError(w, errBadRequest("commit and valid path are required"))
+		return
+	}
+	data, err := s.git.showFile(r.Context(), s.git.repoPath(repoID), commit, filePath)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", mimeType(filePath))
+	w.Header().Set("Content-Disposition", `inline; filename="`+sanitizeFileName(filePath)+`"`)
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Cross-Origin-Resource-Policy", "cross-origin")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 func decodeBody(body io.ReadCloser, v any) error {

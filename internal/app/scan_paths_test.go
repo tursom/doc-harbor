@@ -181,6 +181,17 @@ func TestHTMLPreviewableScanAndSizeLimit(t *testing.T) {
 	if largeContent.Content != "" {
 		t.Fatalf("large html content should not be loaded, got %q", largeContent.Content)
 	}
+
+	inlineRecorder := getScanPathTestInlineBlob(t, server, repo.ID, small.HeadCommitSHA, "doc/page.html")
+	if inlineRecorder.Header().Get("Content-Type") != "text/html; charset=utf-8" {
+		t.Fatalf("inline html content-type = %q", inlineRecorder.Header().Get("Content-Type"))
+	}
+	if !strings.HasPrefix(inlineRecorder.Header().Get("Content-Disposition"), "inline;") {
+		t.Fatalf("inline html disposition = %q", inlineRecorder.Header().Get("Content-Disposition"))
+	}
+	if inlineRecorder.Body.String() != "<h1>HTML</h1>\n" {
+		t.Fatalf("inline html body = %q", inlineRecorder.Body.String())
+	}
 }
 
 func getScanPathTestVersion(ctx context.Context, server *Server, repoID int64, filePath string) (DocVersion, error) {
@@ -205,6 +216,17 @@ func getScanPathTestContent(t *testing.T, server *Server, repoID, versionID int6
 		t.Fatalf("decode content: %v", err)
 	}
 	return content
+}
+
+func getScanPathTestInlineBlob(t *testing.T, server *Server, repoID int64, commit, filePath string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/repos/1/blob/inline/"+commit+"/"+filePath, nil)
+	recorder := httptest.NewRecorder()
+	server.handleBlobInlinePath(recorder, req, repoID, commit, filePath)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("inline blob status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	return recorder
 }
 
 func createScanPathGitRepo(t *testing.T) (string, string) {

@@ -9,7 +9,7 @@
     <iframe
       v-else-if="htmlViewerContent && htmlViewerSrcdoc"
       class="html-viewer-frame"
-      sandbox=""
+      sandbox="allow-scripts"
       :srcdoc="htmlViewerSrcdoc"
       :title="htmlViewerContent.title || htmlViewerContent.file_path"
     ></iframe>
@@ -284,7 +284,7 @@
                 <iframe
                   v-if="fileContent.previewable && isHTMLContent(fileContent) && htmlPreviewSrcdoc"
                   class="html-preview-frame"
-                  sandbox=""
+                  sandbox="allow-scripts"
                   :srcdoc="htmlPreviewSrcdoc"
                   :title="fileContent.title || fileContent.file_path"
                 ></iframe>
@@ -1006,7 +1006,7 @@ import {
 import { marked } from 'marked'
 import mermaid from 'mermaid'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { APIRequestError, api, blobURL, downloadURL, htmlPreviewURL } from './api'
+import { APIRequestError, api, blobURL, downloadURL, htmlPreviewURL, inlineBlobURL } from './api'
 import type {
   AICostTier,
   AIContractCoverageItem,
@@ -2771,7 +2771,7 @@ function resolveHTMLResourceURL(content: FileContent, href: string) {
   const [pathPart, suffix] = splitMarkdownURLSuffix(trimmed)
   if (!pathPart) return href
   const resolved = resolveRepoRelativePath(content.file_path, pathPart)
-  return blobURL(content.repo_id, content.source_commit_sha, resolved, true) + suffix
+  return inlineBlobURL(content.repo_id, content.source_commit_sha, resolved) + suffix
 }
 
 function rewriteHTMLSrcset(content: FileContent, value: string) {
