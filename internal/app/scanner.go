@@ -392,7 +392,7 @@ func (s *Scanner) shouldSkip(entry treeEntry, repo Repository, sp ScanPath) bool
 		}
 	}
 	if entry.Size > repo.MaxFileSizeBytes && isPreviewable(filePath) {
-		// Oversized Markdown remains downloadable but not previewable/index-skipped only when configured max index says so.
+		// Oversized previewable documents remain downloadable but not previewable.
 		return false
 	}
 	if entry.Size > repo.MaxFileSizeBytes*20 {

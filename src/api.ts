@@ -294,3 +294,10 @@ export function blobURL(repoID: number, commit: string, filePath: string, inline
     inline: inline ? '1' : '0'
   })}`
 }
+
+export function htmlPreviewURL(repoID: number, versionID: number) {
+  return `/html-preview?${new URLSearchParams({
+    repo: String(repoID),
+    version: String(versionID)
+  })}`
+}

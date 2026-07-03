@@ -112,6 +112,64 @@ func TestScanPathChangeRestrictsVisibleFilesAndForcesRescan(t *testing.T) {
 	}
 }
 
+func TestHTMLPreviewableScanAndSizeLimit(t *testing.T) {
+	requireGit(t)
+
+	ctx := context.Background()
+	sourceRepo := createHTMLPreviewGitRepo(t)
+	server := newWebhookTestServer(t)
+	repo, err := createRepository(ctx, server.db, Repository{
+		Name:                  "HTML Preview Repo",
+		Slug:                  "html-preview-repo",
+		RepoURL:               sourceRepo,
+		DefaultBranch:         "main",
+		TrackedBranches:       []string{"main"},
+		LatestIncludeBranches: []string{"main"},
+		MaxFileSizeBytes:      64,
+		ScanPaths:             []ScanPath{{Path: ".", Enabled: true}},
+	})
+	if err != nil {
+		t.Fatalf("create repository: %v", err)
+	}
+	if _, err := server.scanner.Scan(ctx, repo.ID, "manual"); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	small, err := getScanPathTestVersion(ctx, server, repo.ID, "doc/page.html")
+	if err != nil {
+		t.Fatalf("get small html version: %v", err)
+	}
+	if !small.Previewable {
+		t.Fatalf("small html should be previewable")
+	}
+	if small.MimeType != "text/html; charset=utf-8" {
+		t.Fatalf("small html mime = %q, want text/html; charset=utf-8", small.MimeType)
+	}
+
+	large, err := getScanPathTestVersion(ctx, server, repo.ID, "doc/large.htm")
+	if err != nil {
+		t.Fatalf("get large html version: %v", err)
+	}
+	if large.Previewable {
+		t.Fatalf("large html should not be previewable")
+	}
+	if !large.DownloadEnabled {
+		t.Fatalf("large html should remain downloadable")
+	}
+	if large.MimeType != "text/html; charset=utf-8" {
+		t.Fatalf("large html mime = %q, want text/html; charset=utf-8", large.MimeType)
+	}
+}
+
+func getScanPathTestVersion(ctx context.Context, server *Server, repoID int64, filePath string) (DocVersion, error) {
+	row := server.db.QueryRowContext(ctx, `SELECT id, repo_id, document_id, branch, head_commit_sha, scan_path, file_path,
+		previous_path, dir_path, file_name, extension, mime_type, file_size, blob_sha, status, title, previewable,
+		download_enabled, last_commit_sha, last_commit_time, delete_commit_sha, delete_commit_time, rename_score,
+		participates_latest, created_at, updated_at
+		FROM doc_versions WHERE repo_id = ? AND branch = 'main' AND file_path = ?`, repoID, filePath)
+	return scanDocVersion(row)
+}
+
 func createScanPathGitRepo(t *testing.T) (string, string) {
 	t.Helper()
 	repoDir := filepath.Join(t.TempDir(), "source")
@@ -135,6 +193,23 @@ func createScanPathGitRepo(t *testing.T) (string, string) {
 
 	headSHA := strings.TrimSpace(runTestGitOutput(t, repoDir, "rev-parse", "HEAD"))
 	return repoDir, headSHA
+}
+
+func createHTMLPreviewGitRepo(t *testing.T) string {
+	t.Helper()
+	repoDir := filepath.Join(t.TempDir(), "source")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir source repo: %v", err)
+	}
+	runTestGit(t, "", "init", repoDir)
+	runTestGit(t, repoDir, "config", "user.name", "DocHarbor Test")
+	runTestGit(t, repoDir, "config", "user.email", "doc-harbor@example.invalid")
+	writeScanPathTestFile(t, repoDir, "doc/page.html", "<h1>HTML</h1>\n")
+	writeScanPathTestFile(t, repoDir, "doc/large.htm", "<html><body>"+strings.Repeat("x", 96)+"</body></html>\n")
+	runTestGit(t, repoDir, "add", ".")
+	runTestGit(t, repoDir, "commit", "-m", "html docs")
+	runTestGit(t, repoDir, "branch", "-M", "main")
+	return repoDir
 }
 
 func writeScanPathTestFile(t *testing.T, repoDir, name, content string) {

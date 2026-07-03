@@ -83,22 +83,24 @@ func extension(filePath string) string {
 }
 
 func mimeType(filePath string) string {
-	if typ := mime.TypeByExtension(extension(filePath)); typ != "" {
-		return typ
-	}
 	switch extension(filePath) {
 	case ".md", ".markdown":
 		return "text/markdown; charset=utf-8"
+	case ".html", ".htm":
+		return "text/html; charset=utf-8"
 	case ".yml", ".yaml":
 		return "text/yaml; charset=utf-8"
 	default:
+		if typ := mime.TypeByExtension(extension(filePath)); typ != "" {
+			return typ
+		}
 		return "application/octet-stream"
 	}
 }
 
 func isPreviewable(filePath string) bool {
 	switch extension(filePath) {
-	case ".md", ".markdown":
+	case ".md", ".markdown", ".html", ".htm":
 		return true
 	default:
 		return false

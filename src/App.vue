@@ -1,5 +1,24 @@
 <template>
-  <main class="app-shell" :class="{ 'ai-mode': tab === 'ai' }">
+  <main v-if="isHTMLPreviewRoute" class="html-viewer-shell">
+    <div v-if="htmlViewerError" class="html-viewer-state">
+      <FileDown :size="30" />
+      <h1>HTML 预览不可用</h1>
+      <p>{{ htmlViewerError }}</p>
+      <a class="command" :href="htmlViewerBackURL">返回文档</a>
+    </div>
+    <iframe
+      v-else-if="htmlViewerContent && htmlViewerSrcdoc"
+      class="html-viewer-frame"
+      sandbox=""
+      :srcdoc="htmlViewerSrcdoc"
+      :title="htmlViewerContent.title || htmlViewerContent.file_path"
+    ></iframe>
+    <div v-else class="html-viewer-state">
+      <BookOpen :size="30" />
+      <p>正在加载 HTML 预览</p>
+    </div>
+  </main>
+  <main v-else class="app-shell" :class="{ 'ai-mode': tab === 'ai' }">
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark" aria-hidden="true">
@@ -241,6 +260,16 @@
                       <Download :size="16" />
                       下载
                     </a>
+                    <a
+                      v-if="fileContent.previewable && isHTMLContent(fileContent)"
+                      class="command"
+                      :href="htmlPreviewURL(selectedRepo.id, fileContent.version_id)"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <FileText :size="16" />
+                      独立打开
+                    </a>
                     <button class="command" type="button" @click="loadDocHistory(fileContent.document_id)">
                       <History :size="16" />
                       文件历史
@@ -252,11 +281,18 @@
                   </div>
                 </header>
 
-                <div v-if="fileContent.previewable && renderedHtml" class="markdown-body" v-html="renderedHtml"></div>
+                <iframe
+                  v-if="fileContent.previewable && isHTMLContent(fileContent) && htmlPreviewSrcdoc"
+                  class="html-preview-frame"
+                  sandbox=""
+                  :srcdoc="htmlPreviewSrcdoc"
+                  :title="fileContent.title || fileContent.file_path"
+                ></iframe>
+                <div v-else-if="fileContent.previewable && renderedHtml" class="markdown-body" v-html="renderedHtml"></div>
                 <div v-else class="download-only">
                   <FileDown :size="30" />
                   <h4>当前文件不支持预览</h4>
-                  <p>首期只预览 Markdown，其他文件可单文件下载。</p>
+                  <p>支持 Markdown 和 HTML 预览，其他文件可单文件下载。</p>
                 </div>
 
                 <section class="detail-split">
@@ -970,7 +1006,7 @@ import {
 import { marked } from 'marked'
 import mermaid from 'mermaid'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { APIRequestError, api, blobURL, downloadURL } from './api'
+import { APIRequestError, api, blobURL, downloadURL, htmlPreviewURL } from './api'
 import type {
   AICostTier,
   AIContractCoverageItem,
@@ -1015,6 +1051,8 @@ const branches = ref<RepoRef[]>([])
 const files = ref<FileEntry[]>([])
 const selectedFile = ref<FileEntry | null>(null)
 const fileContent = ref<FileContent | null>(null)
+const htmlViewerContent = ref<FileContent | null>(null)
+const htmlViewerError = ref('')
 const docEvents = ref<PathEvent[]>([])
 const commits = ref<CommitSummary[]>([])
 const selectedCommit = ref<CommitDetail | null>(null)
@@ -1084,6 +1122,7 @@ const latestExcludeText = ref('archive/*, tmp/*, dependabot/*')
 const branchPriorityText = ref('main, master, release/*, develop, feature/*')
 const scanPathsText = ref('.')
 const searchResultDir = '搜索结果'
+const isHTMLPreviewRoute = window.location.pathname === '/html-preview'
 let applyingURLState = false
 let repoSelectionRequest = 0
 let fileListRequest = 0
@@ -1278,6 +1317,33 @@ const aiActiveRouteProviders = computed(() => {
 
 const canAskWithCurrentFile = computed(() => Boolean(fileContent.value && fileContent.value.file_size <= 1024 * 1024))
 
+const htmlPreviewSrcdoc = computed(() => (fileContent.value ? buildHTMLPreviewSrcdoc(fileContent.value) : ''))
+
+const htmlViewerSrcdoc = computed(() => (htmlViewerContent.value ? buildHTMLPreviewSrcdoc(htmlViewerContent.value) : ''))
+
+const htmlViewerBackURL = computed(() => {
+  const content = htmlViewerContent.value
+  if (content) {
+    return `/?${new URLSearchParams({
+      repo: String(content.repo_id),
+      version: String(content.version_id),
+      view: 'latest',
+      dir: dirNameFromPath(content.file_path)
+    })}`
+  }
+  const params = new URLSearchParams(window.location.search)
+  const repoID = Number(params.get('repo') || 0)
+  const versionID = Number(params.get('version') || 0)
+  if (repoID > 0 && versionID > 0) {
+    return `/?${new URLSearchParams({
+      repo: String(repoID),
+      version: String(versionID),
+      view: 'latest'
+    })}`
+  }
+  return '/'
+})
+
 const diagnosticsWorkflow = computed(() => diagnosticsDetail.value?.agent_workflow || null)
 
 const diagnosticsCoverage = computed<AIContractCoverageReport | null>(
@@ -1330,7 +1396,7 @@ const graphWidth = computed(() => {
 })
 
 const renderedHtml = computed(() => {
-  if (!fileContent.value?.content) return ''
+  if (!fileContent.value?.content || !isMarkdownContent(fileContent.value)) return ''
   const renderer = new marked.Renderer()
   renderer.image = ({ href, title, text }) => {
     const src = resolveMarkdownResourceURL(href)
@@ -1383,13 +1449,50 @@ onMounted(async () => {
       sequenceNumberColor: '#ffffff'
     }
   })
+  if (isHTMLPreviewRoute) {
+    await loadHTMLViewer()
+    return
+  }
   await loadAll()
   window.addEventListener('popstate', applyURLState)
 })
 
 onBeforeUnmount(() => {
+  if (isHTMLPreviewRoute) return
   window.removeEventListener('popstate', applyURLState)
 })
+
+async function loadHTMLViewer() {
+  htmlViewerError.value = ''
+  const params = new URLSearchParams(window.location.search)
+  const repoID = Number(params.get('repo') || 0)
+  const versionID = Number(params.get('version') || 0)
+  if (repoID <= 0 || versionID <= 0) {
+    htmlViewerError.value = '缺少 repo 或 version 参数'
+    return
+  }
+  try {
+    const content = await api.content(repoID, versionID)
+    if (!content.previewable) {
+      htmlViewerError.value = '当前文件不可预览'
+      htmlViewerContent.value = content
+      return
+    }
+    if (!isHTMLContent(content)) {
+      htmlViewerError.value = '当前文件不是 HTML 文件'
+      htmlViewerContent.value = content
+      return
+    }
+    if (!content.content) {
+      htmlViewerError.value = 'HTML 内容为空'
+      htmlViewerContent.value = content
+      return
+    }
+    htmlViewerContent.value = content
+  } catch (err) {
+    htmlViewerError.value = err instanceof Error ? err.message : String(err)
+  }
+}
 
 async function loadAll() {
   await withBusy(async () => {
@@ -2613,6 +2716,97 @@ function resolveRepoRelativePath(currentFilePath: string, href: string) {
     parts.push(part)
   }
   return parts.join('/')
+}
+
+function buildHTMLPreviewSrcdoc(content: FileContent) {
+  if (!content.content || !isHTMLContent(content)) return ''
+  const parser = new DOMParser()
+  const doc = parser.parseFromString(content.content, 'text/html')
+  rewriteHTMLResourceAttributes(doc, content)
+  return '<!doctype html>\n' + doc.documentElement.outerHTML
+}
+
+function rewriteHTMLResourceAttributes(doc: Document, content: FileContent) {
+  const rewriteAttr = (selector: string, attr: string) => {
+    for (const element of doc.querySelectorAll<HTMLElement>(selector)) {
+      const value = element.getAttribute(attr)
+      if (!value) continue
+      const rewritten = resolveHTMLResourceURL(content, value)
+      if (rewritten !== value) element.setAttribute(attr, rewritten)
+    }
+  }
+
+  rewriteAttr('[src]', 'src')
+  rewriteAttr('link[href]', 'href')
+  rewriteAttr('a[href]', 'href')
+  rewriteAttr('[poster]', 'poster')
+  rewriteAttr('object[data]', 'data')
+  rewriteAttr('use[href]', 'href')
+  rewriteAttr('use[xlink\\:href]', 'xlink:href')
+
+  for (const element of doc.querySelectorAll<HTMLElement>('[srcset]')) {
+    const value = element.getAttribute('srcset')
+    if (!value) continue
+    const rewritten = rewriteHTMLSrcset(content, value)
+    if (rewritten !== value) element.setAttribute('srcset', rewritten)
+  }
+
+  for (const element of doc.querySelectorAll<HTMLElement>('[style]')) {
+    const value = element.getAttribute('style')
+    if (!value) continue
+    const rewritten = rewriteCSSURLs(value, (url) => resolveHTMLResourceURL(content, url))
+    if (rewritten !== value) element.setAttribute('style', rewritten)
+  }
+
+  for (const element of doc.querySelectorAll<HTMLStyleElement>('style')) {
+    const value = element.textContent || ''
+    const rewritten = rewriteCSSURLs(value, (url) => resolveHTMLResourceURL(content, url))
+    if (rewritten !== value) element.textContent = rewritten
+  }
+}
+
+function resolveHTMLResourceURL(content: FileContent, href: string) {
+  const trimmed = href.trim()
+  if (!trimmed || isExternalMarkdownURL(trimmed)) return href
+  const [pathPart, suffix] = splitMarkdownURLSuffix(trimmed)
+  if (!pathPart) return href
+  const resolved = resolveRepoRelativePath(content.file_path, pathPart)
+  return blobURL(content.repo_id, content.source_commit_sha, resolved, true) + suffix
+}
+
+function rewriteHTMLSrcset(content: FileContent, value: string) {
+  return value
+    .split(',')
+    .map((candidate) => {
+      const trimmed = candidate.trim()
+      if (!trimmed) return trimmed
+      const parts = trimmed.split(/\s+/)
+      const url = parts.shift() || ''
+      const rewritten = resolveHTMLResourceURL(content, url)
+      return [rewritten, ...parts].join(' ')
+    })
+    .join(', ')
+}
+
+function rewriteCSSURLs(value: string, rewrite: (url: string) => string) {
+  return value.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (_match, quote: string, rawURL: string) => {
+    const rewritten = rewrite(rawURL.trim())
+    return `url(${quote}${rewritten}${quote})`
+  })
+}
+
+function isMarkdownContent(content: FileContent) {
+  return content.extension === '.md' || content.extension === '.markdown'
+}
+
+function isHTMLContent(content: FileContent) {
+  return content.extension === '.html' || content.extension === '.htm' || /^text\/html\b/i.test(content.mime_type || '')
+}
+
+function dirNameFromPath(filePath: string) {
+  const parts = filePath.split('/').filter(Boolean)
+  parts.pop()
+  return parts.length ? parts.join('/') : '.'
 }
 
 function armMarkdownImageRetries() {
