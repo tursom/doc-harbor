@@ -502,7 +502,13 @@ func (s *Server) writeVersionContent(w http.ResponseWriter, r *http.Request, rep
 		writeError(w, err)
 		return
 	}
+	repo, err := getRepository(r.Context(), s.db, repoID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	versions, _ := listDocumentVersions(r.Context(), s.db, repoID, v.DocumentID)
+	previewable := v.Previewable || (isPreviewable(v.FilePath) && v.FileSize <= repo.MaxFileSizeBytes)
 	content := FileContent{
 		VersionID:       v.ID,
 		DocumentID:      v.DocumentID,
@@ -516,12 +522,12 @@ func (s *Server) writeVersionContent(w http.ResponseWriter, r *http.Request, rep
 		BlobSHA:         v.BlobSHA,
 		SourceCommitSHA: v.HeadCommitSHA,
 		LastCommitTime:  v.LastCommitTime,
-		Previewable:     v.Previewable,
+		Previewable:     previewable,
 		DownloadEnabled: v.DownloadEnabled,
-		TooLarge:        !v.Previewable,
+		TooLarge:        isPreviewable(v.FilePath) && v.FileSize > repo.MaxFileSizeBytes,
 		Versions:        versions,
 	}
-	if v.Previewable {
+	if previewable {
 		data, err := s.git.catFile(r.Context(), s.git.repoPath(repoID), v.BlobSHA)
 		if err != nil {
 			writeError(w, err)

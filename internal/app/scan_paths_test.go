@@ -159,6 +159,28 @@ func TestHTMLPreviewableScanAndSizeLimit(t *testing.T) {
 	if large.MimeType != "text/html; charset=utf-8" {
 		t.Fatalf("large html mime = %q, want text/html; charset=utf-8", large.MimeType)
 	}
+
+	if _, err := server.db.ExecContext(ctx, `UPDATE doc_versions SET previewable = 0 WHERE id = ?`, small.ID); err != nil {
+		t.Fatalf("mark small html as legacy non-previewable: %v", err)
+	}
+	legacyContent := getScanPathTestContent(t, server, repo.ID, small.ID)
+	if !legacyContent.Previewable {
+		t.Fatalf("legacy indexed html content should be previewable")
+	}
+	if legacyContent.Content != "<h1>HTML</h1>\n" {
+		t.Fatalf("legacy indexed html content = %q", legacyContent.Content)
+	}
+
+	largeContent := getScanPathTestContent(t, server, repo.ID, large.ID)
+	if largeContent.Previewable {
+		t.Fatalf("large html content should not be previewable")
+	}
+	if !largeContent.TooLarge {
+		t.Fatalf("large html content should be marked too_large")
+	}
+	if largeContent.Content != "" {
+		t.Fatalf("large html content should not be loaded, got %q", largeContent.Content)
+	}
 }
 
 func getScanPathTestVersion(ctx context.Context, server *Server, repoID int64, filePath string) (DocVersion, error) {
@@ -168,6 +190,21 @@ func getScanPathTestVersion(ctx context.Context, server *Server, repoID int64, f
 		participates_latest, created_at, updated_at
 		FROM doc_versions WHERE repo_id = ? AND branch = 'main' AND file_path = ?`, repoID, filePath)
 	return scanDocVersion(row)
+}
+
+func getScanPathTestContent(t *testing.T, server *Server, repoID, versionID int64) FileContent {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/repos/1/versions/1/content", nil)
+	recorder := httptest.NewRecorder()
+	server.writeVersionContent(recorder, req, repoID, versionID)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("content status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var content FileContent
+	if err := json.Unmarshal(recorder.Body.Bytes(), &content); err != nil {
+		t.Fatalf("decode content: %v", err)
+	}
+	return content
 }
 
 func createScanPathGitRepo(t *testing.T) (string, string) {
