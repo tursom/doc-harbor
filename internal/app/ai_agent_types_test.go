@@ -103,6 +103,12 @@ func TestAIAgentEvidenceContractBuilderTemplates(t *testing.T) {
 			t.Fatalf("database contract required keys missing %s: %+v", key, databaseContract.Required)
 		}
 	}
+	ambiguousDatabaseContract := buildAIEvidenceContract(aiTaskFrame{Intent: aiTaskIntentDatabaseDirectUpdateForTest, AmbiguousValueChange: true})
+	for _, key := range []string{"value_sources", "source_precedence", "primary_write_path", "derived_value_handling"} {
+		if !testStringSliceContains(aiEvidenceRequirementKeys(ambiguousDatabaseContract.Required), key) {
+			t.Fatalf("ambiguous database contract required keys missing %s: %+v", key, ambiguousDatabaseContract.Required)
+		}
+	}
 
 	apiContract := buildAIEvidenceContract(aiTaskFrame{Intent: aiTaskIntentAPIIntegration})
 	if apiContract.ContractID != "api_integration.v1" {
@@ -134,7 +140,7 @@ func TestAIAgentEvidenceContractBuilderTemplates(t *testing.T) {
 	if codePathContract.ContractID != "code_path_explanation.v1" || codePathContract.Intent != aiTaskIntentCodePathExplanation {
 		t.Fatalf("code path contract = %+v", codePathContract)
 	}
-	for _, key := range []string{"entrypoint", "call_chain", "implementation_file", "scope_boundary", "write_path", "persistence_target", "side_effects"} {
+	for _, key := range []string{"entrypoint", "call_chain", "implementation_file", "scope_boundary", "value_sources", "source_precedence", "primary_write_path", "derived_value_handling", "write_path", "persistence_target", "side_effects"} {
 		if !testStringSliceContains(aiEvidenceRequirementKeys(codePathContract.Required), key) {
 			t.Fatalf("code path contract required keys missing %s: %+v", key, codePathContract.Required)
 		}
@@ -152,13 +158,16 @@ func TestAIAgentEvidenceContractBuilderTemplates(t *testing.T) {
 	}
 }
 
-func TestAIQuestionChangeGuidanceUsesDatabaseIntentAndGeneratedSQLTerms(t *testing.T) {
+func TestAIQuestionChangeGuidanceUsesCodePathIntentAndGeneratedSQLTerms(t *testing.T) {
 	question := "如何修改游戏售卖的基础价格"
-	if got := classifyAITaskIntent(question); got != aiTaskIntentDatabaseDirectUpdateForTest {
-		t.Fatalf("task intent = %q, want %q", got, aiTaskIntentDatabaseDirectUpdateForTest)
+	if got := classifyAITaskIntent(question); got != aiTaskIntentCodePathExplanation {
+		t.Fatalf("task intent = %q, want %q", got, aiTaskIntentCodePathExplanation)
 	}
-	if got := aiTaskIntentFromLegacy(classifyAIIntent(question)); got != aiTaskIntentDatabaseDirectUpdateForTest {
-		t.Fatalf("legacy intent mapping = %q, want %q", got, aiTaskIntentDatabaseDirectUpdateForTest)
+	if got := aiTaskIntentFromLegacy(classifyAIIntent(question)); got != aiTaskIntentCodePathExplanation {
+		t.Fatalf("legacy intent mapping = %q, want %q", got, aiTaskIntentCodePathExplanation)
+	}
+	if !aiQuestionAsksAmbiguousDataValueChange(question) {
+		t.Fatalf("question should be treated as ambiguous business value change")
 	}
 
 	plannerTerms := filterAIQueryPlannerTerms(parseAIQueryPlannerTerms(`{"terms":["price","base_price","sell_price","steam_game_price","price_in_cents_with_discount","update","UpdateGameInventoryStatus"]}`), question, nil)
@@ -179,8 +188,14 @@ func TestAIQuestionChangeGuidanceUsesDatabaseIntentAndGeneratedSQLTerms(t *testi
 	}
 
 	dbQuestion := "我想在数据库里直接修改游戏的价格"
-	if got := classifyAITaskIntent(dbQuestion); got != aiTaskIntentDatabaseDirectUpdateForTest {
-		t.Fatalf("database task intent = %q, want %q", got, aiTaskIntentDatabaseDirectUpdateForTest)
+	if got := classifyAITaskIntent(dbQuestion); got != aiTaskIntentCodePathExplanation {
+		t.Fatalf("database task intent = %q, want conservative %q", got, aiTaskIntentCodePathExplanation)
+	}
+	if got := classifyAIIntent(dbQuestion); got == "database_change" {
+		t.Fatalf("legacy classifier must not grant database_change without planner action")
+	}
+	if got := aiTaskIntentForRetrieval(dbQuestion, nil); got != "code_path" {
+		t.Fatalf("legacy retrieval intent = %q, want conservative code_path", got)
 	}
 }
 
@@ -232,6 +247,301 @@ func TestAICodePathVerifierRejectsDirectSQLAnswer(t *testing.T) {
 	negatedReport := verifyAIAnswer(frame, contract, coverage, bundle, negatedAnswer)
 	if testStringSliceContains(negatedReport.FailedChecks, "code_path_direct_sql") {
 		t.Fatalf("negated direct SQL warning should not fail code path verifier: %+v", negatedReport)
+	}
+}
+
+func TestAIAmbiguousValueUpdateVerifierRequiresValueFlowCitation(t *testing.T) {
+	frame := aiTaskFrame{
+		Intent:               aiTaskIntentDatabaseDirectUpdateForTest,
+		AmbiguousValueChange: true,
+		UserGoal:             "修改某个业务值",
+		AnswerShape:          "sql_steps_with_risk",
+	}
+	contract := buildAIEvidenceContract(frame)
+	coverage := aiCoverageReportForTest(contract, nil, nil)
+	bundle := aiVerifierBundleForTest(coverage, aiEvidenceReliabilityHighSmartLatest)
+	context := aiAnswerVerificationContext{
+		EvidenceCount:  2,
+		RetrievalRound: aiRetrievalMaxRounds,
+		EvidenceContractKeys: map[int][]string{
+			1: []string{"table_identity", "update_fields", "field_units", "where_conditions"},
+			2: []string{"value_sources", "source_precedence", "primary_write_path", "derived_value_handling"},
+		},
+		EvidenceContractKeyStatus: map[int]map[string]string{
+			2: {
+				"value_sources":          aiEvidenceCoverageCovered,
+				"source_precedence":      aiEvidenceCoverageCovered,
+				"primary_write_path":     aiEvidenceCoverageCovered,
+				"derived_value_handling": aiEvidenceCoverageCovered,
+			},
+		},
+		EvidenceTypes: map[int]string{1: "orm_model", 2: "write_path"},
+	}
+
+	schemaOnly := "表 yym_goods_masters 和字段 price 来自 schema [C1]。\nUPDATE yym_goods_masters SET price = ? WHERE code = ?; [C1]"
+	schemaOnlyReport := verifyAIAnswerWithContext(frame, contract, coverage, bundle, schemaOnly, context)
+	if !testStringSliceContains(schemaOnlyReport.FailedChecks, "sql_value_flow_source_unsupported") {
+		t.Fatalf("schema-only SQL should fail value-flow support check: %+v", schemaOnlyReport)
+	}
+
+	schemaOnlyWithWrongStatusContext := context
+	schemaOnlyWithWrongStatusContext.EvidenceContractKeyStatus = map[int]map[string]string{
+		1: map[string]string{"source_precedence": aiEvidenceCoverageCovered},
+		2: context.EvidenceContractKeyStatus[2],
+	}
+	schemaOnlyWithWrongStatusReport := verifyAIAnswerWithContext(frame, contract, coverage, bundle, schemaOnly, schemaOnlyWithWrongStatusContext)
+	if !testStringSliceContains(schemaOnlyWithWrongStatusReport.FailedChecks, "sql_value_flow_source_unsupported") {
+		t.Fatalf("schema-only SQL should fail even with wrong covered status: %+v", schemaOnlyWithWrongStatusReport)
+	}
+
+	withValueFlow := "表 yym_goods_masters 和字段 price 来自 schema [C1]，主写入链路和来源优先级来自运行时代码 [C2]。\nUPDATE yym_goods_masters SET price = ? WHERE code = ?; [C1][C2]"
+	withValueFlowReport := verifyAIAnswerWithContext(frame, contract, coverage, bundle, withValueFlow, context)
+	if testStringSliceContains(withValueFlowReport.FailedChecks, "sql_value_flow_source_unsupported") || withValueFlowReport.Status != aiAnswerVerificationStatusPass {
+		t.Fatalf("value-flow cited SQL should pass value-flow support check: %+v", withValueFlowReport)
+	}
+}
+
+func TestAIValueFlowPriceFixtureRejectsSchemaOnlyMasterPriceUpdate(t *testing.T) {
+	frame := aiTaskFrame{
+		Intent:               aiTaskIntentDatabaseDirectUpdateForTest,
+		AmbiguousValueChange: true,
+		UserGoal:             "修改业务价格",
+		AnswerShape:          "sql_steps_with_risk",
+		KnownTerms:           []string{"price", "base_price"},
+	}
+	contract := buildAIEvidenceContract(frame)
+	rawEvidence := []aiEvidence{
+		{
+			Repo: Repository{Name: "model"},
+			Citation: AIMessageCitation{
+				RepoID:      1,
+				SourceScope: "smart_latest",
+				Branch:      "main",
+				CommitSHA:   "abc1",
+				FilePath:    "models/goods_master.go",
+				LineStart:   1,
+				LineEnd:     20,
+			},
+			Content: "func (GoodsMaster) TableName() string { return \"yym_goods_masters\" }\ntype GoodsMaster struct { Code string `gorm:\"column:code;unique\"`; Price decimal.Decimal `gorm:\"column:price;type:decimal(10,2);comment:基础价格，可作为默认价格（SKU 可能存在差异）\"` }",
+			Score:   100,
+		},
+		{
+			Repo: Repository{Name: "runtime"},
+			Citation: AIMessageCitation{
+				RepoID:      1,
+				SourceScope: "smart_latest",
+				Branch:      "main",
+				CommitSHA:   "abc2",
+				FilePath:    "core/db/mysql_methods/buyer_goods_price.go",
+				LineStart:   251,
+				LineEnd:     385,
+			},
+			Content: "加载本地 SKU 价格 localMinPriceCache；定价优先级：第三方折扣价 > 本地 SKU 最低价 > Steam 原价 > 0。thirdPartyMinPrice 遍历 steam_balance 和 steam_gift 折扣，finalMinPrice = minPositivePrice(localMinPrice, thirdPartyMinPrice)。",
+			Score:   90,
+		},
+		{
+			Repo: Repository{Name: "runtime"},
+			Citation: AIMessageCitation{
+				RepoID:      1,
+				SourceScope: "smart_latest",
+				Branch:      "main",
+				CommitSHA:   "abc3",
+				FilePath:    "core/db/mysql_methods/master_goods_price.go",
+				LineStart:   11,
+				LineEnd:     55,
+			},
+			Content: "RefreshGoodsMasterLocalMinPriceByIDs 根据本地可售 SKU 的最低价格刷新主商品价格。Select(\"master_goods_id, COALESCE(MIN(price), 0) AS min_price\").Model(&models.YYMSellerGoodsSKU{}).Updates(map[string]interface{}{\"price\": price, \"update_time\": now})",
+			Score:   80,
+		},
+	}
+	curation := curateAIEvidence(&frame, &contract, rawEvidence)
+	coverage := checkAIEvidenceContract(contract, curation.Bundle)
+	for _, key := range []string{"value_sources", "source_precedence", "primary_write_path", "derived_value_handling"} {
+		if coverage.Coverage[key] == aiEvidenceCoverageCovered {
+			t.Fatalf("deterministic coverage[%s] = covered, want missing/partial before model assessment; coverage=%+v bundle=%+v", key, coverage, curation.Bundle)
+		}
+	}
+
+	assessedRaw, decisions, err := applyAIPlannerContractAssessments(contract, rawEvidence, curation.Evidence, []aiPlannerContractAssessment{
+		{Key: "value_sources", Status: aiEvidenceCoverageCovered, SupportingRefs: []string{"[C2]"}, Reason: "runtime code reads multiple price sources"},
+		{Key: "source_precedence", Status: aiEvidenceCoverageCovered, SupportingRefs: []string{"[C2]"}, Reason: "runtime code establishes source priority"},
+		{Key: "primary_write_path", Status: aiEvidenceCoverageCovered, SupportingRefs: []string{"[C3]"}, Reason: "refresh function writes the summary field"},
+		{Key: "derived_value_handling", Status: aiEvidenceCoverageCovered, SupportingRefs: []string{"[C3]"}, Reason: "refresh function marks master price as derived summary"},
+		{Key: "side_effects", Status: aiEvidenceCoverageCovered, SupportingRefs: []string{"[C3]"}, Reason: "refreshing the summary field is the downstream side effect"},
+	})
+	if err != nil {
+		t.Fatalf("apply assessment: %v", err)
+	}
+	for _, decision := range decisions {
+		if !decision.Accepted {
+			t.Fatalf("assessment rejected: %+v", decision)
+		}
+	}
+	curation = curateAIEvidence(&frame, &contract, assessedRaw)
+	coverage = checkAIEvidenceContract(contract, curation.Bundle)
+	for _, key := range []string{"value_sources", "source_precedence", "primary_write_path", "derived_value_handling"} {
+		if coverage.Coverage[key] != aiEvidenceCoverageCovered {
+			t.Fatalf("assessed coverage[%s] = %q, want covered; coverage=%+v bundle=%+v", key, coverage.Coverage[key], coverage, curation.Bundle)
+		}
+	}
+
+	context := aiAnswerVerificationContext{
+		EvidenceCount:             len(curation.Evidence),
+		RetrievalRound:            aiRetrievalMaxRounds,
+		EvidenceContractKeys:      aiVerificationDisplayedEvidenceContractKeys(curation.Evidence),
+		EvidenceContractKeyStatus: aiVerificationDisplayedEvidenceContractKeyStatus(curation.Evidence),
+		EvidenceTypes:             aiVerificationDisplayedEvidenceTypes(curation.Evidence),
+	}
+	schemaOnly := "核心是更新 yym_goods_masters.price 字段 [C1]。\nUPDATE yym_goods_masters SET price = ? WHERE code = ?; [C1]"
+	schemaOnlyReport := verifyAIAnswerWithContext(frame, contract, coverage, curation.Bundle, schemaOnly, context)
+	if !testStringSliceContains(schemaOnlyReport.FailedChecks, "sql_value_flow_source_unsupported") {
+		t.Fatalf("schema-only master price update should fail: %+v keys=%+v", schemaOnlyReport, context.EvidenceContractKeys)
+	}
+
+	valueFlowAnswer := "运行时价格先聚合本地 SKU 最低价，再比较第三方折扣价和 Steam 原价的优先级 [C2]。主商品 price 是由本地可售 SKU 最低价刷新出来的汇总字段，不应作为唯一修改来源 [C3]。"
+	valueFlowReport := verifyAIAnswerWithContext(frame, contract, coverage, curation.Bundle, valueFlowAnswer, context)
+	if valueFlowReport.Status != aiAnswerVerificationStatusPass {
+		t.Fatalf("value-flow answer should pass: %+v", valueFlowReport)
+	}
+}
+
+func TestAIPlannerActionValidationRejectsUnsafeTools(t *testing.T) {
+	for _, raw := range []string{
+		`{"action":"execute_sql","query":"UPDATE x SET y = 1"}`,
+		`{"action":"shell","query":"cat /etc/passwd"}`,
+		`{"action":"refresh_cache"}`,
+	} {
+		action, err := parseAIPlannerAction(raw)
+		if err != nil {
+			t.Fatalf("parse planner action %s: %v", raw, err)
+		}
+		if err := validateAIPlannerAction(action); err == nil {
+			t.Fatalf("unsafe planner action was accepted: %+v", action)
+		}
+	}
+}
+
+func TestAIPlannerContractAssessmentValidation(t *testing.T) {
+	frame := aiTaskFrame{Intent: aiTaskIntentBusinessValueChange}
+	contract := buildAIEvidenceContract(frame)
+	rawEvidence := []aiEvidence{
+		{
+			Repo: Repository{Name: "model"},
+			Citation: AIMessageCitation{
+				RepoID:      1,
+				SourceScope: "smart_latest",
+				CommitSHA:   "abc1",
+				FilePath:    "models/item.go",
+				LineStart:   1,
+				LineEnd:     20,
+			},
+			Content: "func (Item) TableName() string { return \"items\" }\ntype Item struct { Price int64 `gorm:\"column:price\"` }",
+			Score:   100,
+		},
+		{
+			Repo: Repository{Name: "runtime"},
+			Citation: AIMessageCitation{
+				RepoID:      1,
+				SourceScope: "smart_latest",
+				CommitSHA:   "abc2",
+				FilePath:    "service/item_price.go",
+				LineStart:   10,
+				LineEnd:     40,
+			},
+			Content: "func ResolveItemPrice(ctx context.Context, itemID int64) int64 { local := loadLocalPrice(itemID); remote := loadRemotePrice(itemID); if remote > 0 { return remote }; return local }",
+			Score:   90,
+		},
+	}
+	curation := curateAIEvidence(&frame, &contract, rawEvidence)
+	for _, tc := range []struct {
+		name       string
+		assessment aiPlannerContractAssessment
+		wantReason string
+	}{
+		{
+			name:       "unknown key",
+			assessment: aiPlannerContractAssessment{Key: "not_a_contract_key", Status: aiEvidenceCoverageCovered, SupportingRefs: []string{"[C2]"}},
+			wantReason: "not in current contract",
+		},
+		{
+			name:       "invalid status",
+			assessment: aiPlannerContractAssessment{Key: "source_precedence", Status: aiEvidenceCoverageForbidden, SupportingRefs: []string{"[C2]"}},
+			wantReason: "status must be",
+		},
+		{
+			name:       "unknown ref",
+			assessment: aiPlannerContractAssessment{Key: "source_precedence", Status: aiEvidenceCoverageCovered, SupportingRefs: []string{"[C9]"}},
+			wantReason: "not present",
+		},
+		{
+			name:       "empty refs",
+			assessment: aiPlannerContractAssessment{Key: "source_precedence", Status: aiEvidenceCoverageCovered},
+			wantReason: "supporting_refs are required",
+		},
+		{
+			name:       "schema only runtime key",
+			assessment: aiPlannerContractAssessment{Key: "source_precedence", Status: aiEvidenceCoverageCovered, SupportingRefs: []string{"[C1]"}},
+			wantReason: "runtime value-flow",
+		},
+	} {
+		_, decisions, err := applyAIPlannerContractAssessments(contract, rawEvidence, curation.Evidence, []aiPlannerContractAssessment{tc.assessment})
+		if err != nil {
+			t.Fatalf("%s apply assessment returned error: %v", tc.name, err)
+		}
+		if len(decisions) != 1 || decisions[0].Accepted || !strings.Contains(decisions[0].RejectionReason, tc.wantReason) {
+			t.Fatalf("%s decision = %+v, want rejected containing %q", tc.name, decisions, tc.wantReason)
+		}
+	}
+
+	assessedRaw, decisions, err := applyAIPlannerContractAssessments(contract, rawEvidence, curation.Evidence, []aiPlannerContractAssessment{
+		{Key: "source_precedence", Status: aiEvidenceCoverageCovered, SupportingRefs: []string{"[C2]"}, Reason: "runtime branch decides precedence"},
+	})
+	if err != nil {
+		t.Fatalf("accepted assessment returned error: %v", err)
+	}
+	if len(decisions) != 1 || !decisions[0].Accepted {
+		t.Fatalf("runtime assessment should be accepted: %+v", decisions)
+	}
+	curation = curateAIEvidence(&frame, &contract, assessedRaw)
+	coverage := checkAIEvidenceContract(contract, curation.Bundle)
+	if coverage.Coverage["source_precedence"] != aiEvidenceCoverageCovered {
+		t.Fatalf("assessed source_precedence coverage = %q, want covered; report=%+v", coverage.Coverage["source_precedence"], coverage)
+	}
+}
+
+func TestAIPlannerParsesLegacyTermsAsSearchAction(t *testing.T) {
+	action, err := parseAIPlannerAction(`{"terms":[]}`)
+	if err != nil {
+		t.Fatalf("parse legacy terms action: %v", err)
+	}
+	if action.Action != aiPlannerToolSearchCodeEvidence {
+		t.Fatalf("legacy terms response action = %q, want %q", action.Action, aiPlannerToolSearchCodeEvidence)
+	}
+}
+
+func TestAIPlannerDowngradesDatabaseIntentWithoutExplicitDBRequest(t *testing.T) {
+	prepared := aiQuestionPreparation{SearchQuestion: "如何修改游戏礼物发货的基础价格", Scope: AIQuestionScope{RepoMode: "global"}}
+	frame := aiPlannerDefaultFrame(prepared.SearchQuestion, prepared, "model_planner_pending", "test")
+	downgraded := aiPlannerFrameFromAction(prepared.SearchQuestion, prepared, frame, aiPlannerAction{
+		Action:       aiPlannerActionFinish,
+		Intent:       aiTaskIntentDatabaseDirectUpdateForTest,
+		IntentReason: "model selected database update",
+	})
+	if downgraded.Intent != aiTaskIntentBusinessValueChange || downgraded.IntentSource != "safety_blocked" || downgraded.ExplicitDBRequest {
+		t.Fatalf("database intent was not downgraded for ambiguous value question: %+v", downgraded)
+	}
+
+	explicitQuestion := "我想在数据库里直接修改游戏礼物发货的基础价格"
+	explicitFrame := aiPlannerDefaultFrame(explicitQuestion, aiQuestionPreparation{SearchQuestion: explicitQuestion, Scope: AIQuestionScope{RepoMode: "global"}}, "model_planner_pending", "test")
+	explicitDB := true
+	allowed := aiPlannerFrameFromAction(explicitQuestion, prepared, explicitFrame, aiPlannerAction{
+		Action:            aiPlannerActionFinish,
+		Intent:            aiTaskIntentDatabaseDirectUpdateForTest,
+		ExplicitDBRequest: &explicitDB,
+		ExplicitDBReason:  "user asked to directly modify the database",
+	})
+	if allowed.Intent != aiTaskIntentDatabaseDirectUpdateForTest || !allowed.ExplicitDBRequest || allowed.ExplicitDBSource != "model_planner" {
+		t.Fatalf("explicit database request should keep database intent: %+v", allowed)
 	}
 }
 
@@ -845,7 +1155,7 @@ func TestAIAgentRetrievalResultLegacyJSONCompatibility(t *testing.T) {
 	}
 }
 
-func TestAIAgentEvidenceCuratorAnnotatesTypesAndExcludesNonTestFixtures(t *testing.T) {
+func TestAIAgentEvidenceCuratorAnnotatesTypesWithoutPathFixtureHeuristic(t *testing.T) {
 	frame := aiTaskFrame{
 		Intent:     aiTaskIntentDatabaseDirectUpdateForTest,
 		UserGoal:   "给出测试用途的数据库直接修改方案",
@@ -906,16 +1216,20 @@ func TestAIAgentEvidenceCuratorAnnotatesTypesAndExcludesNonTestFixtures(t *testi
 	}
 
 	curation := curateAIEvidence(&frame, &contract, raw)
-	if len(curation.ExcludedEvidence) != 1 || curation.ExcludedEvidence[0].EvidenceType != "test_fixture" {
-		t.Fatalf("non-test task should exclude the test fixture with annotation: %+v", curation.ExcludedEvidence)
+	if len(curation.ExcludedEvidence) != 0 {
+		t.Fatalf("path-only fixture heuristic should not exclude evidence: %+v", curation.ExcludedEvidence)
 	}
-	if curation.ExcludedEvidence[0].ExcludedReason != aiEvidenceExcludedReasonTestFixtureNonTestTask {
-		t.Fatalf("excluded reason = %q", curation.ExcludedEvidence[0].ExcludedReason)
-	}
+	var foundPathNamedTest bool
 	for _, evidence := range curation.Evidence {
-		if evidence.Repo.Name == "doc-harbor" && strings.HasSuffix(evidence.Citation.FilePath, "_test.go") {
-			t.Fatalf("test fixture remained as core evidence: %+v", evidence)
+		if evidence.Repo.Name == "doc-harbor" && evidence.Citation.FilePath == "internal/app/ai_settings_test.go" {
+			foundPathNamedTest = true
+			if evidence.EvidenceType == "test_fixture" || evidence.ExcludedReason != "" {
+				t.Fatalf("path-named test file should not be auto-marked as fixture: %+v", evidence)
+			}
 		}
+	}
+	if !foundPathNamedTest {
+		t.Fatalf("path-named test file should remain available as ordinary evidence: %+v", curation.Evidence)
 	}
 
 	assertCuratedType := func(filePath, wantType string) {
@@ -941,21 +1255,23 @@ func TestAIAgentEvidenceCuratorAnnotatesTypesAndExcludesNonTestFixtures(t *testi
 	}
 
 	step := buildAIEvidenceCuratorStep(&frame, &contract, curation, len(raw))
-	for _, want := range []string{aiEvidenceExcludedReasonTestFixtureNonTestTask, `"evidence_type":"test_fixture"`, `"file_path":"internal/app/ai_settings_test.go"`} {
+	for _, want := range []string{`"excluded_count":0`, `"file_path":"internal/app/ai_settings_test.go"`} {
 		if !strings.Contains(step.OutputJSON, want) {
 			t.Fatalf("curator step output missing %s: %s", want, step.OutputJSON)
 		}
 	}
+	for _, forbidden := range []string{aiEvidenceExcludedReasonTestFixtureNonTestTask, `"evidence_type":"test_fixture"`} {
+		if strings.Contains(step.OutputJSON, forbidden) {
+			t.Fatalf("curator step output should not infer fixture from path (%s): %s", forbidden, step.OutputJSON)
+		}
+	}
 }
 
-func TestAIAgentEvidenceCuratorDoesNotTreatLatestContestAsTestFocus(t *testing.T) {
+func TestAIAgentEvidenceCuratorDoesNotInferTestFixtureFromPath(t *testing.T) {
 	frame := aiTaskFrame{
 		Intent:     aiTaskIntentDocumentQA,
 		UserGoal:   "Explain the latest contest rule update",
 		KnownTerms: []string{"latest", "contest", "rule"},
-	}
-	if aiTaskFrameLooksTestFocused(frame) {
-		t.Fatalf("latest/contest should not make a non-test task test-focused: %+v", frame)
 	}
 	contract := buildAIEvidenceContract(frame)
 	raw := []aiEvidence{
@@ -988,17 +1304,24 @@ func TestAIAgentEvidenceCuratorDoesNotTreatLatestContestAsTestFocus(t *testing.T
 	}
 
 	curation := curateAIEvidence(&frame, &contract, raw)
-	if len(curation.ExcludedEvidence) != 1 || curation.ExcludedEvidence[0].Citation.FilePath != "internal/app/contest_rules_test.go" {
-		t.Fatalf("latest/contest non-test task should exclude test fixture: %+v", curation.ExcludedEvidence)
+	if len(curation.ExcludedEvidence) != 0 {
+		t.Fatalf("path-named test file should not be auto-excluded: %+v", curation.ExcludedEvidence)
 	}
+	var foundPathNamedTest bool
 	for _, evidence := range curation.Evidence {
-		if strings.HasSuffix(evidence.Citation.FilePath, "_test.go") {
-			t.Fatalf("test fixture remained as core evidence: %+v", evidence)
+		if evidence.Citation.FilePath == "internal/app/contest_rules_test.go" {
+			foundPathNamedTest = true
+			if evidence.EvidenceType == "test_fixture" || evidence.ExcludedReason != "" {
+				t.Fatalf("path-named test file should not be auto-marked as fixture: %+v", evidence)
+			}
 		}
+	}
+	if !foundPathNamedTest {
+		t.Fatalf("path-named test file should remain in ordinary evidence: %+v", curation.Evidence)
 	}
 }
 
-func TestAIAgentEvidenceCuratorAllowsTestFocusedFixtures(t *testing.T) {
+func TestAIAgentEvidenceCuratorDoesNotPromoteTestFocusedPathFixtures(t *testing.T) {
 	frame := aiTaskFrame{
 		Intent:     aiTaskIntentDocumentQA,
 		UserGoal:   "说明测试用例覆盖了哪些输入",
@@ -1020,11 +1343,11 @@ func TestAIAgentEvidenceCuratorAllowsTestFocusedFixtures(t *testing.T) {
 
 	curation := curateAIEvidence(&frame, &contract, raw)
 	if len(curation.Evidence) != 1 || len(curation.ExcludedEvidence) != 0 {
-		t.Fatalf("test-focused task should keep test fixture: included=%+v excluded=%+v", curation.Evidence, curation.ExcludedEvidence)
+		t.Fatalf("path-named test file should remain ordinary evidence: included=%+v excluded=%+v", curation.Evidence, curation.ExcludedEvidence)
 	}
 	evidence := curation.Evidence[0]
-	if evidence.EvidenceType != "test_fixture" || evidence.SourceReliability != aiEvidenceReliabilityTestFixtureForTestTask {
-		t.Fatalf("test fixture annotation = %+v", evidence)
+	if evidence.EvidenceType == "test_fixture" || evidence.SourceReliability == aiEvidenceReliabilityTestFixtureForTestTask {
+		t.Fatalf("test-focused wording should not promote path-named evidence to fixture metadata: %+v", evidence)
 	}
 }
 

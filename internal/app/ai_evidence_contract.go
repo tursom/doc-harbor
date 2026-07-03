@@ -4,18 +4,22 @@ func buildAIEvidenceContract(frame aiTaskFrame) aiEvidenceContract {
 	intent := normalizeAITaskIntent(frame.Intent)
 	switch intent {
 	case aiTaskIntentDatabaseDirectUpdateForTest:
+		required := []aiEvidenceRequirement{
+			{Key: "table_identity", Description: "表名、ORM TableName 或明确 schema 身份", AcceptedEvidenceTypes: []string{"orm_model", "migration_sql", "schema_doc"}},
+			{Key: "update_fields", Description: "允许修改的字段名和字段来源", AcceptedEvidenceTypes: []string{"orm_model", "migration_sql", "read_path"}},
+			{Key: "field_units", Description: "字段单位、换算逻辑或字段注释", AcceptedEvidenceTypes: []string{"orm_model", "migration_sql", "read_path", "field_comment", "conversion_code"}},
+			{Key: "where_conditions", Description: "定位测试数据所需的 WHERE 条件或唯一约束", AcceptedEvidenceTypes: []string{"read_path", "query_builder", "unique_index", "schema_doc"}},
+			{Key: "read_path", Description: "当前业务读取链路和查询入口", AcceptedEvidenceTypes: []string{"handler", "service", "dao", "repository", "query_call"}},
+			{Key: "verification_method", Description: "修改后的 SELECT 校验方式或业务读取验证入口", AcceptedEvidenceTypes: []string{"read_path", "select_query", "test_case", "operational_doc"}},
+			{Key: "side_effects", Description: "缓存、索引、异步任务、事件或补偿链路风险", AcceptedEvidenceTypes: []string{"cache_path", "index_path", "async_job", "event_handler", "compensation_path", "operational_doc"}},
+		}
+		if frame.AmbiguousValueChange {
+			required = append(required, aiValueFlowEvidenceRequirements()...)
+		}
 		return aiEvidenceContract{
 			ContractID: "database_direct_update_for_test.v1",
 			Intent:     intent,
-			Required: []aiEvidenceRequirement{
-				{Key: "table_identity", Description: "表名、ORM TableName 或明确 schema 身份", AcceptedEvidenceTypes: []string{"orm_model", "migration_sql", "schema_doc"}},
-				{Key: "update_fields", Description: "允许修改的字段名和字段来源", AcceptedEvidenceTypes: []string{"orm_model", "migration_sql", "read_path"}},
-				{Key: "field_units", Description: "字段单位、换算逻辑或字段注释", AcceptedEvidenceTypes: []string{"orm_model", "migration_sql", "read_path", "field_comment", "conversion_code"}},
-				{Key: "where_conditions", Description: "定位测试数据所需的 WHERE 条件或唯一约束", AcceptedEvidenceTypes: []string{"read_path", "query_builder", "unique_index", "schema_doc"}},
-				{Key: "read_path", Description: "当前业务读取链路和查询入口", AcceptedEvidenceTypes: []string{"handler", "service", "dao", "repository", "query_call"}},
-				{Key: "verification_method", Description: "修改后的 SELECT 校验方式或业务读取验证入口", AcceptedEvidenceTypes: []string{"read_path", "select_query", "test_case", "operational_doc"}},
-				{Key: "side_effects", Description: "缓存、索引、异步任务、事件或补偿链路风险", AcceptedEvidenceTypes: []string{"cache_path", "index_path", "async_job", "event_handler", "compensation_path", "operational_doc"}},
-			},
+			Required:   required,
 			Recommended: []aiEvidenceRequirement{
 				{Key: "rollback_plan", Description: "回滚或恢复测试数据的路径", AcceptedEvidenceTypes: []string{"operational_doc", "migration_sql", "read_path"}},
 				{Key: "scope_limit", Description: "仅用于测试或指定环境的范围边界", AcceptedEvidenceTypes: []string{"operational_doc", "config", "test_case"}},
@@ -72,6 +76,9 @@ func buildAIEvidenceContract(frame aiTaskFrame) aiEvidenceContract {
 		}
 		if aiTaskFrameLooksChangeGuidance(frame) {
 			required = append(required,
+				aiValueFlowEvidenceRequirements()...,
+			)
+			required = append(required,
 				aiEvidenceRequirement{Key: "write_path", Description: "修改动作真正写入的位置、方法或持久化调用", AcceptedEvidenceTypes: []string{"write_path", "handler", "service_logic", "dao", "repository"}},
 				aiEvidenceRequirement{Key: "persistence_target", Description: "被写入或刷新到的持久化对象、表、模型、索引或缓存", AcceptedEvidenceTypes: []string{"orm_model", "migration_sql", "write_path", "schema_doc", "index_path", "cache_path"}},
 				aiEvidenceRequirement{Key: "side_effects", Description: "修改后的同步、索引、缓存、事件或补偿链路", AcceptedEvidenceTypes: []string{"cache_path", "index_path", "async_job", "event_handler", "compensation_path", "service_logic"}},
@@ -88,6 +95,26 @@ func buildAIEvidenceContract(frame aiTaskFrame) aiEvidenceContract {
 			Required:    required,
 			Recommended: recommended,
 			Forbidden:   []string{"unsupported_fact", "unreferenced_claim", "execute_sql", "direct_database_update_without_user_request", "secret_exposure"},
+		}
+	case aiTaskIntentBusinessValueChange:
+		return aiEvidenceContract{
+			ContractID: "business_value_change.v1",
+			Intent:     intent,
+			Required: []aiEvidenceRequirement{
+				{Key: "scope_boundary", Description: "仓库、分支或当前文件范围", AcceptedEvidenceTypes: []string{"source_scope", "branch", "repository_context"}},
+				{Key: "value_sources", Description: "运行时业务值的候选来源、输入或上游计算值", AcceptedEvidenceTypes: []string{"read_path", "write_path", "service_logic", "dao", "repository", "code"}},
+				{Key: "source_precedence", Description: "多个值来源之间的优先级、取最小/最大、fallback 或覆盖关系", AcceptedEvidenceTypes: []string{"read_path", "write_path", "service_logic", "code"}},
+				{Key: "primary_write_path", Description: "真正改变该业务值的主要写入入口、同步入口或刷新入口", AcceptedEvidenceTypes: []string{"write_path", "handler", "service_logic", "dao", "repository"}},
+				{Key: "persistence_target", Description: "被写入或刷新到的持久化对象、表、模型、索引或缓存", AcceptedEvidenceTypes: []string{"orm_model", "migration_sql", "write_path", "schema_doc", "index_path", "cache_path"}},
+				{Key: "derived_value_handling", Description: "区分主存储来源、派生字段、汇总字段、缓存字段或展示兜底字段", AcceptedEvidenceTypes: []string{"read_path", "write_path", "service_logic", "cache_path", "index_path", "code"}},
+				{Key: "side_effects", Description: "修改后的同步、索引、缓存、事件或补偿链路", AcceptedEvidenceTypes: []string{"cache_path", "index_path", "async_job", "event_handler", "compensation_path", "service_logic"}},
+			},
+			Recommended: []aiEvidenceRequirement{
+				{Key: "entrypoint", Description: "用户可进入该修改链路的 handler、RPC、服务方法或任务入口", AcceptedEvidenceTypes: []string{"handler", "route", "proto", "service", "code"}},
+				{Key: "read_path", Description: "现有读取或展示路径，用于区分兜底值、展示值和实际业务值", AcceptedEvidenceTypes: []string{"read_path", "handler", "service_logic", "dao", "repository"}},
+				{Key: "write_path", Description: "修改动作真正写入的位置、方法或持久化调用", AcceptedEvidenceTypes: []string{"write_path", "handler", "service_logic", "dao", "repository"}},
+			},
+			Forbidden: []string{"unsupported_fact", "unreferenced_claim", "execute_sql", "direct_database_update_without_user_request", "schema_only_update", "secret_exposure"},
 		}
 	case aiTaskIntentBranchLookup:
 		return aiEvidenceContract{
@@ -141,6 +168,47 @@ func buildAIEvidenceContract(frame aiTaskFrame) aiEvidenceContract {
 			Forbidden: []string{"unsupported_fact", "unreferenced_claim", "secret_exposure"},
 		}
 	}
+}
+
+func aiValueFlowEvidenceRequirements() []aiEvidenceRequirement {
+	return []aiEvidenceRequirement{
+		{Key: "value_sources", Description: "运行时业务值的候选来源、输入或上游计算值", AcceptedEvidenceTypes: []string{"read_path", "write_path", "service_logic", "dao", "repository", "code"}},
+		{Key: "source_precedence", Description: "多个值来源之间的优先级、取最小/最大、fallback 或覆盖关系", AcceptedEvidenceTypes: []string{"read_path", "write_path", "service_logic", "code"}},
+		{Key: "primary_write_path", Description: "真正改变该业务值的主要写入入口、同步入口或刷新入口", AcceptedEvidenceTypes: []string{"write_path", "handler", "service_logic", "dao", "repository"}},
+		{Key: "derived_value_handling", Description: "区分主存储来源、派生字段、汇总字段、缓存字段或展示兜底字段", AcceptedEvidenceTypes: []string{"read_path", "write_path", "service_logic", "cache_path", "index_path", "code"}},
+	}
+}
+
+func aiContractKeyRequiresModelAssessment(key string) bool {
+	switch key {
+	case "value_sources", "source_precedence", "primary_write_path", "derived_value_handling", "write_path", "persistence_target", "side_effects":
+		return true
+	default:
+		return false
+	}
+}
+
+func aiContractKeyRequiresRuntimeAssessmentEvidence(key string) bool {
+	switch key {
+	case "value_sources", "source_precedence", "primary_write_path", "derived_value_handling", "write_path", "side_effects":
+		return true
+	default:
+		return false
+	}
+}
+
+func aiEvidenceContractHasKey(contract aiEvidenceContract, key string) bool {
+	for _, requirement := range contract.Required {
+		if requirement.Key == key {
+			return true
+		}
+	}
+	for _, requirement := range contract.Recommended {
+		if requirement.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 func buildAIEvidenceContractStep(frame aiTaskFrame, contract aiEvidenceContract) AIAgentStep {

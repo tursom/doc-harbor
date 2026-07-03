@@ -1,15 +1,21 @@
 package app
 
 type aiTaskFrame struct {
-	Intent          string               `json:"intent"`
-	UserGoal        string               `json:"user_goal"`
-	AnswerShape     string               `json:"answer_shape"`
-	ScopeStrategy   string               `json:"scope_strategy"`
-	TargetArtifacts []string             `json:"target_artifacts"`
-	MustNot         []string             `json:"must_not"`
-	KnownTerms      []string             `json:"known_terms"`
-	GeneratedTerms  []string             `json:"generated_terms"`
-	FollowUp        *aiTaskFrameFollowUp `json:"follow_up,omitempty"`
+	Intent               string               `json:"intent"`
+	IntentSource         string               `json:"intent_source,omitempty"`
+	IntentReason         string               `json:"intent_reason,omitempty"`
+	AmbiguousValueChange bool                 `json:"ambiguous_value_change,omitempty"`
+	ExplicitDBRequest    bool                 `json:"explicit_database_request,omitempty"`
+	ExplicitDBSource     string               `json:"explicit_database_request_source,omitempty"`
+	ExplicitDBReason     string               `json:"explicit_database_request_reason,omitempty"`
+	UserGoal             string               `json:"user_goal"`
+	AnswerShape          string               `json:"answer_shape"`
+	ScopeStrategy        string               `json:"scope_strategy"`
+	TargetArtifacts      []string             `json:"target_artifacts"`
+	MustNot              []string             `json:"must_not"`
+	KnownTerms           []string             `json:"known_terms"`
+	GeneratedTerms       []string             `json:"generated_terms"`
+	FollowUp             *aiTaskFrameFollowUp `json:"follow_up,omitempty"`
 }
 
 type aiTaskFrameFollowUp struct {

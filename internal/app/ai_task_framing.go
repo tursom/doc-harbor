@@ -12,13 +12,19 @@ const (
 	aiTaskIntentAPIIntegration              = "api_integration"
 	aiTaskIntentDatabaseDirectUpdateForTest = "database_direct_update_for_test"
 	aiTaskIntentCodePathExplanation         = "code_path_explanation"
-	aiTaskIntentCrossServiceImpact          = "cross_service_impact"
-	aiTaskIntentBranchLookup                = "branch_lookup"
-	aiTaskIntentDocumentQA                  = "document_qa"
-	aiTaskIntentDiagnostics                 = "diagnostics"
+	// business_value_change is selected by the model-driven planner for generic
+	// "how do I change this runtime value" questions. It is intentionally not a
+	// database-direct intent.
+	aiTaskIntentBusinessValueChange = "business_value_change"
+	aiTaskIntentCrossServiceImpact  = "cross_service_impact"
+	aiTaskIntentBranchLookup        = "branch_lookup"
+	aiTaskIntentDocumentQA          = "document_qa"
+	aiTaskIntentDiagnostics         = "diagnostics"
 )
 
 type aiTaskFrameSupplement struct {
+	Intent          string   `json:"intent"`
+	IntentReason    string   `json:"intent_reason"`
 	UserGoal        string   `json:"user_goal"`
 	AnswerShape     string   `json:"answer_shape"`
 	TargetArtifacts []string `json:"target_artifacts"`
@@ -70,12 +76,22 @@ func (s *Server) frameAITask(ctx context.Context, cfg AIConfigData, question str
 
 func deterministicAITaskFrame(question string, prepared aiQuestionPreparation) aiTaskFrame {
 	intent := classifyAITaskIntent(question)
+	ambiguousValueChange := aiQuestionAsksAmbiguousDataValueChange(question)
+	intentSource := "deterministic"
+	intentReason := "matched deterministic task intent rules"
+	if ambiguousValueChange && intent == aiTaskIntentCodePathExplanation {
+		intentSource = "deterministic_default"
+		intentReason = "ambiguous business value change defaults to code path until task framer or evidence proves direct database update"
+	}
 	frame := aiTaskFrame{
-		Intent:          intent,
-		UserGoal:        aiTaskFrameDefaultUserGoal(intent),
-		AnswerShape:     aiTaskFrameDefaultAnswerShape(intent),
-		ScopeStrategy:   aiTaskFrameScopeStrategy(prepared),
-		TargetArtifacts: aiTaskFrameDefaultArtifacts(intent),
+		Intent:               intent,
+		IntentSource:         intentSource,
+		IntentReason:         intentReason,
+		AmbiguousValueChange: ambiguousValueChange,
+		UserGoal:             aiTaskFrameDefaultUserGoal(intent),
+		AnswerShape:          aiTaskFrameDefaultAnswerShape(intent),
+		ScopeStrategy:        aiTaskFrameScopeStrategy(prepared),
+		TargetArtifacts:      aiTaskFrameDefaultArtifacts(intent),
 		MustNot: []string{
 			"execute_sql",
 			"execute_shell_or_git",
@@ -100,7 +116,7 @@ func classifyAITaskIntent(question string) string {
 	q := strings.ToLower(strings.TrimSpace(question))
 	switch {
 	case aiQuestionAsksDatabaseChange(q):
-		return aiTaskIntentDatabaseDirectUpdateForTest
+		return aiTaskIntentCodePathExplanation
 	case aiQuestionAsksBranchLookup(q):
 		return aiTaskIntentBranchLookup
 	case aiQuestionAsksDiagnostics(q):
@@ -119,7 +135,7 @@ func classifyAITaskIntent(question string) string {
 func aiTaskIntentFromLegacy(intent string) string {
 	switch intent {
 	case "database_change":
-		return aiTaskIntentDatabaseDirectUpdateForTest
+		return aiTaskIntentCodePathExplanation
 	case "api_integration":
 		return aiTaskIntentAPIIntegration
 	case "cross_service":
@@ -147,6 +163,7 @@ func normalizeAITaskIntent(intent string) string {
 	case aiTaskIntentAPIIntegration,
 		aiTaskIntentDatabaseDirectUpdateForTest,
 		aiTaskIntentCodePathExplanation,
+		aiTaskIntentBusinessValueChange,
 		aiTaskIntentCrossServiceImpact,
 		aiTaskIntentBranchLookup,
 		aiTaskIntentDiagnostics,
@@ -170,11 +187,7 @@ func aiIntentIsCrossService(intent string) bool {
 }
 
 func aiIntentIsCodePathExplanation(intent string) bool {
-	return intent == aiTaskIntentCodePathExplanation || intent == "code_path"
-}
-
-func aiIntentIsTestLookup(intent string) bool {
-	return intent == "test_lookup"
+	return intent == aiTaskIntentCodePathExplanation || intent == aiTaskIntentBusinessValueChange || intent == "code_path"
 }
 
 func aiQuestionAsksBranchLookup(q string) bool {
@@ -220,6 +233,8 @@ func aiTaskFrameDefaultUserGoal(intent string) string {
 		return "给出测试用途的数据库直接修改方案和风险边界"
 	case aiTaskIntentCodePathExplanation:
 		return "解释代码入口、调用链和关键实现位置"
+	case aiTaskIntentBusinessValueChange:
+		return "解释运行时业务值来源、优先级、写入点和派生关系"
 	case aiTaskIntentCrossServiceImpact:
 		return "分析跨服务影响范围和证据链"
 	case aiTaskIntentBranchLookup:
@@ -239,6 +254,8 @@ func aiTaskFrameDefaultAnswerShape(intent string) string {
 		return "sql_steps_with_risk"
 	case aiTaskIntentCodePathExplanation:
 		return "call_chain"
+	case aiTaskIntentBusinessValueChange:
+		return "value_flow"
 	case aiTaskIntentCrossServiceImpact:
 		return "service_grouped_chain"
 	case aiTaskIntentBranchLookup:
@@ -258,6 +275,8 @@ func aiTaskFrameDefaultArtifacts(intent string) []string {
 		return []string{"table", "orm_model", "update_fields", "read_path", "field_units", "side_effects"}
 	case aiTaskIntentCodePathExplanation:
 		return []string{"entrypoint", "call_chain", "implementation_file", "branch"}
+	case aiTaskIntentBusinessValueChange:
+		return []string{"value_sources", "source_precedence", "primary_write_path", "persistence_target", "derived_value_handling", "side_effects"}
 	case aiTaskIntentCrossServiceImpact:
 		return []string{"service_candidates", "upstream_downstream_calls", "shared_models", "risk_points"}
 	case aiTaskIntentBranchLookup:
@@ -267,6 +286,11 @@ func aiTaskFrameDefaultArtifacts(intent string) []string {
 	default:
 		return []string{"cited_documents", "current_fact", "constraints"}
 	}
+}
+
+func aiQuestionAsksAmbiguousDataValueChange(question string) bool {
+	q := strings.ToLower(strings.TrimSpace(question))
+	return aiQuestionAsksDataValueChange(q) && !aiQuestionAsksDatabaseChange(q)
 }
 
 func aiTaskFrameScopeStrategy(prepared aiQuestionPreparation) string {
@@ -310,16 +334,25 @@ func aiTaskFramePreviousTopicSummary(conversation aiConversationContext) string 
 }
 
 func (s *Server) generateAITaskFrameSupplement(ctx context.Context, cfg AIConfigData, question string, prepared aiQuestionPreparation, frame aiTaskFrame) (aiModelResult, aiTaskFrameSupplement, error) {
+	allowedFields := []string{"intent", "intent_reason", "user_goal", "answer_shape", "target_artifacts", "generated_terms"}
+	allowedIntents := []string{frame.Intent}
+	if frame.AmbiguousValueChange {
+		allowedIntents = []string{aiTaskIntentBusinessValueChange, aiTaskIntentCodePathExplanation, aiTaskIntentDocumentQA}
+	}
 	prompt := map[string]any{
-		"intent":             frame.Intent,
-		"question":           truncate(question, 800),
-		"effective_question": truncate(prepared.SearchQuestion, 1200),
-		"conversation":       prepared.Conversation,
-		"allowed_fields":     []string{"user_goal", "answer_shape", "target_artifacts", "generated_terms"},
+		"intent":                 frame.Intent,
+		"intent_source":          frame.IntentSource,
+		"intent_reason":          frame.IntentReason,
+		"ambiguous_value_change": frame.AmbiguousValueChange,
+		"allowed_intents":        allowedIntents,
+		"question":               truncate(question, 800),
+		"effective_question":     truncate(prepared.SearchQuestion, 1200),
+		"conversation":           prepared.Conversation,
+		"allowed_fields":         allowedFields,
 	}
 	rawPrompt, _ := json.Marshal(prompt)
 	messages := []aiChatMessage{
-		{Role: "system", Content: "你是检索前的任务结构化助手。只返回 JSON 对象，不要回答用户问题，不要改写 intent。只能补充 user_goal、answer_shape、target_artifacts、generated_terms。不要加入输入中没有依据的具体服务、仓库、模块或接口名。不要输出密钥、token、Authorization 或 API key。"},
+		{Role: "system", Content: "你是检索前的任务结构化助手。只返回 JSON 对象，不要回答用户问题。intent 只能从 allowed_intents 里选择；如果 allowed_intents 只有一个值，必须保持该 intent。只能补充 intent、intent_reason、user_goal、answer_shape、target_artifacts、generated_terms。数据库直改意图必须由 planner tool loop 的 finish_planning action 产生，本助手不得授予 SQL 许可。不要加入输入中没有依据的具体服务、仓库、模块或接口名。不要输出密钥、token、Authorization 或 API key。"},
 		{Role: "user", Content: string(rawPrompt)},
 	}
 	result, err := s.callRoutedAIChat(ctx, cfg, messages, 0, 384)
@@ -348,6 +381,21 @@ func parseAITaskFrameSupplement(content string) (aiTaskFrameSupplement, error) {
 }
 
 func mergeAITaskFrameSupplement(frame *aiTaskFrame, supplement aiTaskFrameSupplement) {
+	if value := aiTaskFrameSafeIdentifier(supplement.Intent, 80); value != "" {
+		normalizedIntent, allowed := aiTaskFrameSupplementIntent(*frame, value)
+		if allowed && normalizedIntent != "" && normalizedIntent != frame.Intent {
+			frame.Intent = normalizedIntent
+			frame.UserGoal = aiTaskFrameDefaultUserGoal(normalizedIntent)
+			frame.AnswerShape = aiTaskFrameDefaultAnswerShape(normalizedIntent)
+			frame.TargetArtifacts = aiTaskFrameDefaultArtifacts(normalizedIntent)
+			frame.IntentSource = "model"
+		} else if allowed && frame.IntentSource == "" {
+			frame.IntentSource = "model"
+		}
+	}
+	if value := aiTaskFrameSafeText(supplement.IntentReason, 300); value != "" {
+		frame.IntentReason = value
+	}
 	if value := aiTaskFrameSafeText(supplement.UserGoal, 300); value != "" {
 		frame.UserGoal = value
 	}
@@ -358,6 +406,30 @@ func mergeAITaskFrameSupplement(frame *aiTaskFrame, supplement aiTaskFrameSupple
 		frame.TargetArtifacts = values
 	}
 	frame.GeneratedTerms = aiTaskFrameCleanList(append(frame.GeneratedTerms, supplement.GeneratedTerms...), 16)
+}
+
+func aiTaskFrameSupplementIntent(frame aiTaskFrame, intent string) (string, bool) {
+	switch intent {
+	case aiTaskIntentAPIIntegration,
+		aiTaskIntentDatabaseDirectUpdateForTest,
+		aiTaskIntentCodePathExplanation,
+		aiTaskIntentBusinessValueChange,
+		aiTaskIntentCrossServiceImpact,
+		aiTaskIntentBranchLookup,
+		aiTaskIntentDiagnostics,
+		aiTaskIntentDocumentQA:
+	default:
+		return "", false
+	}
+	if frame.AmbiguousValueChange {
+		switch intent {
+		case aiTaskIntentBusinessValueChange, aiTaskIntentCodePathExplanation, aiTaskIntentDocumentQA:
+			return intent, true
+		default:
+			return "", false
+		}
+	}
+	return intent, intent == normalizeAITaskIntent(frame.Intent)
 }
 
 func aiTaskFrameCleanList(values []string, limit int) []string {

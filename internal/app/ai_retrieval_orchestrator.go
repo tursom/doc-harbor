@@ -675,6 +675,8 @@ func aiLegacyIntentForTaskFrame(frame aiTaskFrame) string {
 	switch normalizeAITaskIntent(frame.Intent) {
 	case aiTaskIntentDatabaseDirectUpdateForTest:
 		return "database_change"
+	case aiTaskIntentBusinessValueChange:
+		return "code_path"
 	case aiTaskIntentCrossServiceImpact:
 		return "cross_service"
 	default:

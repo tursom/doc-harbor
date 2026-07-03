@@ -81,6 +81,11 @@ func checkAIEvidenceRequirement(contract aiEvidenceContract, requirement aiEvide
 		item.Confidence = 0
 		item.Reason = "missing accepted evidence"
 		item.MissingDetail = aiEvidenceRequirementMissingDetail(requirement)
+	case statusHint == aiEvidenceCoveragePartial:
+		item.Status = aiEvidenceCoveragePartial
+		item.Confidence = aiEvidenceRequirementConfidence(groups, 0.55)
+		item.Reason = "model assessment marked this contract key as partial"
+		item.MissingDetail = aiEvidenceRequirementMissingDetail(requirement)
 	case statusHint == aiEvidenceCoverageCovered || aiEvidenceRequirementHasCoveringGroup(requirement.Key, groups):
 		item.Status = aiEvidenceCoverageCovered
 		item.Confidence = aiEvidenceRequirementConfidence(groups, 0.95)

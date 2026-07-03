@@ -449,7 +449,8 @@ func TestAIAgentTaskFrameDeterministicIntents(t *testing.T) {
 		question string
 		want     string
 	}{
-		{name: "database direct update", question: "我想在数据库里直接修改游戏的价格", want: aiTaskIntentDatabaseDirectUpdateForTest},
+		{name: "database direct update falls back code path", question: "我想在数据库里直接修改游戏的价格", want: aiTaskIntentCodePathExplanation},
+		{name: "ambiguous value change defaults code path", question: "如何修改游戏售卖的基础价格", want: aiTaskIntentCodePathExplanation},
 		{name: "api integration", question: "下单页面需要接哪些接口？请求参数和返回字段是什么？", want: aiTaskIntentAPIIntegration},
 		{name: "branch lookup", question: "库存锁定的新接口现在在哪个分支？", want: aiTaskIntentBranchLookup},
 	}
@@ -468,7 +469,51 @@ func TestAIAgentTaskFrameDeterministicIntents(t *testing.T) {
 			if !strings.Contains(step.OutputJSON, `"intent":"`+tc.want+`"`) {
 				t.Fatalf("step output missing task frame intent: %s", step.OutputJSON)
 			}
+			if tc.name == "ambiguous value change defaults code path" && !frame.AmbiguousValueChange {
+				t.Fatalf("ambiguous value change flag not set: %+v", frame)
+			}
 		})
+	}
+}
+
+func TestAIAgentTaskFrameModelCannotGrantDatabaseDirectIntent(t *testing.T) {
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	modelServer := newAIAnswerModelTestServer(t, http.StatusOK, `{"choices":[{"message":{"role":"assistant","content":"{\"intent\":\"database_direct_update_for_test\",\"intent_reason\":\"user likely wants a test data update\",\"user_goal\":\"给出测试数据直改方案\",\"answer_shape\":\"sql_steps_with_risk\",\"target_artifacts\":[\"table_identity\",\"value_sources\"],\"generated_terms\":[\"price\"]}"}}],"usage":{"prompt_tokens":3,"completion_tokens":4}}`)
+	secret, err := server.createOrUpdateAISecret(ctx, 0, aiSecretRequest{Name: "framer-intent-api-key", SecretType: "api_key", Value: "sk-test-framer-intent"}, "test")
+	if err != nil {
+		t.Fatalf("create framer secret: %v", err)
+	}
+	cfg := defaultAIConfig()
+	cfg.Enabled = true
+	cfg.Chat.Providers = []AIProvider{{
+		ProviderKey:           "framer-intent",
+		Name:                  "FramerIntent",
+		Priority:              10,
+		ProviderType:          "openai_compatible",
+		BaseURL:               modelServer.URL,
+		Model:                 "frame-model",
+		APIKeySecretID:        secret.ID,
+		RequestTimeoutSeconds: 5,
+		MaxRPM:                60,
+	}}
+	cfg.Chat.Routing = buildDefaultRouting(ctx, server.db, cfg.Chat.Providers)
+
+	frame, step := server.frameAITask(ctx, cfg, "如何修改游戏售卖的基础价格", aiQuestionPreparation{
+		SearchQuestion: "如何修改游戏售卖的基础价格",
+		Scope:          AIQuestionScope{RepoMode: "global"},
+	})
+	if step.StepType != "model_call" || step.Status != "success" {
+		t.Fatalf("unexpected task frame step: %+v", step)
+	}
+	if frame.Intent == aiTaskIntentDatabaseDirectUpdateForTest || frame.IntentSource == "model" {
+		t.Fatalf("legacy task framer must not grant database-direct intent: %+v", frame)
+	}
+	if !frame.AmbiguousValueChange {
+		t.Fatalf("ambiguous value change flag missing: %+v", frame)
+	}
+	if frame.IntentReason == "" {
+		t.Fatalf("model intent reason missing: %+v", frame)
 	}
 }
 
@@ -1771,22 +1816,22 @@ func findCurrentSteamGameVersionPrice(versionType string, targetID int64, countr
 		t.Fatalf("retrieve evidence: %v", err)
 	}
 
-	if retrieval.Intent != "database_change" {
-		t.Fatalf("intent = %q, want database_change", retrieval.Intent)
+	if retrieval.Intent != "code_path" {
+		t.Fatalf("intent = %q, want code_path", retrieval.Intent)
 	}
-	if retrieval.Contract == nil || retrieval.Contract.ContractID != "database_direct_update_for_test.v1" {
-		t.Fatalf("retrieval contract = %+v, want database_direct_update_for_test.v1", retrieval.Contract)
+	if retrieval.Contract == nil || retrieval.Contract.ContractID != "code_path_explanation.v1" {
+		t.Fatalf("retrieval contract = %+v, want code_path_explanation.v1", retrieval.Contract)
 	}
 	if retrieval.ContractCoverage == nil {
 		t.Fatalf("retrieval missing contract coverage: %+v", retrieval)
 	}
-	for _, key := range []string{"table_identity", "update_fields", "field_units", "where_conditions", "read_path", "verification_method", "side_effects"} {
-		if !testStringSliceContains(retrieval.ContractCoverage.Covered, key) {
-			t.Fatalf("database coverage missing %s: coverage=%+v evidence=%+v", key, retrieval.ContractCoverage, retrieval.Evidence)
+	for _, key := range []string{"value_sources", "source_precedence", "primary_write_path", "derived_value_handling"} {
+		if !testStringSliceContains(aiEvidenceRequirementKeys(retrieval.Contract.Required), key) {
+			t.Fatalf("code-path contract required keys missing %s: contract=%+v", key, retrieval.Contract)
 		}
 	}
 
-	var foundModel, foundReadPath, foundIndex bool
+	var foundModel, foundReadPath bool
 	for _, evidence := range retrieval.Evidence {
 		if evidence.Citation.FilePath == "models/steam_game_price.go" &&
 			strings.Contains(evidence.Content, "steam_game_price") &&
@@ -1800,29 +1845,25 @@ func findCurrentSteamGameVersionPrice(versionType string, targetID int64, countr
 			strings.Contains(evidence.Content, "is_sell") {
 			foundReadPath = true
 		}
-		if evidence.Citation.FilePath == "version/mysql/v2.1.2.game.sql" &&
-			strings.Contains(evidence.Content, "steam_game_price") &&
-			strings.Contains(evidence.Content, "package_id") {
-			foundIndex = true
-		}
 	}
-	if !foundModel || !foundReadPath || !foundIndex {
-		t.Fatalf("retrieval missed steam price SQL evidence: model=%v readPath=%v index=%v evidence=%+v", foundModel, foundReadPath, foundIndex, retrieval.Evidence)
+	if !foundModel || !foundReadPath {
+		t.Fatalf("retrieval missed steam price code evidence: model=%v readPath=%v evidence=%+v", foundModel, foundReadPath, retrieval.Evidence)
 	}
 
 	messages := buildAIChatMessages("如何修改游戏售卖的基础价格", retrieval)
-	if !strings.Contains(messages[0].Content, "SELECT/UPDATE") || !strings.Contains(messages[0].Content, "不要仅因为证据里没有现成 UPDATE 语句") {
-		t.Fatalf("system prompt should allow evidence-backed SQL examples: %s", messages[0].Content)
+	if !strings.Contains(messages[0].Content, "代码路径约束") || !strings.Contains(messages[0].Content, "不得把直接 UPDATE 数据库作为确定修改方案") {
+		t.Fatalf("system prompt should require code-path/value-flow answer: %s", messages[0].Content)
 	}
 	answer := "表 steam_game_price、字段 price_in_cents_with_discount、WHERE package_id/country_code/is_sell 来自证据 [C1][C2][C3]。\nUPDATE steam_game_price SET price_in_cents_with_discount = ? WHERE package_id = ? AND country_code = ? AND is_sell = ?; [C1][C2][C3]"
 	frame, contract, coverage, bundle := aiAnswerVerifierInputs(retrieval)
 	report := verifyAIAnswerWithContext(frame, contract, coverage, bundle, answer, aiAnswerVerificationContext{
-		EvidenceCount:  len(retrieval.Evidence),
-		RetrievalRound: len(retrieval.Rounds),
-		ServiceNames:   aiVerificationServiceNames(retrieval.ServiceCandidates),
+		EvidenceCount:        len(retrieval.Evidence),
+		RetrievalRound:       len(retrieval.Rounds),
+		ServiceNames:         aiVerificationServiceNames(retrieval.ServiceCandidates),
+		EvidenceContractKeys: aiVerificationDisplayedEvidenceContractKeys(retrieval.Evidence),
 	})
-	if report.Status != aiAnswerVerificationStatusPass || report.NextAction != aiAnswerVerificationNextActionPass || !testStringSliceContains(report.PassedChecks, "sql_placeholders") {
-		t.Fatalf("expected SQL answer did not pass verifier: report=%+v", report)
+	if !testStringSliceContains(report.FailedChecks, "code_path_direct_sql") {
+		t.Fatalf("generic code-path question should reject direct SQL answer: report=%+v", report)
 	}
 }
 
@@ -1893,6 +1934,12 @@ func findCurrentSteamGameVersionPrice(versionType string, targetID int64, countr
 		prompt := aiEvalPromptFromPayload(payload)
 		content := "表 steam_game_price、字段 price_in_cents_with_discount、WHERE package_id/country_code/is_sell 来自证据 [C1][C2][C3]。\nUPDATE steam_game_price SET price_in_cents_with_discount = ? WHERE package_id = ? AND country_code = ? AND is_sell = ?; [C1][C2][C3]"
 		switch {
+		case strings.Contains(prompt, "只读 AI Planner") && !strings.Contains(prompt, `"observations":[`):
+			content = `{"action":"search_code_evidence","intent":"database_direct_update_for_test","explicit_database_request":true,"explicit_database_request_reason":"user explicitly asked to directly modify the database","reason":"find table fields, read path and constraints","query":"steam_game_price price_in_cents_with_discount package_id country_code is_sell","terms":["steam_game_price","price_in_cents_with_discount","package_id","country_code","is_sell"]}`
+		case strings.Contains(prompt, "只读 AI Planner") && strings.Contains(prompt, `"side_effects":"missing"`) && !strings.Contains(prompt, `"contract_assessments":[{`):
+			content = `{"action":"assess_evidence_contract","intent":"database_direct_update_for_test","explicit_database_request":true,"explicit_database_request_reason":"user explicitly asked to directly modify the database","reason":"assess side effects from runtime read path evidence","assessments":[{"key":"side_effects","status":"covered","supporting_refs":["[C2]"],"reason":"read path shows the runtime query path that must be checked after direct update"}]}`
+		case strings.Contains(prompt, "只读 AI Planner"):
+			content = `{"action":"finish_planning","intent":"database_direct_update_for_test","explicit_database_request":true,"explicit_database_request_reason":"user explicitly asked to directly modify the database","intent_reason":"schema and read-path evidence have been retrieved","answer_shape":"sql_steps_with_risk","target_artifacts":["table_identity","update_fields","where_conditions","field_units","read_path","verification_method","side_effects"]}`
 		case strings.Contains(prompt, "检索前的查询规划器"):
 			content = `{"terms":["steam_game_price","price_in_cents_with_discount","package_id","country_code","is_sell","base_price","Price"]}`
 		case strings.Contains(prompt, "检索前的任务结构化助手"):
@@ -1912,7 +1959,7 @@ func findCurrentSteamGameVersionPrice(versionType string, targetID int64, countr
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	result, err := server.askAIQuestion(ctx, session.ID, "如何修改游戏售卖的基础价格", AIQuestionScope{RepoMode: "global", SourceMode: "smart_latest_with_branch_candidates"}, "test")
+	result, err := server.askAIQuestion(ctx, session.ID, "我想在数据库里直接修改游戏售卖的基础价格", AIQuestionScope{RepoMode: "global", SourceMode: "smart_latest_with_branch_candidates"}, "test")
 	if err != nil {
 		t.Fatalf("ask question: %v", err)
 	}
@@ -1952,7 +1999,89 @@ func TestAIQueryPlannerFiltersUnsupportedConcreteTerms(t *testing.T) {
 	}
 }
 
-func TestAIDatabaseChangeRetrievalPrefersSchemaAndReadPathOverTestFixtures(t *testing.T) {
+func TestAIRetrievalScoringUsesTermsInsteadOfIntentSemantics(t *testing.T) {
+	runtimeScore, runtimeTerms := aiPathScore("internal/service/runtime_price.go", []string{"runtime_price"})
+	schemaScore, schemaTerms := aiPathScore("version/mysql/001_schema.sql", []string{"runtime_price"})
+	if len(runtimeTerms) == 0 {
+		t.Fatalf("runtime path terms missing")
+	}
+	if len(schemaTerms) != 0 {
+		t.Fatalf("schema path unexpectedly matched terms: %v", schemaTerms)
+	}
+	if schemaScore != 0 || schemaScore >= runtimeScore {
+		t.Fatalf("unmatched path score = %.2f, want 0 and below term-matched runtime score %.2f", schemaScore, runtimeScore)
+	}
+
+	contentScore, contentTerms := aiContentScore("CREATE TABLE unrelated (id BIGINT); UPDATE unrelated SET id = 1;", []string{"runtime_price"})
+	if contentScore != 0 || len(contentTerms) != 0 {
+		t.Fatalf("content SQL/code patterns should not score without model/user terms: score=%.2f terms=%v", contentScore, contentTerms)
+	}
+}
+
+func TestAIPlannerViewFileSliceSafetyBoundaries(t *testing.T) {
+	requireGit(t)
+
+	server := newWebhookTestServer(t)
+	ctx := context.Background()
+	sourceRepoA := createTestGitRepo(t)
+	writeScanPathTestFile(t, sourceRepoA, "internal/value.go", "package internal\n\nfunc Value() int {\n\treturn 42\n}\n")
+	runTestGit(t, sourceRepoA, "add", ".")
+	runTestGit(t, sourceRepoA, "commit", "-m", "add value file")
+	repoA, err := createRepository(ctx, server.db, Repository{
+		Name:                  "planner-a",
+		Slug:                  "planner-a",
+		RepoURL:               sourceRepoA,
+		DefaultBranch:         "main",
+		TrackedBranches:       []string{"main"},
+		LatestIncludeBranches: []string{"main"},
+		ScanPaths:             []ScanPath{{Path: ".", Enabled: true}},
+		Enabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("create repo A: %v", err)
+	}
+	if _, err := server.scanner.Scan(ctx, repoA.ID, "manual"); err != nil {
+		t.Fatalf("scan repo A: %v", err)
+	}
+
+	sourceRepoB := createTestGitRepo(t)
+	writeScanPathTestFile(t, sourceRepoB, "internal/other.go", "package internal\n\nfunc Other() int { return 7 }\n")
+	runTestGit(t, sourceRepoB, "add", ".")
+	runTestGit(t, sourceRepoB, "commit", "-m", "add other file")
+	repoB, err := createRepository(ctx, server.db, Repository{
+		Name:                  "planner-b",
+		Slug:                  "planner-b",
+		RepoURL:               sourceRepoB,
+		DefaultBranch:         "main",
+		TrackedBranches:       []string{"main"},
+		LatestIncludeBranches: []string{"main"},
+		ScanPaths:             []ScanPath{{Path: ".", Enabled: true}},
+		Enabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("create repo B: %v", err)
+	}
+	if _, err := server.scanner.Scan(ctx, repoB.ID, "manual"); err != nil {
+		t.Fatalf("scan repo B: %v", err)
+	}
+
+	scope := AIQuestionScope{RepoMode: "selected", RepoIDs: []int64{repoA.ID}, SourceMode: "smart_latest"}
+	if _, err := server.executeAIPlannerViewFile(ctx, aiPlannerAction{RepoID: repoB.ID, Branch: "main", FilePath: "internal/other.go", LineStart: 1, LineEnd: 3}, scope); err == nil {
+		t.Fatalf("view_file_slice should reject repo outside selected scope")
+	}
+	if _, err := server.executeAIPlannerViewFile(ctx, aiPlannerAction{RepoID: repoA.ID, Branch: "main", FilePath: "internal/value.go", LineStart: 1, LineEnd: aiPlannerMaxViewLines + 1}, scope); err == nil {
+		t.Fatalf("view_file_slice should reject too-large line windows")
+	}
+	evidence, err := server.executeAIPlannerViewFile(ctx, aiPlannerAction{RepoID: repoA.ID, Branch: "main", FilePath: "internal/value.go", LineStart: 1, LineEnd: 4}, scope)
+	if err != nil {
+		t.Fatalf("valid view_file_slice failed: %v", err)
+	}
+	if evidence.Citation.RepoID != repoA.ID || evidence.Citation.FilePath != "internal/value.go" || !strings.Contains(evidence.Content, "func Value") {
+		t.Fatalf("unexpected file slice evidence: %+v", evidence)
+	}
+}
+
+func TestAIDatabaseChangeRetrievalFindsSchemaAndReadPathWithoutPathFixtureHeuristic(t *testing.T) {
 	requireGit(t)
 
 	server := newWebhookTestServer(t)
@@ -2051,15 +2180,29 @@ func findCurrentSteamGameVersionPrice(versionType string, targetID int, countryC
 
 	cfg := defaultAIConfig()
 	cfg.Chat.MaxContextChunks = 8
-	retrieval, err := server.retrieveAIEvidence(ctx, "我想在数据库里直接修改游戏的价格 steam_game_prices SteamGamePrice steam_game_price price_in_cents_with_discount package_id country_code is_sell SELECT UPDATE", AIQuestionScope{
+	frame := aiTaskFrame{
+		Intent:            aiTaskIntentDatabaseDirectUpdateForTest,
+		IntentSource:      "model_planner",
+		IntentReason:      "test fixture simulates a planner-confirmed direct database update request",
+		ExplicitDBRequest: true,
+		ExplicitDBSource:  "model_planner",
+		ExplicitDBReason:  "user explicitly asked to directly modify the database",
+		UserGoal:          "给出测试用途的数据库直接修改方案",
+		AnswerShape:       "sql_steps_with_risk",
+		ScopeStrategy:     "global_first",
+		TargetArtifacts:   aiTaskFrameDefaultArtifacts(aiTaskIntentDatabaseDirectUpdateForTest),
+		KnownTerms:        aiQueryTerms("我想在数据库里直接修改游戏的价格 steam_game_prices SteamGamePrice steam_game_price price_in_cents_with_discount package_id country_code is_sell SELECT UPDATE"),
+	}
+	contract := buildAIEvidenceContract(frame)
+	retrieval, err := server.retrieveAIEvidenceWithTaskFrame(ctx, "我想在数据库里直接修改游戏的价格 steam_game_prices SteamGamePrice steam_game_price price_in_cents_with_discount package_id country_code is_sell SELECT UPDATE", AIQuestionScope{
 		RepoMode:   "global",
 		SourceMode: "smart_latest_with_branch_candidates",
-	}, cfg)
+	}, cfg, &frame, &contract)
 	if err != nil {
 		t.Fatalf("retrieve evidence: %v", err)
 	}
-	if retrieval.Intent != "database_change" {
-		t.Fatalf("intent = %q, want database_change", retrieval.Intent)
+	if retrieval.Intent != aiTaskIntentDatabaseDirectUpdateForTest {
+		t.Fatalf("intent = %q, want %q", retrieval.Intent, aiTaskIntentDatabaseDirectUpdateForTest)
 	}
 	if len(retrieval.Evidence) == 0 {
 		t.Fatal("retrieval returned no evidence")
@@ -2067,12 +2210,6 @@ func findCurrentSteamGameVersionPrice(versionType string, targetID int, countryC
 	if retrieval.EvidenceBundle == nil || retrieval.Coverage == nil {
 		t.Fatalf("retrieval missing curator bundle or coverage: %+v", retrieval)
 	}
-	for i, evidence := range retrieval.Evidence {
-		if evidence.Repo.Name == "文档服务" && aiPathLooksTest(evidence.Citation.FilePath) {
-			t.Fatalf("test fixture remained as core evidence at %d: %+v", i, evidence)
-		}
-	}
-
 	var foundModel, foundReadPath bool
 	for _, evidence := range retrieval.Evidence {
 		switch evidence.Citation.FilePath {
@@ -2097,8 +2234,8 @@ func findCurrentSteamGameVersionPrice(versionType string, targetID int, countryC
 	}
 
 	messages := buildAIChatMessages("我想在数据库里直接修改游戏的价格", retrieval)
-	if !strings.Contains(messages[0].Content, "SELECT/UPDATE") || !strings.Contains(messages[0].Content, "不要仅因为证据里没有现成 UPDATE 语句") {
-		t.Fatalf("system prompt should allow evidence-backed SQL examples: %s", messages[0].Content)
+	if !strings.Contains(messages[0].Content, "required missing/partial") || !strings.Contains(messages[0].Content, "不得输出确定 UPDATE") {
+		t.Fatalf("system prompt should block SQL until assessed required evidence is covered: %s", messages[0].Content)
 	}
 }
 
@@ -2646,14 +2783,44 @@ export function signUserToken(user) {
 	if err != nil {
 		t.Fatalf("prepare follow-up question: %v", err)
 	}
-	if !prepared.Conversation.FollowUp {
-		t.Fatal("expected follow-up context")
+	if !prepared.Conversation.PreviousContextAvailable || prepared.Conversation.FollowUp {
+		t.Fatalf("prepare should expose previous context candidates without deciding follow-up: %+v", prepared.Conversation)
 	}
-	if prepared.Scope.RepoMode != "follow_up_context" || len(prepared.Scope.RepoIDs) != 1 || prepared.Scope.RepoIDs[0] != primaryRepo.ID {
-		t.Fatalf("prepared scope = %+v, want previous primary repo only", prepared.Scope)
+	if prepared.Scope.RepoMode == "follow_up_context" || len(prepared.Scope.RepoIDs) != 0 {
+		t.Fatalf("prepare should not narrow scope before planner decision: %+v", prepared.Scope)
 	}
 	if strings.Join(prepared.Conversation.PreviousCitationPaths, ",") != "src/security/session_token.ts" {
 		t.Fatalf("prepared citation paths = %+v, want token path mentioned by previous answer", prepared.Conversation.PreviousCitationPaths)
+	}
+	useStandalone := false
+	standalonePrepared, standaloneScope := applyAIPlannerConversationDecision("另一个问题从全局看", prepared, prepared.Scope, prepared.Scope, aiPlannerAction{
+		UseFollowUpContext: &useStandalone,
+		FollowUpReason:     "planner selected standalone question",
+	})
+	if standalonePrepared.Conversation.FollowUp || standalonePrepared.SearchQuestion != "另一个问题从全局看" || standaloneScope.RepoMode == "follow_up_context" {
+		t.Fatalf("standalone planner decision should not inherit previous context: prepared=%+v scope=%+v", standalonePrepared, standaloneScope)
+	}
+	useFollowUp := true
+	usePreviousScope := true
+	prepared, decidedScope := applyAIPlannerConversationDecision("能给我详细的结构说明吗？", prepared, prepared.Scope, prepared.Scope, aiPlannerAction{
+		UseFollowUpContext: &useFollowUp,
+		UsePreviousScope:   &usePreviousScope,
+		FollowUpReason:     "current question asks for details of the previous token topic",
+	})
+	if !prepared.Conversation.FollowUp || prepared.Conversation.FollowUpSource != "model_planner" || !prepared.Conversation.UsePreviousScope {
+		t.Fatalf("planner decision did not mark follow-up context: %+v", prepared.Conversation)
+	}
+	if decidedScope.RepoMode != "follow_up_context" || len(decidedScope.RepoIDs) != 1 || decidedScope.RepoIDs[0] != primaryRepo.ID {
+		t.Fatalf("planner-decided scope = %+v, want previous primary repo only", decidedScope)
+	}
+	useGlobalScope := false
+	globalPrepared, globalScope := applyAIPlannerConversationDecision("继续但这次看所有仓库", prepared, decidedScope, standaloneScope, aiPlannerAction{
+		UseFollowUpContext: &useFollowUp,
+		UsePreviousScope:   &useGlobalScope,
+		FollowUpReason:     "planner selected previous topic with broader retrieval scope",
+	})
+	if !globalPrepared.Conversation.FollowUp || globalPrepared.Conversation.UsePreviousScope || globalScope.RepoMode == "follow_up_context" {
+		t.Fatalf("planner broader-scope decision should keep follow-up text without previous scope: prepared=%+v scope=%+v", globalPrepared, globalScope)
 	}
 	parameterFollowUp, err := server.prepareAIQuestion(ctx, session.ID, "参数是什么？", AIQuestionScope{
 		RepoMode:   "global",
@@ -2663,6 +2830,11 @@ export function signUserToken(user) {
 	if err != nil {
 		t.Fatalf("prepare parameter follow-up: %v", err)
 	}
+	parameterFollowUp, _ = applyAIPlannerConversationDecision("参数是什么？", parameterFollowUp, parameterFollowUp.Scope, parameterFollowUp.Scope, aiPlannerAction{
+		UseFollowUpContext: &useFollowUp,
+		UsePreviousScope:   &usePreviousScope,
+		FollowUpReason:     "current question asks for parameters of the previous topic",
+	})
 	followFrame, _ := server.frameAITask(ctx, defaultAIConfig(), "参数是什么？", parameterFollowUp)
 	if followFrame.FollowUp == nil || strings.Join(followFrame.FollowUp.PreviousPaths, ",") != "src/security/session_token.ts" {
 		t.Fatalf("follow-up task frame did not inherit previous path: %+v", followFrame)
@@ -2673,7 +2845,7 @@ export function signUserToken(user) {
 
 	cfg := defaultAIConfig()
 	cfg.Chat.MaxContextChunks = 8
-	retrieval, err := server.retrieveAIEvidence(ctx, prepared.SearchQuestion, prepared.Scope, cfg)
+	retrieval, err := server.retrieveAIEvidence(ctx, prepared.SearchQuestion, decidedScope, cfg)
 	if err != nil {
 		t.Fatalf("retrieve follow-up evidence: %v", err)
 	}

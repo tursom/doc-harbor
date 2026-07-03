@@ -410,7 +410,12 @@ type aiRetrievalResult struct {
 }
 
 type aiConversationContext struct {
+	PreviousContextAvailable bool     `json:"previous_context_available,omitempty"`
+	ContextSource            string   `json:"context_source,omitempty"`
 	FollowUp                 bool     `json:"follow_up"`
+	FollowUpSource           string   `json:"follow_up_source,omitempty"`
+	FollowUpReason           string   `json:"follow_up_reason,omitempty"`
+	UsePreviousScope         bool     `json:"use_previous_scope,omitempty"`
 	PreviousUserQuestion     string   `json:"previous_user_question,omitempty"`
 	PreviousAssistantSummary string   `json:"previous_assistant_summary,omitempty"`
 	PreviousCitationPaths    []string `json:"previous_citation_paths,omitempty"`
@@ -437,11 +442,12 @@ type aiEvidence struct {
 	Content           string
 	MatchedTerms      []string
 	Score             float64
-	EvidenceType      string   `json:"evidence_type,omitempty"`
-	SourceReliability string   `json:"source_reliability,omitempty"`
-	ContractKeys      []string `json:"contract_keys,omitempty"`
-	ExcludedReason    string   `json:"excluded_reason,omitempty"`
-	GroupKey          string   `json:"group_key,omitempty"`
+	EvidenceType      string            `json:"evidence_type,omitempty"`
+	SourceReliability string            `json:"source_reliability,omitempty"`
+	ContractKeys      []string          `json:"contract_keys,omitempty"`
+	ContractKeyStatus map[string]string `json:"contract_key_status,omitempty"`
+	ExcludedReason    string            `json:"excluded_reason,omitempty"`
+	GroupKey          string            `json:"group_key,omitempty"`
 }
 
 type aiRefTarget struct {
@@ -4512,18 +4518,38 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 	if err != nil {
 		return aiQuestionResult{}, err
 	}
-	prepared, plannerStep := s.expandAIQuestionForRetrieval(ctx, active.Config, prepared)
-	plannerStep.RunID = run.ID
-	_ = insertAIStep(ctx, s.db, plannerStep)
-	taskFrame, taskFrameStep := s.frameAITask(ctx, active.Config, question, prepared)
-	prepared.TaskFrame = &taskFrame
-	taskFrameStep.RunID = run.ID
-	_ = insertAIStep(ctx, s.db, taskFrameStep)
-	contract := buildAIEvidenceContract(taskFrame)
-	prepared.Contract = &contract
-	contractStep := buildAIEvidenceContractStep(taskFrame, contract)
-	contractStep.RunID = run.ID
-	_ = insertAIStep(ctx, s.db, contractStep)
+	retrieval, prepared, plannerSteps, err := s.planAndRetrieveAIEvidence(ctx, active.Config, question, scope, prepared, viewer)
+	if err != nil {
+		_ = finishAIRun(ctx, s.db, run.ID, AIAgentRun{
+			Status:       "failed",
+			CurrentState: "planner_tool_loop",
+			FinishedAt:   nowString(),
+			ErrorMessage: sanitizeProviderError(err.Error()),
+		})
+		return aiQuestionResult{}, err
+	}
+	scope = prepared.Scope
+	for _, step := range plannerSteps {
+		step.RunID = run.ID
+		_ = insertAIStep(ctx, s.db, step)
+	}
+	if prepared.TaskFrame != nil {
+		_ = insertAIStep(ctx, s.db, AIAgentStep{
+			RunID:      run.ID,
+			AgentName:  "task_framer",
+			StepType:   "model_planner",
+			Status:     "success",
+			InputJSON:  encodeJSON(map[string]any{"question": truncate(question, 500), "source": "planner_decision"}),
+			OutputJSON: encodeJSON(prepared.TaskFrame),
+			CreatedAt:  nowString(),
+			FinishedAt: nowString(),
+		})
+	}
+	if prepared.TaskFrame != nil && prepared.Contract != nil {
+		contractStep := buildAIEvidenceContractStep(*prepared.TaskFrame, *prepared.Contract)
+		contractStep.RunID = run.ID
+		_ = insertAIStep(ctx, s.db, contractStep)
+	}
 	checkpoint := buildAIAgentRunCheckpoint(scope, active.Config.Chat.Routing.DefaultTaskClass, prepared)
 	checkpointJSON := encodeJSON(checkpoint)
 	_ = insertAIStep(ctx, s.db, AIAgentStep{
@@ -4534,39 +4560,6 @@ func (s *Server) askAIQuestion(ctx context.Context, sessionID int64, question st
 		InputJSON:  encodeJSON(map[string]any{"question": truncate(question, 500), "viewer": viewer}),
 		OutputJSON: checkpointJSON,
 		CreatedAt:  run.StartedAt,
-		FinishedAt: nowString(),
-	})
-
-	retrieval, err := s.retrieveAIEvidenceWithTaskFrame(ctx, prepared.SearchQuestion, scope, active.Config, prepared.TaskFrame, prepared.Contract)
-	if err != nil {
-		_ = finishAIRun(ctx, s.db, run.ID, AIAgentRun{
-			Status:         "failed",
-			CurrentState:   "retrieve_smart_latest",
-			FinishedAt:     nowString(),
-			ErrorMessage:   err.Error(),
-			CheckpointJSON: checkpointJSON,
-		})
-		return aiQuestionResult{}, err
-	}
-	applyAIConversationContext(&retrieval, prepared)
-	prepared.EvidenceBundle = retrieval.EvidenceBundle
-	prepared.Coverage = retrieval.Coverage
-	prepared.ContractCoverage = retrieval.ContractCoverage
-	checkpoint = buildAIAgentRunCheckpoint(scope, active.Config.Chat.Routing.DefaultTaskClass, prepared)
-	checkpointJSON = encodeJSON(checkpoint)
-	for _, roundStep := range retrieval.RetrievalRoundSteps {
-		roundStep.RunID = run.ID
-		_ = insertAIStep(ctx, s.db, roundStep)
-	}
-	_ = insertAIStep(ctx, s.db, AIAgentStep{
-		RunID:      run.ID,
-		AgentName:  "retrieval",
-		StepType:   "tool_call",
-		Status:     "success",
-		ToolName:   "search_code_evidence",
-		InputJSON:  encodeJSON(map[string]any{"source_mode": retrieval.Scope.SourceMode, "repo_ids": retrieval.Scope.RepoIDs}),
-		OutputJSON: encodeJSON(map[string]any{"evidence_count": len(retrieval.Evidence), "service_candidate_count": len(retrieval.ServiceCandidates), "excluded_evidence_count": len(retrieval.EvidenceBundle.Excluded)}),
-		CreatedAt:  nowString(),
 		FinishedAt: nowString(),
 	})
 	if retrieval.Curation != nil {
@@ -4760,54 +4753,14 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 			ErrorMessage:         message,
 		})
 	}()
-	prepared, plannerStep := s.expandAIQuestionForRetrieval(ctx, active.Config, prepared)
-	plannerStep.RunID = run.ID
-	if err := insertAIStep(ctx, s.db, plannerStep); err != nil {
-		return err
-	}
-	taskFrame, taskFrameStep := s.frameAITask(ctx, active.Config, question, prepared)
-	prepared.TaskFrame = &taskFrame
-	taskFrameStep.RunID = run.ID
-	if err := insertAIStep(ctx, s.db, taskFrameStep); err != nil {
-		return err
-	}
-	contract := buildAIEvidenceContract(taskFrame)
-	prepared.Contract = &contract
-	contractStep := buildAIEvidenceContractStep(taskFrame, contract)
-	contractStep.RunID = run.ID
-	if err := insertAIStep(ctx, s.db, contractStep); err != nil {
-		return err
-	}
-	checkpoint := buildAIAgentRunCheckpoint(scope, active.Config.Chat.Routing.DefaultTaskClass, prepared)
-	checkpointJSON = encodeJSON(checkpoint)
-	run.CheckpointJSON = checkpointJSON
-	if err := insertAIStep(ctx, s.db, AIAgentStep{
-		RunID:      run.ID,
-		AgentName:  "coordinator",
-		StepType:   "checkpoint",
-		Status:     "success",
-		InputJSON:  encodeJSON(map[string]any{"question": truncate(question, 500), "viewer": viewer}),
-		OutputJSON: checkpointJSON,
-		CreatedAt:  run.StartedAt,
-		FinishedAt: nowString(),
-	}); err != nil {
-		return err
-	}
 	if err := emit("run_started", map[string]any{"run": run, "assistant_message": assistantMsg}); err != nil {
 		return err
 	}
-	if err := emit("task_frame", map[string]any{"task_frame": taskFrame}); err != nil {
+	currentState = "planner_tool_loop"
+	if err := emit("stage", aiStreamStageEvent{Stage: currentState, Status: "running", Message: "模型规划只读工具调用"}); err != nil {
 		return err
 	}
-	if err := emit("contract", map[string]any{"contract": summarizeAIEvidenceContract(contract)}); err != nil {
-		return err
-	}
-
-	currentState = "retrieve_smart_latest"
-	if err := emit("stage", aiStreamStageEvent{Stage: currentState, Status: "running", Message: "检索候选服务和引用证据"}); err != nil {
-		return err
-	}
-	retrieval, err := s.retrieveAIEvidenceWithTaskFrame(ctx, prepared.SearchQuestion, scope, active.Config, prepared.TaskFrame, prepared.Contract)
+	retrieval, prepared, plannerSteps, err := s.planAndRetrieveAIEvidence(ctx, active.Config, question, scope, prepared, viewer)
 	if err != nil {
 		safeErr := sanitizeProviderError(err.Error())
 		assistantMsg.Status = "failed"
@@ -4828,36 +4781,85 @@ func (s *Server) askAIQuestionStream(ctx context.Context, sessionID int64, quest
 		_ = emit("error", map[string]any{"message": safeErr, "partial_message_id": assistantMsg.ID, "assistant_message": assistantMsg})
 		return nil
 	}
-	applyAIConversationContext(&retrieval, prepared)
-	prepared.EvidenceBundle = retrieval.EvidenceBundle
-	prepared.Coverage = retrieval.Coverage
-	prepared.ContractCoverage = retrieval.ContractCoverage
-	checkpoint = buildAIAgentRunCheckpoint(scope, active.Config.Chat.Routing.DefaultTaskClass, prepared)
-	checkpointJSON = encodeJSON(checkpoint)
-	run.CheckpointJSON = checkpointJSON
-	for _, roundStep := range retrieval.RetrievalRoundSteps {
-		roundStep.RunID = run.ID
-		if err := insertAIStep(ctx, s.db, roundStep); err != nil {
+	scope = prepared.Scope
+	for _, step := range plannerSteps {
+		step.RunID = run.ID
+		if err := insertAIStep(ctx, s.db, step); err != nil {
 			return err
 		}
+		switch step.StepType {
+		case "tool_registry":
+			if err := emit("tool_registry", map[string]any{"step": step}); err != nil {
+				return err
+			}
+		case "model_call":
+			if step.AgentName == "planner" {
+				if err := emit("planner_step", map[string]any{"step": step}); err != nil {
+					return err
+				}
+			}
+		case "tool_call":
+			if step.AgentName == "planner" {
+				if err := emit("tool_result", map[string]any{"step": step}); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if prepared.TaskFrame != nil {
+		taskFrameStep := AIAgentStep{
+			RunID:      run.ID,
+			AgentName:  "task_framer",
+			StepType:   "model_planner",
+			Status:     "success",
+			InputJSON:  encodeJSON(map[string]any{"question": truncate(question, 500), "source": "planner_decision"}),
+			OutputJSON: encodeJSON(prepared.TaskFrame),
+			CreatedAt:  nowString(),
+			FinishedAt: nowString(),
+		}
+		if err := insertAIStep(ctx, s.db, taskFrameStep); err != nil {
+			return err
+		}
+	}
+	if prepared.TaskFrame != nil && prepared.Contract != nil {
+		contractStep := buildAIEvidenceContractStep(*prepared.TaskFrame, *prepared.Contract)
+		contractStep.RunID = run.ID
+		if err := insertAIStep(ctx, s.db, contractStep); err != nil {
+			return err
+		}
+	}
+	checkpoint := buildAIAgentRunCheckpoint(scope, active.Config.Chat.Routing.DefaultTaskClass, prepared)
+	checkpointJSON = encodeJSON(checkpoint)
+	run.CheckpointJSON = checkpointJSON
+	if err := insertAIStep(ctx, s.db, AIAgentStep{
+		RunID:      run.ID,
+		AgentName:  "coordinator",
+		StepType:   "checkpoint",
+		Status:     "success",
+		InputJSON:  encodeJSON(map[string]any{"question": truncate(question, 500), "viewer": viewer}),
+		OutputJSON: checkpointJSON,
+		CreatedAt:  run.StartedAt,
+		FinishedAt: nowString(),
+	}); err != nil {
+		return err
+	}
+	if prepared.TaskFrame != nil {
+		if err := emit("task_frame", map[string]any{"task_frame": prepared.TaskFrame}); err != nil {
+			return err
+		}
+	}
+	if prepared.Contract != nil {
+		if err := emit("contract", map[string]any{"contract": summarizeAIEvidenceContract(*prepared.Contract)}); err != nil {
+			return err
+		}
+	}
+	if err := emit("planner_decision", map[string]any{"task_frame": prepared.TaskFrame, "contract": prepared.Contract, "plan": retrieval.Plan}); err != nil {
+		return err
 	}
 	for _, round := range retrieval.Rounds {
 		if err := emit("retrieval_round", map[string]any{"round": round}); err != nil {
 			return err
 		}
-	}
-	if err := insertAIStep(ctx, s.db, AIAgentStep{
-		RunID:      run.ID,
-		AgentName:  "retrieval",
-		StepType:   "tool_call",
-		Status:     "success",
-		ToolName:   "search_code_evidence",
-		InputJSON:  encodeJSON(map[string]any{"source_mode": retrieval.Scope.SourceMode, "repo_ids": retrieval.Scope.RepoIDs}),
-		OutputJSON: encodeJSON(map[string]any{"evidence_count": len(retrieval.Evidence), "service_candidate_count": len(retrieval.ServiceCandidates), "excluded_evidence_count": len(retrieval.EvidenceBundle.Excluded)}),
-		CreatedAt:  nowString(),
-		FinishedAt: nowString(),
-	}); err != nil {
-		return err
 	}
 	if retrieval.Curation != nil {
 		curatorStep := buildAIEvidenceCuratorStep(retrieval.TaskFrame, retrieval.Contract, *retrieval.Curation, len(retrieval.Curation.Annotations))
@@ -5179,9 +5181,6 @@ func normalizeAIScope(scope AIQuestionScope) AIQuestionScope {
 
 func (s *Server) prepareAIQuestion(ctx context.Context, sessionID int64, question string, scope AIQuestionScope) (aiQuestionPreparation, error) {
 	prepared := aiQuestionPreparation{SearchQuestion: question, Scope: scope}
-	if !aiLooksLikeFollowUpQuestion(question) {
-		return prepared, nil
-	}
 	messages, err := recentAIMessages(ctx, s.db, sessionID, 8)
 	if err != nil {
 		return aiQuestionPreparation{}, err
@@ -5202,7 +5201,10 @@ func (s *Server) prepareAIQuestion(ctx context.Context, sessionID int64, questio
 	if previousUser.ID == 0 && previousAssistant.ID == 0 {
 		return prepared, nil
 	}
-	conversation := aiConversationContext{FollowUp: true}
+	conversation := aiConversationContext{
+		PreviousContextAvailable: true,
+		ContextSource:            "recent_session_messages",
+	}
 	if previousUser.ID > 0 {
 		conversation.PreviousUserQuestion = aiCompactContextText(previousUser.Content, 500)
 	}
@@ -5235,6 +5237,11 @@ func (s *Server) prepareAIQuestion(ctx context.Context, sessionID int64, questio
 			}
 		}
 	}
+	prepared.Conversation = conversation
+	return prepared, nil
+}
+
+func buildAIFollowUpSearchQuestion(question string, conversation aiConversationContext) string {
 	var b strings.Builder
 	b.WriteString("当前问题是上一轮主题的追问，请优先沿用上一轮主题、服务和引用路径。\n")
 	if conversation.PreviousUserQuestion != "" {
@@ -5254,13 +5261,7 @@ func (s *Server) prepareAIQuestion(ctx context.Context, sessionID int64, questio
 	}
 	b.WriteString("当前追问：")
 	b.WriteString(question)
-	prepared.SearchQuestion = b.String()
-	prepared.Conversation = conversation
-	if len(scope.RepoIDs) == 0 && scope.CurrentFile == nil && len(conversation.FocusRepoIDs) > 0 && !aiFollowUpAsksForBroaderScope(question) {
-		prepared.Scope.RepoIDs = append([]int64(nil), conversation.FocusRepoIDs...)
-		prepared.Scope.RepoMode = "follow_up_context"
-	}
-	return prepared, nil
+	return b.String()
 }
 
 func (s *Server) expandAIQuestionForRetrieval(ctx context.Context, cfg AIConfigData, prepared aiQuestionPreparation) (aiQuestionPreparation, AIAgentStep) {
@@ -5383,55 +5384,6 @@ func aiAnchorsMentionedInText(anchors []aiCitationAnchor, text string) []aiCitat
 		}
 	}
 	return mentioned
-}
-
-func aiLooksLikeFollowUpQuestion(question string) bool {
-	q := strings.TrimSpace(strings.ToLower(question))
-	if q == "" {
-		return false
-	}
-	hasSignal := false
-	for _, signal := range []string{"详细", "具体", "展开", "继续", "上面", "上一", "刚才", "这个", "这些", "它", "上述", "结构", "格式", "字段", "参数", "说明", "完整"} {
-		if strings.Contains(q, signal) {
-			hasSignal = true
-			break
-		}
-	}
-	if !hasSignal {
-		return false
-	}
-	if aiQuestionHasExplicitServiceAnchor(q) && !aiQuestionHasFollowPronoun(q) {
-		return false
-	}
-	return len([]rune(q)) <= 48 || aiQuestionHasFollowPronoun(q)
-}
-
-func aiQuestionHasExplicitServiceAnchor(question string) bool {
-	for _, marker := range []string{"服务", "仓库", "repo", "项目", "模块", "文件", "package", "class", "function", "server", ".go", ".ts", ".js", ".md", "/", "\\", "api", "http", "grpc", "openapi"} {
-		if strings.Contains(question, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-func aiQuestionHasFollowPronoun(question string) bool {
-	for _, marker := range []string{"这个", "这些", "它", "上述", "上面", "上一", "刚才", "继续"} {
-		if strings.Contains(question, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-func aiFollowUpAsksForBroaderScope(question string) bool {
-	q := strings.ToLower(question)
-	for _, marker := range []string{"全部仓库", "所有仓库", "所有服务", "其他服务", "别的服务", "另一个", "对比", "全局", "跨服务"} {
-		if strings.Contains(q, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 func aiCompactContextText(value string, limit int) string {
@@ -5694,6 +5646,13 @@ func (s *Server) retrieveAIEvidenceWithTaskFrame(ctx context.Context, question s
 		effectiveFrame = *frame
 		effectiveFrame.KnownTerms = mergeTerms(effectiveFrame.KnownTerms, terms)
 	} else {
+		effectiveFrame.AmbiguousValueChange = aiQuestionAsksAmbiguousDataValueChange(question)
+		effectiveFrame.IntentSource = "deterministic"
+		effectiveFrame.IntentReason = "retrieval fallback task frame"
+		if effectiveFrame.AmbiguousValueChange && effectiveFrame.Intent == aiTaskIntentCodePathExplanation {
+			effectiveFrame.IntentSource = "deterministic_default"
+			effectiveFrame.IntentReason = "ambiguous business value change defaults to code path"
+		}
 		effectiveFrame.UserGoal = aiTaskFrameDefaultUserGoal(effectiveFrame.Intent)
 		effectiveFrame.AnswerShape = aiTaskFrameDefaultAnswerShape(effectiveFrame.Intent)
 		effectiveFrame.TargetArtifacts = aiTaskFrameDefaultArtifacts(effectiveFrame.Intent)
@@ -5861,6 +5820,8 @@ func (s *Server) searchRepoSmartLatestEvidence(ctx context.Context, repo Reposit
 		PathTerms []string
 	}
 	candidates := []smartLatestCandidate{}
+	repoPath := s.git.repoPath(repo.ID)
+	contentPathScoresByCommit := map[string]map[string]float64{}
 	for rows.Next() {
 		var candidate smartLatestCandidate
 		if err := rows.Scan(&candidate.VersionID, &candidate.Branch, &candidate.CommitSHA, &candidate.FilePath,
@@ -5873,7 +5834,19 @@ func (s *Server) searchRepoSmartLatestEvidence(ctx context.Context, repo Reposit
 		if indexCfg.MaxFileSize > 0 && candidate.FileSize > indexCfg.MaxFileSize {
 			continue
 		}
-		score, matched := aiPathScore(candidate.FilePath, terms, intent)
+		score, matched := aiPathScore(candidate.FilePath, terms)
+		contentPathScores := contentPathScoresByCommit[candidate.CommitSHA]
+		if contentPathScores == nil {
+			var err error
+			contentPathScores, err = s.git.grepPathScores(ctx, repoPath, candidate.CommitSHA, terms)
+			if err != nil {
+				contentPathScores = map[string]float64{}
+			}
+			contentPathScoresByCommit[candidate.CommitSHA] = contentPathScores
+		}
+		if matchLines := contentPathScores[candidate.FilePath]; matchLines > 0 {
+			score += min(matchLines, 10) * 4
+		}
 		if score <= 0 && !aiIntentIsAPIIntegration(intent) && !aiIntentIsCrossService(intent) {
 			continue
 		}
@@ -5889,7 +5862,6 @@ func (s *Server) searchRepoSmartLatestEvidence(ctx context.Context, repo Reposit
 		candidates = candidates[:160]
 	}
 
-	repoPath := s.git.repoPath(repo.ID)
 	evidence := []aiEvidence{}
 	for _, candidate := range candidates {
 		data, err := s.git.catFile(ctx, repoPath, candidate.BlobSHA)
@@ -5897,14 +5869,17 @@ func (s *Server) searchRepoSmartLatestEvidence(ctx context.Context, repo Reposit
 			continue
 		}
 		content := string(data)
-		contentScore, contentTerms := aiContentScore(content, terms, intent)
+		contentScore, contentTerms := aiContentScore(content, terms)
 		score := candidate.PreScore + contentScore
-		score = aiAdjustEvidenceScore(candidate.FilePath, score, intent)
+		matchedTerms := mergeTerms(candidate.PathTerms, contentTerms)
+		if len(terms) > 0 && len(matchedTerms) == 0 {
+			continue
+		}
 		if score <= 0 {
 			continue
 		}
 		score += 12
-		snippet, startLine, endLine := aiSnippet(content, terms, aiIntentIsAPIIntegration(intent) || aiPathLooksCode(candidate.FilePath))
+		snippet, startLine, endLine := aiSnippet(content, terms, aiIntentIsAPIIntegration(intent))
 		if strings.TrimSpace(snippet) == "" {
 			continue
 		}
@@ -5923,7 +5898,7 @@ func (s *Server) searchRepoSmartLatestEvidence(ctx context.Context, repo Reposit
 				Score:       score,
 			},
 			Content:      snippet,
-			MatchedTerms: mergeTerms(candidate.PathTerms, contentTerms),
+			MatchedTerms: matchedTerms,
 			Score:        score,
 		})
 	}
@@ -5951,7 +5926,7 @@ func (s *Server) searchRepoRefEvidence(ctx context.Context, repo Repository, tar
 		if indexCfg.MaxFileSize > 0 && entry.Size > indexCfg.MaxFileSize {
 			continue
 		}
-		score, matched := aiPathScore(entry.Path, terms, intent)
+		score, matched := aiPathScore(entry.Path, terms)
 		if matchLines := contentPathScores[entry.Path]; matchLines > 0 {
 			score += min(matchLines, 10) * 4
 		}
@@ -5971,14 +5946,16 @@ func (s *Server) searchRepoRefEvidence(ctx context.Context, repo Repository, tar
 			continue
 		}
 		content := string(data)
-		contentScore, contentTerms := aiContentScore(content, terms, intent)
+		contentScore, contentTerms := aiContentScore(content, terms)
 		score := candidate.PreScore + contentScore
-		score = aiAdjustEvidenceScore(candidate.Entry.Path, score, intent)
+		matchedTerms := mergeTerms(candidate.Terms, contentTerms)
+		if len(terms) > 0 && len(matchedTerms) == 0 {
+			continue
+		}
 		if score <= 0 {
 			continue
 		}
-		matchedTerms := mergeTerms(candidate.Terms, contentTerms)
-		snippet, startLine, endLine := aiSnippet(content, terms, aiIntentIsAPIIntegration(intent) || aiPathLooksCode(candidate.Entry.Path))
+		snippet, startLine, endLine := aiSnippet(content, terms, aiIntentIsAPIIntegration(intent))
 		if strings.TrimSpace(snippet) == "" {
 			continue
 		}
@@ -6037,7 +6014,7 @@ func filterAIRepos(repos []Repository, scope AIQuestionScope) []Repository {
 	return out
 }
 
-func aiPathScore(filePath string, terms []string, intent string) (float64, []string) {
+func aiPathScore(filePath string, terms []string) (float64, []string) {
 	lower := strings.ToLower(filePath)
 	score := 0.0
 	matched := []string{}
@@ -6050,52 +6027,10 @@ func aiPathScore(filePath string, terms []string, intent string) (float64, []str
 			matched = append(matched, term)
 		}
 	}
-	boost := aiCodePathBoost(lower, intent)
-	score += boost
 	return score, matched
 }
 
-func aiCodePathBoost(filePath, intent string) float64 {
-	boost := 0.0
-	keywords := []string{"router", "route", "controller", "handler", "proto", "openapi", "swagger", "api", "client", "dto", "request", "response", "service", "usecase", "error", "errors", "readme", "agents.md", "claude.md"}
-	for _, keyword := range keywords {
-		if strings.Contains(filePath, keyword) {
-			boost += 2.5
-		}
-	}
-	if strings.HasSuffix(filePath, ".proto") || strings.HasSuffix(filePath, ".go") || strings.HasSuffix(filePath, ".ts") || strings.HasSuffix(filePath, ".js") {
-		boost += 1
-	}
-	if aiIntentIsAPIIntegration(intent) {
-		boost *= 1.7
-	}
-	if aiIntentIsCodePathExplanation(intent) {
-		for _, keyword := range []string{"handler", "controller", "service", "usecase", "core/", "proto", "request", "response", "model", "models/", "db/", "dao", "repository", "mysql"} {
-			if strings.Contains(filePath, keyword) {
-				boost += 4
-			}
-		}
-		if strings.HasSuffix(filePath, ".proto") {
-			boost += 4
-		}
-	}
-	if aiIntentIsDatabaseDirectUpdate(intent) {
-		for _, keyword := range []string{"model", "models/", "schema", "migration", "migrations", "version/mysql", "sql", "mysql", "db/", "dao", "repository", "gorm"} {
-			if strings.Contains(filePath, keyword) {
-				boost += 5
-			}
-		}
-		if strings.HasSuffix(filePath, ".sql") {
-			boost += 8
-		}
-	}
-	if aiIntentIsTestLookup(intent) && aiPathLooksTest(filePath) {
-		boost += 8
-	}
-	return boost
-}
-
-func aiContentScore(content string, terms []string, intent string) (float64, []string) {
+func aiContentScore(content string, terms []string) (float64, []string) {
 	lower := strings.ToLower(content)
 	score := 0.0
 	matched := []string{}
@@ -6110,38 +6045,7 @@ func aiContentScore(content string, terms []string, intent string) (float64, []s
 			matched = append(matched, term)
 		}
 	}
-	if aiIntentIsAPIIntegration(intent) {
-		for _, pattern := range []string{"router.", ".get(", ".post(", ".put(", ".delete(", "handlefunc(", "group(", "rpc ", "service ", "shouldbind", "ctx.request", "requestbody", "openapi"} {
-			if strings.Contains(lower, pattern) {
-				score += 4
-			}
-		}
-	}
-	if aiIntentIsCodePathExplanation(intent) {
-		for _, pattern := range []string{"func ", "type ", "rpc ", "service ", "handler", ".update(", ".updates(", ".save(", ".create(", "model(&", ".where(", "where(", "sync", "index", "cache", "event"} {
-			if strings.Contains(lower, pattern) {
-				score += 4
-			}
-		}
-	}
-	if aiIntentIsDatabaseDirectUpdate(intent) {
-		for _, pattern := range []string{"create table", "alter table", "tablename()", "table_name", "column:", "gorm:", "model(&", ".where(", "where(", " update ", " set ", " select ", " from "} {
-			if strings.Contains(lower, pattern) {
-				score += 5
-			}
-		}
-	}
 	return score, matched
-}
-
-func aiAdjustEvidenceScore(filePath string, score float64, intent string) float64 {
-	if aiPathLooksTest(filePath) && !aiIntentIsTestLookup(intent) {
-		if aiIntentIsDatabaseDirectUpdate(intent) {
-			return score * 0.15
-		}
-		return score * 0.35
-	}
-	return score
 }
 
 func aiShouldSkipPath(filePath string, cfg AIIndexConfig) bool {
@@ -6155,29 +6059,6 @@ func aiShouldSkipPath(filePath string, cfg AIIndexConfig) bool {
 		return true
 	}
 	return false
-}
-
-func aiPathLooksCode(filePath string) bool {
-	switch extension(filePath) {
-	case ".go", ".ts", ".tsx", ".js", ".jsx", ".vue", ".java", ".kt", ".py", ".rb", ".php", ".cs", ".rs", ".proto", ".graphql":
-		return true
-	default:
-		return false
-	}
-}
-
-func aiPathLooksTest(filePath string) bool {
-	lower := strings.ToLower(normalizeRepoPath(filePath))
-	return strings.HasSuffix(lower, "_test.go") ||
-		strings.HasSuffix(lower, ".test.ts") ||
-		strings.HasSuffix(lower, ".test.tsx") ||
-		strings.HasSuffix(lower, ".spec.ts") ||
-		strings.HasSuffix(lower, ".spec.tsx") ||
-		strings.Contains(lower, "/test/") ||
-		strings.Contains(lower, "/tests/") ||
-		strings.Contains(lower, "/testdata/") ||
-		strings.Contains(lower, "/fixtures/") ||
-		strings.Contains(lower, "/__tests__/")
 }
 
 func aiLooksText(data []byte) bool {
@@ -6474,7 +6355,7 @@ func classifyAIIntent(question string) string {
 	q := strings.ToLower(question)
 	switch {
 	case aiQuestionAsksDatabaseChange(q):
-		return "database_change"
+		return "code_path"
 	case strings.Contains(q, "单测") || strings.Contains(q, "测试用例") || strings.Contains(q, "unit test") || strings.Contains(q, "fixture"):
 		return "test_lookup"
 	case strings.Contains(q, "接口") || strings.Contains(q, "参数") || strings.Contains(q, "返回") || strings.Contains(q, "api") || strings.Contains(q, "rpc") || strings.Contains(q, "route"):
@@ -6494,12 +6375,14 @@ func aiQuestionAsksDatabaseChange(q string) bool {
 	hasDatabaseContext := strings.Contains(q, "数据库") || strings.Contains(q, "数据表") || strings.Contains(q, "表名") ||
 		strings.Contains(q, "表结构") || strings.Contains(q, "表字段") || strings.Contains(q, "表里") ||
 		strings.Contains(q, "表中") || strings.Contains(q, "哪张表") || strings.Contains(q, " 表") ||
+		strings.Contains(q, "测试数据") || strings.Contains(q, "数据直改") || strings.Contains(q, "直改数据") ||
+		strings.Contains(q, "直接改数据") || strings.Contains(q, "改库") ||
 		strings.Contains(q, "字段") || strings.Contains(q, "sql") || strings.Contains(q, "mysql") ||
 		strings.Contains(q, "database") || strings.Contains(q, "db")
 	hasChangeAction := strings.Contains(q, "修改") || strings.Contains(q, "直接改") || strings.Contains(q, "直接修改") ||
 		strings.Contains(q, "更新") || strings.Contains(q, "改成") || strings.Contains(q, "写入") ||
 		strings.Contains(q, "update")
-	return hasChangeAction && (hasDatabaseContext || aiQuestionAsksDataValueChange(q))
+	return hasChangeAction && hasDatabaseContext
 }
 
 func aiQuestionAsksDataValueChange(q string) bool {

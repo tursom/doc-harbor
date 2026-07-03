@@ -181,6 +181,15 @@ func buildAIAnswerPolicy(frame aiTaskFrame, contract aiEvidenceContract, coverag
 		policy.AnswerMode = aiAnswerModeDeterministicAllowed
 		policy.RequiredCovered = true
 	}
+	if intent == aiTaskIntentDatabaseDirectUpdateForTest && !aiAnswerFrameHasExplicitDatabaseRequest(frame) {
+		policy.AnswerMode = aiAnswerModeRequiredGaps
+		policy.DeterministicAnswerAllowed = false
+		policy.DeterministicOperationStepsAllowed = false
+		policy.RequiredCovered = false
+		policy.MustListConfirmedFactsAndGapsOnly = true
+		policy.RequiredGaps = uniqueStrings(append(policy.RequiredGaps, "explicit_database_request"))
+		policy.Constraints = append(policy.Constraints, "数据库直改需要 planner 结构化确认 explicit_database_request=true；否则只能回答代码链路、已确认事实和缺口，不能给确定 SQL")
+	}
 	if len(policy.RecommendedGaps) > 0 {
 		policy.MustExplainRiskOrCompensationGaps = true
 		policy.Constraints = append(policy.Constraints, "recommended missing/partial 时可以回答，但必须在风险或补偿缺口中说明")
@@ -192,6 +201,15 @@ func buildAIAnswerPolicy(frame aiTaskFrame, contract aiEvidenceContract, coverag
 			"不能声称已经执行 SQL 或已经修改数据",
 			"表名、字段名和 WHERE 条件都必须有引用",
 		)
+		if frame.AmbiguousValueChange {
+			policy.Constraints = append(policy.Constraints,
+				"模糊业务值修改即使被判定为数据库直改，也必须先说明运行时值来源、来源优先级、主写入点和派生/汇总字段关系",
+				"不得仅凭 ORM 字段、migration 或字段注释把某个表字段当成唯一修改来源",
+			)
+			policy.CitationRequirements = append(policy.CitationRequirements,
+				"推荐 UPDATE 的表字段必须引用主写入点或来源优先级证据，不能只引用 schema/comment 证据",
+			)
+		}
 		if policy.DeterministicOperationStepsAllowed {
 			policy.Constraints = append(policy.Constraints, "required 全 covered 时可以给 SELECT/UPDATE 占位符示例")
 		} else {
@@ -203,9 +221,10 @@ func buildAIAnswerPolicy(frame aiTaskFrame, contract aiEvidenceContract, coverag
 			"每个请求字段都必须引用 request struct、binding tag、proto message 或 schema 证据",
 			"每个响应字段都必须引用 response struct、proto message、schema 或 handler return 证据",
 		)
-	case aiTaskIntentCodePathExplanation:
+	case aiTaskIntentCodePathExplanation, aiTaskIntentBusinessValueChange:
 		policy.Constraints = append(policy.Constraints,
 			"代码路径类问题应优先回答入口、调用链、写入点和同步副作用",
+			"业务值修改类问题必须先说明运行时值来源、来源优先级、主写入点和派生/汇总字段关系",
 			"除非用户明确要求 SQL 或数据库直改，否则不得把直接 UPDATE 数据库作为确定修改方案",
 			"如果同时存在主表兜底字段和业务写入链路，必须区分兜底/展示/实际业务值",
 		)
@@ -292,8 +311,8 @@ func buildAIAnswerComposerMessages(question string, frame aiTaskFrame, contract 
 		for i, evidence := range retrieval.Evidence {
 			c := evidence.Citation
 			scopeLabel := aiAnswerEvidenceScopeLabel(c.SourceScope)
-			fmt.Fprintf(&user, "[C%d] repo=%s repo_id=%d scope=%s label=%s branch=%s commit=%s file=%s lines=%d-%d evidence_type=%s reliability=%s contract_keys=%s\n%s\n\n",
-				i+1, evidence.Repo.Name, c.RepoID, c.SourceScope, scopeLabel, c.Branch, shortSHA(c.CommitSHA), c.FilePath, c.LineStart, c.LineEnd, evidence.EvidenceType, evidence.SourceReliability, strings.Join(evidence.ContractKeys, "、"), evidence.Content)
+			fmt.Fprintf(&user, "[C%d] repo=%s repo_id=%d scope=%s label=%s branch=%s commit=%s file=%s lines=%d-%d evidence_type=%s reliability=%s contract_keys=%s contract_status=%s\n%s\n\n",
+				i+1, evidence.Repo.Name, c.RepoID, c.SourceScope, scopeLabel, c.Branch, shortSHA(c.CommitSHA), c.FilePath, c.LineStart, c.LineEnd, evidence.EvidenceType, evidence.SourceReliability, strings.Join(evidence.ContractKeys, "、"), encodeJSON(evidence.ContractKeyStatus), evidence.Content)
 		}
 	}
 	system := buildAIAnswerComposerSystemPrompt(policy)
@@ -324,6 +343,12 @@ func buildAIAnswerComposerSystemPrompt(policy aiAnswerPolicy) string {
 	}
 	if policy.Intent == aiTaskIntentDatabaseDirectUpdateForTest {
 		b.WriteString("数据库直改约束：SQL 必须使用占位符；不要生成真实生产值；不要声称已经执行；表、字段、WHERE 条件必须有引用。")
+		for _, constraint := range policy.Constraints {
+			if strings.Contains(constraint, "模糊业务值修改") {
+				b.WriteString("模糊业务值修改约束：必须先说明运行时值来源、来源优先级、主写入点和派生/汇总字段关系；不得仅凭 ORM 字段、migration 或字段注释把某个表字段当成唯一修改来源。\n")
+				break
+			}
+		}
 		if policy.DeterministicOperationStepsAllowed {
 			b.WriteString("如果 required 全 covered，可以给 SELECT/UPDATE 占位符示例；不要仅因为证据里没有现成 UPDATE 语句就写“未确认”。\n")
 		} else {
@@ -333,7 +358,7 @@ func buildAIAnswerComposerSystemPrompt(policy aiAnswerPolicy) string {
 	if policy.Intent == aiTaskIntentAPIIntegration {
 		b.WriteString("接口接入约束：每个接口路径、请求字段、响应字段都必须有引用；缺引用时写未确认，不能补齐或猜字段。\n")
 	}
-	if policy.Intent == aiTaskIntentCodePathExplanation {
+	if policy.Intent == aiTaskIntentCodePathExplanation || policy.Intent == aiTaskIntentBusinessValueChange {
 		b.WriteString("代码路径约束：优先说明入口、调用链、写入点、持久化对象和同步副作用；除非用户明确要求 SQL 或数据库直改，不得把直接 UPDATE 数据库作为确定修改方案。若只找到表字段但缺少写入链路，必须写为证据缺口。\n")
 	}
 	return b.String()

@@ -34,17 +34,18 @@ type aiEvidenceCurationResult struct {
 }
 
 type aiEvidenceAnnotation struct {
-	EvidenceID        int64    `json:"evidence_id"`
-	RepoID            int64    `json:"repo_id,omitempty"`
-	RepoName          string   `json:"repo_name,omitempty"`
-	FilePath          string   `json:"file_path,omitempty"`
-	SourceScope       string   `json:"source_scope,omitempty"`
-	Branch            string   `json:"branch,omitempty"`
-	EvidenceType      string   `json:"evidence_type,omitempty"`
-	SourceReliability string   `json:"source_reliability,omitempty"`
-	ContractKeys      []string `json:"contract_keys,omitempty"`
-	ExcludedReason    string   `json:"excluded_reason,omitempty"`
-	GroupKey          string   `json:"group_key,omitempty"`
+	EvidenceID        int64             `json:"evidence_id"`
+	RepoID            int64             `json:"repo_id,omitempty"`
+	RepoName          string            `json:"repo_name,omitempty"`
+	FilePath          string            `json:"file_path,omitempty"`
+	SourceScope       string            `json:"source_scope,omitempty"`
+	Branch            string            `json:"branch,omitempty"`
+	EvidenceType      string            `json:"evidence_type,omitempty"`
+	SourceReliability string            `json:"source_reliability,omitempty"`
+	ContractKeys      []string          `json:"contract_keys,omitempty"`
+	ContractKeyStatus map[string]string `json:"contract_key_status,omitempty"`
+	ExcludedReason    string            `json:"excluded_reason,omitempty"`
+	GroupKey          string            `json:"group_key,omitempty"`
 }
 
 func curateAIEvidence(frame *aiTaskFrame, contract *aiEvidenceContract, rawEvidence []aiEvidence) aiEvidenceCurationResult {
@@ -65,7 +66,7 @@ func curateAIEvidence(frame *aiTaskFrame, contract *aiEvidenceContract, rawEvide
 		effectiveContract = buildAIEvidenceContract(effectiveFrame)
 	}
 
-	testFocused := aiTaskFrameLooksTestFocused(effectiveFrame)
+	testFocused := false
 	result := aiEvidenceCurationResult{
 		Evidence:         []aiEvidence{},
 		ExcludedEvidence: []aiEvidence{},
@@ -87,8 +88,9 @@ func curateAIEvidence(frame *aiTaskFrame, contract *aiEvidenceContract, rawEvide
 		if item.EvidenceType == "test_fixture" && !testFocused {
 			item.ExcludedReason = aiEvidenceExcludedReasonTestFixtureNonTestTask
 			item.ContractKeys = nil
+			item.ContractKeyStatus = nil
 		} else {
-			item.ContractKeys = aiEvidenceContractKeys(item, effectiveContract, testFocused)
+			item.ContractKeys = uniqueStrings(append(aiEvidenceContractKeys(item, effectiveContract, testFocused), aiEvidenceAssessedContractKeys(item, effectiveContract)...))
 		}
 
 		annotation := aiEvidenceAnnotation{
@@ -101,6 +103,7 @@ func curateAIEvidence(frame *aiTaskFrame, contract *aiEvidenceContract, rawEvide
 			EvidenceType:      item.EvidenceType,
 			SourceReliability: item.SourceReliability,
 			ContractKeys:      append([]string(nil), item.ContractKeys...),
+			ContractKeyStatus: aiCopyStringMap(item.ContractKeyStatus),
 			ExcludedReason:    item.ExcludedReason,
 			GroupKey:          item.GroupKey,
 		}
@@ -169,6 +172,9 @@ func curateAIEvidence(frame *aiTaskFrame, contract *aiEvidenceContract, rawEvide
 	})
 
 	result.Bundle.Coverage = buildAIEvidenceCuratorCoverage(effectiveContract, result.Bundle.Groups)
+	for key, status := range aiEvidenceContractStatusOverrides(result.Evidence, effectiveContract) {
+		result.Bundle.Coverage[key] = status
+	}
 	result.Coverage = buildAIEvidenceCuratorCoverageReport(effectiveContract, result.Bundle.Coverage, result.Bundle.Excluded)
 	return result
 }
@@ -176,12 +182,7 @@ func curateAIEvidence(frame *aiTaskFrame, contract *aiEvidenceContract, rawEvide
 func classifyAIEvidenceType(evidence aiEvidence) string {
 	filePath := strings.ToLower(normalizeRepoPath(evidence.Citation.FilePath))
 	content := strings.ToLower(evidence.Content)
-	ext := extension(filePath)
-
-	if aiPathLooksTest(filePath) || strings.Contains(filePath, "/mocks/") || strings.Contains(filePath, "/mock/") {
-		return "test_fixture"
-	}
-	if ext == ".proto" || strings.Contains(content, "service ") && strings.Contains(content, " rpc ") ||
+	if strings.Contains(content, "service ") && strings.Contains(content, " rpc ") ||
 		strings.Contains(content, "\nrpc ") || strings.Contains(content, "\nmessage ") {
 		return "proto"
 	}
@@ -205,12 +206,6 @@ func classifyAIEvidenceType(evidence aiEvidence) string {
 	}
 	if aiContentLooksRequestResponseType(filePath, content) {
 		return "request_response_type"
-	}
-	if aiPathLooksDocument(filePath) {
-		return "doc"
-	}
-	if aiPathLooksCode(filePath) {
-		return "code"
 	}
 	return "doc"
 }
@@ -296,14 +291,6 @@ func aiContentLooksRequestResponseType(filePath, content string) bool {
 		strings.Contains(content, "form:\"")
 }
 
-func aiPathLooksDocument(filePath string) bool {
-	ext := extension(filePath)
-	return ext == ".md" || ext == ".markdown" || ext == ".mdx" ||
-		strings.HasSuffix(filePath, "readme") ||
-		strings.HasSuffix(filePath, "agents.md") ||
-		strings.HasSuffix(filePath, "claude.md")
-}
-
 func classifyAIEvidenceReliability(evidence aiEvidence, testFocused bool) string {
 	if evidence.EvidenceType == "test_fixture" {
 		if testFocused {
@@ -321,40 +308,6 @@ func classifyAIEvidenceReliability(evidence aiEvidence, testFocused bool) string
 	default:
 		return aiEvidenceReliabilityMedium
 	}
-}
-
-func aiTaskFrameLooksTestFocused(frame aiTaskFrame) bool {
-	if normalizeAITaskIntent(frame.Intent) == aiTaskIntentDatabaseDirectUpdateForTest {
-		return false
-	}
-	values := []string{frame.Intent, frame.UserGoal, frame.AnswerShape, frame.ScopeStrategy}
-	values = append(values, frame.TargetArtifacts...)
-	values = append(values, frame.KnownTerms...)
-	values = append(values, frame.GeneratedTerms...)
-	for _, value := range values {
-		if aiTextLooksTestFocused(value) {
-			return true
-		}
-	}
-	return false
-}
-
-func aiTextLooksTestFocused(value string) bool {
-	lower := strings.ToLower(value)
-	for _, marker := range []string{"单测", "测试", "测试用例", "测试文件"} {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	for _, token := range strings.FieldsFunc(lower, func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	}) {
-		switch token {
-		case "test", "tests", "testing", "unittest", "unittests", "fixture", "fixtures", "mock", "mocks":
-			return true
-		}
-	}
-	return false
 }
 
 func aiEvidenceGroupKey(evidence aiEvidence) string {
@@ -405,6 +358,9 @@ func aiEvidenceContractKeys(evidence aiEvidence, contract aiEvidenceContract, te
 
 func aiEvidenceMatchesRequirement(evidence aiEvidence, requirement aiEvidenceRequirement, testFocused bool) bool {
 	key := strings.ToLower(strings.TrimSpace(requirement.Key))
+	if aiContractKeyRequiresModelAssessment(key) {
+		return false
+	}
 	switch key {
 	case "cited_documents", "cited_evidence", "current_fact", "target_artifacts":
 		return aiEvidenceTypeIsUsableFact(evidence.EvidenceType, testFocused)
@@ -428,17 +384,11 @@ func aiEvidenceMatchesRequirement(evidence aiEvidence, requirement aiEvidenceReq
 		return evidence.EvidenceType == "read_path" || evidence.EvidenceType == "migration_sql"
 	case "read_path", "verification_method":
 		return evidence.EvidenceType == "read_path" || evidence.EvidenceType == "handler" || evidence.EvidenceType == "test_fixture" && testFocused
-	case "write_path":
-		return evidence.EvidenceType == "write_path" || evidence.EvidenceType == "handler" ||
-			evidence.EvidenceType == "read_path" && aiEvidenceLooksLikeWritePathEvidence(evidence) ||
-			evidence.EvidenceType == "test_fixture" && testFocused
-	case "persistence_target":
-		return evidence.EvidenceType == "orm_model" || evidence.EvidenceType == "migration_sql" || evidence.EvidenceType == "write_path" || evidence.EvidenceType == "read_path"
 	case "route_or_rpc":
 		return evidence.EvidenceType == "route" || evidence.EvidenceType == "proto" || evidence.EvidenceType == "handler"
 	case "request_fields", "response_fields":
 		return evidence.EvidenceType == "request_response_type" || evidence.EvidenceType == "proto" || evidence.EvidenceType == "handler" || evidence.EvidenceType == "route"
-	case "service_candidate", "error_codes", "auth_policy", "compatibility_notes", "compensation_path", "risk_points", "side_effects", "rollback_plan", "scope_limit":
+	case "service_candidate", "error_codes", "auth_policy", "compatibility_notes", "compensation_path", "risk_points", "rollback_plan", "scope_limit":
 		return aiEvidenceTypeIsUsableFact(evidence.EvidenceType, testFocused)
 	}
 	for _, accepted := range requirement.AcceptedEvidenceTypes {
@@ -447,6 +397,61 @@ func aiEvidenceMatchesRequirement(evidence aiEvidence, requirement aiEvidenceReq
 		}
 	}
 	return false
+}
+
+func aiEvidenceAssessedContractKeys(evidence aiEvidence, contract aiEvidenceContract) []string {
+	if len(evidence.ContractKeyStatus) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(evidence.ContractKeyStatus))
+	for key, status := range evidence.ContractKeyStatus {
+		key = strings.TrimSpace(key)
+		if key == "" || !aiContractKeyRequiresModelAssessment(key) || !aiEvidenceContractHasKey(contract, key) {
+			continue
+		}
+		switch normalizeAIContractCoverageStatus(status) {
+		case aiEvidenceCoverageCovered, aiEvidenceCoveragePartial, aiEvidenceCoverageConflict:
+			keys = append(keys, key)
+		}
+	}
+	return uniqueStrings(keys)
+}
+
+func aiEvidenceContractStatusOverrides(evidence []aiEvidence, contract aiEvidenceContract) map[string]string {
+	statusByKey := map[string]string{}
+	for _, item := range evidence {
+		for key, status := range item.ContractKeyStatus {
+			key = strings.TrimSpace(key)
+			status = normalizeAIContractCoverageStatus(status)
+			if key == "" || status == "" || !aiContractKeyRequiresModelAssessment(key) || !aiEvidenceContractHasKey(contract, key) {
+				continue
+			}
+			statusByKey[key] = mergeAIEvidenceContractStatus(statusByKey[key], status)
+		}
+	}
+	return statusByKey
+}
+
+func mergeAIEvidenceContractStatus(existing, next string) string {
+	if next == "" {
+		return existing
+	}
+	switch existing {
+	case aiEvidenceCoverageConflict:
+		return existing
+	case aiEvidenceCoverageCovered:
+		if next == aiEvidenceCoverageConflict {
+			return next
+		}
+		return existing
+	case aiEvidenceCoveragePartial:
+		if next == aiEvidenceCoverageConflict || next == aiEvidenceCoverageCovered {
+			return next
+		}
+		return existing
+	default:
+		return next
+	}
 }
 
 func aiEvidenceLooksLikeFieldUnitEvidence(evidence aiEvidence) bool {
@@ -481,12 +486,6 @@ func aiEvidenceLooksLikeFieldUnitEvidence(evidence aiEvidence) bool {
 		}
 	}
 	return false
-}
-
-func aiEvidenceLooksLikeWritePathEvidence(evidence aiEvidence) bool {
-	content := strings.ToLower(evidence.Content)
-	filePath := strings.ToLower(normalizeRepoPath(evidence.Citation.FilePath))
-	return aiContentLooksWritePath(filePath, content)
 }
 
 func aiEvidenceTypeAccepted(evidence aiEvidence, accepted string, testFocused bool) bool {
@@ -718,6 +717,23 @@ func uniqueStrings(values []string) []string {
 		}
 		seen[value] = struct{}{}
 		out = append(out, value)
+	}
+	return out
+}
+
+func aiCopyStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		if key == "" || value == "" {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

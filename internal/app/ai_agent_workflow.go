@@ -50,6 +50,10 @@ func newAIAgentWorkflowPolicy(version string) aiAgentWorkflowPolicy {
 		},
 		SSECompatibilityEvents: []string{
 			"run_started",
+			"tool_registry",
+			"planner_step",
+			"tool_result",
+			"planner_decision",
 			"task_frame",
 			"contract",
 			"retrieval_round",
@@ -70,6 +74,7 @@ func newAIAgentWorkflowPolicy(version string) aiAgentWorkflowPolicy {
 			"no_provider_secret_exposure",
 		},
 		FailurePolicy: map[string]aiAgentWorkflowFailurePolicy{
+			"planner":          {Record: "diagnostics", Fallback: "conservative_read_only_retrieval"},
 			"task_frame":       {Record: "step_error", Fallback: "legacy_intent_and_retrieval"},
 			"contract_builder": {Record: "step_error", Fallback: "legacy_answer"},
 			"evidence_curator": {Record: "diagnostics", Fallback: "legacy_answer"},
@@ -111,6 +116,8 @@ func buildAIAgentRunCheckpoint(scope AIQuestionScope, taskClass string, prepared
 		"answer_policy":          prepared.AnswerPolicy,
 		"answer_composer":        prepared.AnswerComposer,
 		"generated_terms":        prepared.GeneratedSearchTerms,
+		"tool_registry":          aiPlannerToolRegistry(),
+		"safety_policy":          aiPlannerSafetyPolicy(),
 		"protected_main_path":    policy.ProtectedMainPath,
 		"sse_compatibility":      policy.SSECompatibilityEvents,
 		"safety_boundaries":      policy.SafetyBoundaries,

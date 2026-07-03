@@ -32,10 +32,13 @@ var (
 )
 
 type aiAnswerVerificationContext struct {
-	EvidenceCount    int
-	RetrievalRound   int
-	ServiceNames     []string
-	RewriteAttempted bool
+	EvidenceCount             int
+	RetrievalRound            int
+	ServiceNames              []string
+	EvidenceContractKeys      map[int][]string
+	EvidenceContractKeyStatus map[int]map[string]string
+	EvidenceTypes             map[int]string
+	RewriteAttempted          bool
 }
 
 type aiAnswerVerificationOutcome struct {
@@ -134,6 +137,11 @@ func verifyAIAnswerWithContext(frame aiTaskFrame, contract aiEvidenceContract, c
 	} else {
 		pass("required_gap_policy")
 	}
+	if coverage.Status == aiEvidenceCoverageConflict && !aiAnswerAcknowledgesEvidenceConflict(answerLower) {
+		fail("coverage_conflict_unacknowledged", "conflicting evidence is present but the answer does not identify the conflict or uncertainty")
+	} else {
+		pass("coverage_conflict_policy")
+	}
 
 	sqlStatements := extractAIAnswerSQLStatements(answer)
 	if len(sqlStatements) > 0 {
@@ -141,8 +149,14 @@ func verifyAIAnswerWithContext(frame aiTaskFrame, contract aiEvidenceContract, c
 			if aiAnswerSQLNeedsPlaceholderPattern.MatchString(statement) && !aiAnswerSQLPlaceholderPattern.MatchString(statement) {
 				fail("sql_missing_placeholder", "SQL examples must use placeholders instead of concrete values")
 			}
+			if aiAnswerSQLStatementMutatesData(statement) && !aiAnswerFrameHasExplicitDatabaseRequest(frame) {
+				fail("sql_without_explicit_database_request", "database-direct SQL requires an explicit user request for database/SQL/test-data direct update")
+			}
 			if intent == aiTaskIntentDatabaseDirectUpdateForTest && !aiAnswerSQLContextHasCitation(answer, statement) {
 				fail("sql_missing_citation", "SQL table, fields, and WHERE conditions must be tied to citations")
+			}
+			if aiAnswerVerificationNeedsValueFlowSQLSupport(frame, contract) && !aiAnswerSQLContextHasValueFlowCitation(answer, statement, verifyContext) {
+				fail("sql_value_flow_source_unsupported", "SQL update target must be cited from value-flow, source-precedence, or primary-write-path evidence")
 			}
 		}
 		if !hasFailedCheck(failed, "sql_missing_placeholder") {
@@ -151,15 +165,21 @@ func verifyAIAnswerWithContext(frame aiTaskFrame, contract aiEvidenceContract, c
 		if intent == aiTaskIntentDatabaseDirectUpdateForTest && !hasFailedCheck(failed, "sql_missing_citation") {
 			pass("sql_citations")
 		}
+		if !hasFailedCheck(failed, "sql_without_explicit_database_request") {
+			pass("sql_explicit_user_request")
+		}
+		if !aiAnswerVerificationNeedsValueFlowSQLSupport(frame, contract) || !hasFailedCheck(failed, "sql_value_flow_source_unsupported") {
+			pass("sql_value_flow_citations")
+		}
 	}
-	if intent == aiTaskIntentCodePathExplanation && aiAnswerSuggestsDirectDatabaseUpdate(answerLower, sqlStatements) {
+	if (intent == aiTaskIntentCodePathExplanation || intent == aiTaskIntentBusinessValueChange) && aiAnswerSuggestsDirectDatabaseUpdate(answerLower, sqlStatements) {
 		fail("code_path_direct_sql", "code-path answers must not recommend direct database UPDATE unless the user explicitly asked for database direct update")
 	} else {
 		pass("code_path_no_direct_sql")
 	}
 
-	if !aiTaskFrameLooksTestFocused(frame) && aiAnswerUsesTestFixtureAsRuntimeFact(answer, bundle) {
-		fail("test_fixture_pollution", "non-test answer uses _test.go or fixture evidence as business fact")
+	if aiAnswerUsesTestFixtureAsRuntimeFact(answer, bundle) {
+		fail("test_fixture_pollution", "answer uses excluded test-fixture evidence as runtime fact")
 	} else {
 		pass("no_test_fixture_pollution")
 	}
@@ -235,9 +255,12 @@ func finalizeAIAnswerVerificationReport(report *aiAnswerVerificationReport, fail
 func (s *Server) verifyAndMaybeRewriteAIAnswer(ctx context.Context, cfg AIConfigVersion, question string, retrieval aiRetrievalResult, result aiModelResult, start time.Time) aiAnswerVerificationOutcome {
 	frame, contract, coverage, bundle := aiAnswerVerifierInputs(retrieval)
 	verifyContext := aiAnswerVerificationContext{
-		EvidenceCount:  len(retrieval.Evidence),
-		RetrievalRound: len(retrieval.Rounds),
-		ServiceNames:   aiVerificationServiceNames(retrieval.ServiceCandidates),
+		EvidenceCount:             len(retrieval.Evidence),
+		RetrievalRound:            len(retrieval.Rounds),
+		ServiceNames:              aiVerificationServiceNames(retrieval.ServiceCandidates),
+		EvidenceContractKeys:      aiVerificationDisplayedEvidenceContractKeys(retrieval.Evidence),
+		EvidenceContractKeyStatus: aiVerificationDisplayedEvidenceContractKeyStatus(retrieval.Evidence),
+		EvidenceTypes:             aiVerificationDisplayedEvidenceTypes(retrieval.Evidence),
 	}
 	report := verifyAIAnswerWithContext(frame, contract, coverage, bundle, result.Content, verifyContext)
 	finalResult := result
@@ -308,7 +331,7 @@ func buildAIAnswerRewriteMessages(question string, retrieval aiRetrievalResult, 
 	} else {
 		rewriteInstruction.WriteString("- SQL 示例必须使用占位符，字段、表和 WHERE 条件必须带 [C#] 引用。\n")
 	}
-	rewriteInstruction.WriteString("- 非测试问题不得把 _test.go 或 fixture 当业务事实。\n")
+	rewriteInstruction.WriteString("- 不得把已排除的 test-fixture evidence 当运行时业务事实。\n")
 	rewriteInstruction.WriteString("- 功能分支来源必须标注“功能分支候选”。\n")
 	rewriteInstruction.WriteString("- 不要输出 provider 错误、API key、token 或内部配置。\n")
 	if len(messages) == 0 {
@@ -433,6 +456,14 @@ func aiAnswerLineLooksLikeSQLStatement(line string) bool {
 	}
 }
 
+func aiAnswerSQLStatementMutatesData(statement string) bool {
+	lower := strings.ToLower(strings.TrimSpace(statement))
+	lower = strings.TrimLeft(lower, "-* \t>0123456789.)`")
+	return strings.HasPrefix(lower, "update ") ||
+		strings.HasPrefix(lower, "insert into ") ||
+		strings.HasPrefix(lower, "delete from ")
+}
+
 func extractAIFencedBlocks(answer string) []string {
 	blocks := []string{}
 	inBlock := false
@@ -464,13 +495,106 @@ func aiAnswerSQLContextHasCitation(answer, statement string) bool {
 	if aiAnswerCitationPattern.MatchString(statement) {
 		return true
 	}
+	return len(aiAnswerCitationRefsNear(answer, statement)) > 0
+}
+
+func aiAnswerCitationRefsNear(answer, statement string) []int {
 	index := strings.Index(answer, statement)
 	if index < 0 {
-		return len(extractAIAnswerCitationRefs(answer)) > 0
+		return extractAIAnswerCitationRefs(answer)
 	}
 	start := max(0, index-400)
 	end := min(len(answer), index+len(statement)+400)
-	return aiAnswerCitationPattern.MatchString(answer[start:end])
+	return extractAIAnswerCitationRefs(answer[start:end])
+}
+
+func aiAnswerVerificationNeedsValueFlowSQLSupport(frame aiTaskFrame, contract aiEvidenceContract) bool {
+	if frame.AmbiguousValueChange {
+		return true
+	}
+	for _, requirement := range contract.Required {
+		switch requirement.Key {
+		case "value_sources", "source_precedence", "primary_write_path", "derived_value_handling":
+			return true
+		}
+	}
+	return false
+}
+
+func aiAnswerFrameHasExplicitDatabaseRequest(frame aiTaskFrame) bool {
+	if frame.ExplicitDBRequest {
+		return true
+	}
+	// Legacy unit tests and replay fixtures constructed database-direct frames
+	// before the explicit flag existed. Production planner frames always set an
+	// intent_source, so this does not open the model-driven path.
+	return normalizeAITaskIntent(frame.Intent) == aiTaskIntentDatabaseDirectUpdateForTest && strings.TrimSpace(frame.IntentSource) == ""
+}
+
+func aiAnswerSQLContextHasValueFlowCitation(answer, statement string, verifyContext aiAnswerVerificationContext) bool {
+	if len(verifyContext.EvidenceContractKeys) == 0 {
+		return false
+	}
+	for _, ref := range aiAnswerCitationRefsNear(answer, statement) {
+		for _, key := range verifyContext.EvidenceContractKeys[ref] {
+			switch key {
+			case "primary_write_path", "write_path", "source_precedence":
+				if aiAnswerSQLRefCanSupportRuntimeValueFlow(ref, key, verifyContext) && verifyContext.EvidenceContractKeyStatus[ref][key] == aiEvidenceCoverageCovered {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func aiAnswerSQLRefCanSupportRuntimeValueFlow(ref int, key string, verifyContext aiAnswerVerificationContext) bool {
+	if !aiContractKeyRequiresRuntimeAssessmentEvidence(key) {
+		return true
+	}
+	switch verifyContext.EvidenceTypes[ref] {
+	case "orm_model", "migration_sql":
+		return false
+	default:
+		return true
+	}
+}
+
+func aiVerificationDisplayedEvidenceContractKeys(evidence []aiEvidence) map[int][]string {
+	if len(evidence) == 0 {
+		return nil
+	}
+	keysByDisplayRef := make(map[int][]string, len(evidence))
+	for i, item := range evidence {
+		keysByDisplayRef[i+1] = append([]string(nil), item.ContractKeys...)
+	}
+	return keysByDisplayRef
+}
+
+func aiVerificationDisplayedEvidenceContractKeyStatus(evidence []aiEvidence) map[int]map[string]string {
+	if len(evidence) == 0 {
+		return nil
+	}
+	statusByDisplayRef := make(map[int]map[string]string, len(evidence))
+	for i, item := range evidence {
+		if statuses := aiCopyStringMap(item.ContractKeyStatus); len(statuses) > 0 {
+			statusByDisplayRef[i+1] = statuses
+		}
+	}
+	return statusByDisplayRef
+}
+
+func aiVerificationDisplayedEvidenceTypes(evidence []aiEvidence) map[int]string {
+	if len(evidence) == 0 {
+		return nil
+	}
+	typesByDisplayRef := make(map[int]string, len(evidence))
+	for i, item := range evidence {
+		if item.EvidenceType != "" {
+			typesByDisplayRef[i+1] = item.EvidenceType
+		}
+	}
+	return typesByDisplayRef
 }
 
 func aiAnswerContainsSecret(answer string) bool {
@@ -505,6 +629,15 @@ func aiAnswerContainsDeterministicOperation(answerLower, intent string) bool {
 			if strings.Contains(answerLower, marker) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func aiAnswerAcknowledgesEvidenceConflict(answerLower string) bool {
+	for _, marker := range []string{"冲突", "矛盾", "不一致", "未确认", "无法确认", "证据不足", "conflict", "inconsistent", "uncertain"} {
+		if strings.Contains(answerLower, marker) {
+			return true
 		}
 	}
 	return false
@@ -555,11 +688,8 @@ func aiAnswerContainsUnnegatedMarker(answerLower, marker string) bool {
 
 func aiAnswerUsesTestFixtureAsRuntimeFact(answer string, bundle aiEvidenceBundle) bool {
 	lower := strings.ToLower(answer)
-	if aiPathLooksTest(lower) || strings.Contains(lower, "_test.go") {
-		return true
-	}
 	for _, excluded := range bundle.Excluded {
-		if excluded.Reason != aiEvidenceExcludedReasonTestFixtureNonTestTask && !aiPathLooksTest(excluded.FilePath) {
+		if excluded.Reason != aiEvidenceExcludedReasonTestFixtureNonTestTask {
 			continue
 		}
 		if excluded.FilePath != "" && strings.Contains(lower, strings.ToLower(normalizeRepoPath(excluded.FilePath))) {
