@@ -350,7 +350,7 @@ func TestAIValueFlowPriceFixtureRejectsSchemaOnlyMasterPriceUpdate(t *testing.T)
 				LineStart:   11,
 				LineEnd:     55,
 			},
-			Content: "RefreshGoodsMasterLocalMinPriceByIDs 根据本地可售 SKU 的最低价格刷新主商品价格。Select(\"master_goods_id, COALESCE(MIN(price), 0) AS min_price\").Model(&models.YYMSellerGoodsSKU{}).Updates(map[string]interface{}{\"price\": price, \"update_time\": now})",
+			Content: "RefreshGoodsMasterLocalMinPriceByIDs 根据本地可售 SKU 的最低价格刷新主商品价格。Select(\"master_goods_id, COALESCE(MIN(price), 0) AS min_price\").Model(&models.YYMSellerGoodsSKU{}).Updates(map[string]any{\"price\": price, \"update_time\": now})",
 			Score:   80,
 		},
 	}
