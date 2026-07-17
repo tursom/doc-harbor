@@ -288,6 +288,21 @@
                   :srcdoc="htmlPreviewSrcdoc"
                   :title="fileContent.title || fileContent.file_path"
                 ></iframe>
+                <div
+                  v-else-if="fileContent.previewable && isHTMLContent(fileContent) && htmlPreviewLoading"
+                  class="download-only"
+                >
+                  <RefreshCw :size="30" />
+                  <h4>正在加载 HTML 预览</h4>
+                </div>
+                <div
+                  v-else-if="fileContent.previewable && isHTMLContent(fileContent) && htmlPreviewError"
+                  class="download-only"
+                >
+                  <FileDown :size="30" />
+                  <h4>HTML 预览不可用</h4>
+                  <p>{{ htmlPreviewError }}</p>
+                </div>
                 <div v-else-if="fileContent.previewable && renderedHtml" class="markdown-body" v-html="renderedHtml"></div>
                 <div v-else class="download-only">
                   <FileDown :size="30" />
@@ -1006,7 +1021,8 @@ import {
 import { marked } from 'marked'
 import mermaid from 'mermaid'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { APIRequestError, api, blobURL, downloadURL, htmlPreviewURL, inlineBlobURL } from './api'
+import { APIRequestError, api, blobURL, downloadURL, htmlPreviewURL } from './api'
+import { buildHTMLPreviewSrcdoc, type HTMLPreviewResource } from './html-preview'
 import type {
   AICostTier,
   AIContractCoverageItem,
@@ -1051,7 +1067,11 @@ const branches = ref<RepoRef[]>([])
 const files = ref<FileEntry[]>([])
 const selectedFile = ref<FileEntry | null>(null)
 const fileContent = ref<FileContent | null>(null)
+const htmlPreviewSrcdoc = ref('')
+const htmlPreviewLoading = ref(false)
+const htmlPreviewError = ref('')
 const htmlViewerContent = ref<FileContent | null>(null)
+const htmlViewerSrcdoc = ref('')
 const htmlViewerError = ref('')
 const docEvents = ref<PathEvent[]>([])
 const commits = ref<CommitSummary[]>([])
@@ -1128,6 +1148,8 @@ let repoSelectionRequest = 0
 let fileListRequest = 0
 let fileOpenRequest = 0
 let historyRequest = 0
+let htmlPreviewBuildRequest = 0
+let htmlViewerBuildRequest = 0
 let aiStreamSequence = 0
 
 interface AIProviderPreset {
@@ -1317,9 +1339,13 @@ const aiActiveRouteProviders = computed(() => {
 
 const canAskWithCurrentFile = computed(() => Boolean(fileContent.value && fileContent.value.file_size <= 1024 * 1024))
 
-const htmlPreviewSrcdoc = computed(() => (fileContent.value ? buildHTMLPreviewSrcdoc(fileContent.value) : ''))
+watch(fileContent, (content) => {
+  void rebuildHTMLPreview(content)
+})
 
-const htmlViewerSrcdoc = computed(() => (htmlViewerContent.value ? buildHTMLPreviewSrcdoc(htmlViewerContent.value) : ''))
+watch(htmlViewerContent, (content) => {
+  void rebuildHTMLViewer(content)
+})
 
 const htmlViewerBackURL = computed(() => {
   const content = htmlViewerContent.value
@@ -1492,6 +1518,73 @@ async function loadHTMLViewer() {
   } catch (err) {
     htmlViewerError.value = err instanceof Error ? err.message : String(err)
   }
+}
+
+async function rebuildHTMLPreview(content: FileContent | null) {
+  const requestID = ++htmlPreviewBuildRequest
+  htmlPreviewSrcdoc.value = ''
+  htmlPreviewError.value = ''
+  htmlPreviewLoading.value = Boolean(content?.content && isHTMLContent(content))
+  if (!content?.content || !isHTMLContent(content)) return
+  try {
+    const srcdoc = await buildHTMLPreviewSrcdoc(content, loadHTMLPreviewResource)
+    if (requestID !== htmlPreviewBuildRequest) return
+    htmlPreviewSrcdoc.value = srcdoc
+  } catch (err) {
+    if (requestID !== htmlPreviewBuildRequest) return
+    htmlPreviewError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    if (requestID === htmlPreviewBuildRequest) htmlPreviewLoading.value = false
+  }
+}
+
+async function rebuildHTMLViewer(content: FileContent | null) {
+  const requestID = ++htmlViewerBuildRequest
+  htmlViewerSrcdoc.value = ''
+  if (!content?.content || !isHTMLContent(content)) return
+  try {
+    const srcdoc = await buildHTMLPreviewSrcdoc(content, loadHTMLPreviewResource)
+    if (requestID !== htmlViewerBuildRequest) return
+    htmlViewerSrcdoc.value = srcdoc
+  } catch (err) {
+    if (requestID !== htmlViewerBuildRequest) return
+    htmlViewerError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function loadHTMLPreviewResource(repoID: number, commit: string, filePath: string): Promise<HTMLPreviewResource> {
+  const response = await fetch(blobURL(repoID, commit, filePath, true), { credentials: 'same-origin' })
+  if (!response.ok) {
+    throw new Error(`加载 HTML 预览资源失败：${filePath}（HTTP ${response.status}）`)
+  }
+  if (response.redirected && new URL(response.url, window.location.href).origin !== window.location.origin) {
+    throw new Error(`HTML 预览资源鉴权失效：${filePath}`)
+  }
+
+  const blob = await response.blob()
+  const mimeType = blob.type || response.headers.get('Content-Type') || 'application/octet-stream'
+  const [dataURL, text] = await Promise.all([
+    blobToDataURL(blob),
+    isTextPreviewResource(filePath, mimeType) ? blob.text() : Promise.resolve('')
+  ])
+  return { dataURL, mimeType, text }
+}
+
+function blobToDataURL(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.addEventListener('load', () => resolve(String(reader.result || '')))
+    reader.addEventListener('error', () => reject(reader.error || new Error('读取 HTML 预览资源失败')))
+    reader.readAsDataURL(blob)
+  })
+}
+
+function isTextPreviewResource(filePath: string, mimeType: string) {
+  return (
+    /^text\//i.test(mimeType) ||
+    /(?:javascript|json|xml|svg)/i.test(mimeType) ||
+    /\.(?:css|html?|js|mjs|cjs|json|svg|txt|xml)$/i.test(filePath)
+  )
 }
 
 async function loadAll() {
@@ -2716,83 +2809,6 @@ function resolveRepoRelativePath(currentFilePath: string, href: string) {
     parts.push(part)
   }
   return parts.join('/')
-}
-
-function buildHTMLPreviewSrcdoc(content: FileContent) {
-  if (!content.content || !isHTMLContent(content)) return ''
-  const parser = new DOMParser()
-  const doc = parser.parseFromString(content.content, 'text/html')
-  rewriteHTMLResourceAttributes(doc, content)
-  return '<!doctype html>\n' + doc.documentElement.outerHTML
-}
-
-function rewriteHTMLResourceAttributes(doc: Document, content: FileContent) {
-  const rewriteAttr = (selector: string, attr: string) => {
-    for (const element of doc.querySelectorAll<HTMLElement>(selector)) {
-      const value = element.getAttribute(attr)
-      if (!value) continue
-      const rewritten = resolveHTMLResourceURL(content, value)
-      if (rewritten !== value) element.setAttribute(attr, rewritten)
-    }
-  }
-
-  rewriteAttr('[src]', 'src')
-  rewriteAttr('link[href]', 'href')
-  rewriteAttr('a[href]', 'href')
-  rewriteAttr('[poster]', 'poster')
-  rewriteAttr('object[data]', 'data')
-  rewriteAttr('use[href]', 'href')
-  rewriteAttr('use[xlink\\:href]', 'xlink:href')
-
-  for (const element of doc.querySelectorAll<HTMLElement>('[srcset]')) {
-    const value = element.getAttribute('srcset')
-    if (!value) continue
-    const rewritten = rewriteHTMLSrcset(content, value)
-    if (rewritten !== value) element.setAttribute('srcset', rewritten)
-  }
-
-  for (const element of doc.querySelectorAll<HTMLElement>('[style]')) {
-    const value = element.getAttribute('style')
-    if (!value) continue
-    const rewritten = rewriteCSSURLs(value, (url) => resolveHTMLResourceURL(content, url))
-    if (rewritten !== value) element.setAttribute('style', rewritten)
-  }
-
-  for (const element of doc.querySelectorAll<HTMLStyleElement>('style')) {
-    const value = element.textContent || ''
-    const rewritten = rewriteCSSURLs(value, (url) => resolveHTMLResourceURL(content, url))
-    if (rewritten !== value) element.textContent = rewritten
-  }
-}
-
-function resolveHTMLResourceURL(content: FileContent, href: string) {
-  const trimmed = href.trim()
-  if (!trimmed || isExternalMarkdownURL(trimmed)) return href
-  const [pathPart, suffix] = splitMarkdownURLSuffix(trimmed)
-  if (!pathPart) return href
-  const resolved = resolveRepoRelativePath(content.file_path, pathPart)
-  return inlineBlobURL(content.repo_id, content.source_commit_sha, resolved) + suffix
-}
-
-function rewriteHTMLSrcset(content: FileContent, value: string) {
-  return value
-    .split(',')
-    .map((candidate) => {
-      const trimmed = candidate.trim()
-      if (!trimmed) return trimmed
-      const parts = trimmed.split(/\s+/)
-      const url = parts.shift() || ''
-      const rewritten = resolveHTMLResourceURL(content, url)
-      return [rewritten, ...parts].join(' ')
-    })
-    .join(', ')
-}
-
-function rewriteCSSURLs(value: string, rewrite: (url: string) => string) {
-  return value.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (_match, quote: string, rawURL: string) => {
-    const rewritten = rewrite(rawURL.trim())
-    return `url(${quote}${rewritten}${quote})`
-  })
 }
 
 function isMarkdownContent(content: FileContent) {
