@@ -43,8 +43,8 @@ export async function buildHTMLPreviewSrcdoc(
     const doc = parser.parseFromString(html, 'text/html')
     const embeddedDocuments = new Map<string, { id: number; html: Promise<string> }>()
 
-    await Promise.all(
-      [...doc.querySelectorAll<HTMLIFrameElement>('iframe[src]')].map(async (frame) => {
+    await Promise.all([
+      ...[...doc.querySelectorAll<HTMLIFrameElement>('iframe[src]')].map(async (frame) => {
         const source = frame.getAttribute('src') || ''
         const resolved = resolveLocalResourcePath(filePath, source)
         if (!resolved) return
@@ -76,60 +76,39 @@ export async function buildHTMLPreviewSrcdoc(
         frame.setAttribute(embeddedFrameAttribute, String(embedded.id))
         frame.removeAttribute('src')
         frame.removeAttribute('srcdoc')
-      })
-    )
-
-    await Promise.all(
-      [...doc.querySelectorAll<HTMLElement>('[src]:not(iframe)')].map((element) =>
+      }),
+      ...[...doc.querySelectorAll<HTMLElement>('[src]:not(iframe)')].map((element) =>
         inlineResourceAttribute(element, 'src', filePath, loadCached)
-      )
-    )
-    await Promise.all(
-      [...doc.querySelectorAll<HTMLElement>('[poster]')].map((element) =>
+      ),
+      ...[...doc.querySelectorAll<HTMLElement>('[poster]')].map((element) =>
         inlineResourceAttribute(element, 'poster', filePath, loadCached)
-      )
-    )
-    await Promise.all(
-      [...doc.querySelectorAll<HTMLElement>('object[data]')].map((element) =>
+      ),
+      ...[...doc.querySelectorAll<HTMLElement>('object[data]')].map((element) =>
         inlineResourceAttribute(element, 'data', filePath, loadCached)
-      )
-    )
-    await Promise.all(
-      [...doc.querySelectorAll<HTMLElement>('use[href]')].map((element) =>
+      ),
+      ...[...doc.querySelectorAll<HTMLElement>('use[href]')].map((element) =>
         inlineResourceAttribute(element, 'href', filePath, loadCached)
-      )
-    )
-    await Promise.all(
-      [...doc.querySelectorAll<HTMLElement>('use[xlink\\:href]')].map((element) =>
+      ),
+      ...[...doc.querySelectorAll<HTMLElement>('use[xlink\\:href]')].map((element) =>
         inlineResourceAttribute(element, 'xlink:href', filePath, loadCached)
-      )
-    )
-    await Promise.all(
-      [...doc.querySelectorAll<HTMLElement>('[srcset]')].map(async (element) => {
+      ),
+      ...[...doc.querySelectorAll<HTMLElement>('[srcset]')].map(async (element) => {
         const value = element.getAttribute('srcset')
         if (!value) return
         element.setAttribute('srcset', await inlineSrcset(value, filePath, loadCached))
-      })
-    )
-    await Promise.all(
-      [...doc.querySelectorAll<HTMLElement>('[style]')].map(async (element) => {
+      }),
+      ...[...doc.querySelectorAll<HTMLElement>('[style]')].map(async (element) => {
         const value = element.getAttribute('style')
         if (!value) return
         element.setAttribute('style', await inlineCSSURLs(value, filePath, loadCached))
-      })
-    )
-    await Promise.all(
-      [...doc.querySelectorAll<HTMLStyleElement>('style')].map(async (element) => {
+      }),
+      ...[...doc.querySelectorAll<HTMLStyleElement>('style')].map(async (element) => {
         element.textContent = await inlineCSSURLs(element.textContent || '', filePath, loadCached)
-      })
-    )
-    await Promise.all(
-      [...doc.querySelectorAll<HTMLScriptElement>('script:not([src])')].map(async (element) => {
+      }),
+      ...[...doc.querySelectorAll<HTMLScriptElement>('script:not([src])')].map(async (element) => {
         element.textContent = await inlineScriptResourceStrings(element.textContent || '', filePath, loadCached)
-      })
-    )
-    await Promise.all(
-      [...doc.querySelectorAll<HTMLLinkElement>('link[href]')].map(async (link) => {
+      }),
+      ...[...doc.querySelectorAll<HTMLLinkElement>('link[href]')].map(async (link) => {
         const source = link.getAttribute('href') || ''
         const resolved = resolveLocalResourcePath(filePath, source)
         if (!resolved) return
@@ -142,7 +121,7 @@ export async function buildHTMLPreviewSrcdoc(
         }
         link.href = resource.dataURL + dataURLSuffix(resolved.suffix)
       })
-    )
+    ])
 
     for (const anchor of doc.querySelectorAll<HTMLAnchorElement>('a[href]')) {
       const source = anchor.getAttribute('href') || ''
@@ -217,22 +196,15 @@ async function inlineCSSURLs(
   loadResource: (filePath: string) => Promise<HTMLPreviewResource>
 ) {
   const pattern = /url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi
-  let rewritten = ''
-  let offset = 0
-  for (const match of value.matchAll(pattern)) {
-    const index = match.index ?? 0
+  return replaceMatches(value, pattern, async (match) => {
     const source = match[2]
     const resolved = resolveLocalResourcePath(currentFilePath, source)
-    rewritten += value.slice(offset, index)
     if (!resolved) {
-      rewritten += match[0]
-    } else {
-      const resource = await loadResource(resolved.filePath)
-      rewritten += `url(${match[1]}${resource.dataURL + dataURLSuffix(resolved.suffix)}${match[1]})`
+      return match[0]
     }
-    offset = index + match[0].length
-  }
-  return rewritten + value.slice(offset)
+    const resource = await loadResource(resolved.filePath)
+    return `url(${match[1]}${resource.dataURL + dataURLSuffix(resolved.suffix)}${match[1]})`
+  })
 }
 
 async function inlineScriptResourceStrings(
@@ -241,19 +213,29 @@ async function inlineScriptResourceStrings(
   loadResource: (filePath: string) => Promise<HTMLPreviewResource>
 ) {
   const pattern = /(['"`])((?!\/|[a-z][a-z0-9+.-]*:)(?:[^'"`\s]*\/)+[^'"`\s]+\.(?:avif|gif|ico|jpe?g|png|svg|webp|woff2?|ttf|otf)(?:[?#][^'"`\s]*)?)\1/gi
+  return replaceMatches(value, pattern, async (match) => {
+    const resolved = resolveLocalResourcePath(currentFilePath, match[2])
+    if (!resolved) {
+      return match[0]
+    }
+    const resource = await loadResource(resolved.filePath)
+    return `${match[1]}${resource.dataURL + dataURLSuffix(resolved.suffix)}${match[1]}`
+  })
+}
+
+async function replaceMatches(
+  value: string,
+  pattern: RegExp,
+  replacer: (match: RegExpMatchArray) => Promise<string>
+) {
+  const matches = [...value.matchAll(pattern)]
+  const replacements = await Promise.all(matches.map(replacer))
   let rewritten = ''
   let offset = 0
-  for (const match of value.matchAll(pattern)) {
-    const index = match.index ?? 0
-    const resolved = resolveLocalResourcePath(currentFilePath, match[2])
-    rewritten += value.slice(offset, index)
-    if (!resolved) {
-      rewritten += match[0]
-    } else {
-      const resource = await loadResource(resolved.filePath)
-      rewritten += `${match[1]}${resource.dataURL + dataURLSuffix(resolved.suffix)}${match[1]}`
-    }
-    offset = index + match[0].length
+  for (const [index, match] of matches.entries()) {
+    const matchIndex = match.index ?? 0
+    rewritten += value.slice(offset, matchIndex) + replacements[index]
+    offset = matchIndex + match[0].length
   }
   return rewritten + value.slice(offset)
 }

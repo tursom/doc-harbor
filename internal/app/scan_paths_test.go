@@ -189,8 +189,19 @@ func TestHTMLPreviewableScanAndSizeLimit(t *testing.T) {
 	if !strings.HasPrefix(inlineRecorder.Header().Get("Content-Disposition"), "inline;") {
 		t.Fatalf("inline html disposition = %q", inlineRecorder.Header().Get("Content-Disposition"))
 	}
+	if inlineRecorder.Header().Get("Cache-Control") != immutableBlobCacheControl {
+		t.Fatalf("inline html cache-control = %q", inlineRecorder.Header().Get("Cache-Control"))
+	}
 	if inlineRecorder.Body.String() != "<h1>HTML</h1>\n" {
 		t.Fatalf("inline html body = %q", inlineRecorder.Body.String())
+	}
+
+	downloadRecorder := getScanPathTestDownloadBlob(t, server, repo.ID, small.HeadCommitSHA)
+	if downloadRecorder.Header().Get("Cache-Control") != immutableBlobCacheControl {
+		t.Fatalf("download html cache-control = %q", downloadRecorder.Header().Get("Cache-Control"))
+	}
+	if downloadRecorder.Header().Get("Content-Length") != "14" {
+		t.Fatalf("download html content-length = %q", downloadRecorder.Header().Get("Content-Length"))
 	}
 }
 
@@ -225,6 +236,17 @@ func getScanPathTestInlineBlob(t *testing.T, server *Server, repoID int64, commi
 	server.handleBlobInlinePath(recorder, req, repoID, commit, filePath)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("inline blob status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	return recorder
+}
+
+func getScanPathTestDownloadBlob(t *testing.T, server *Server, repoID int64, commit string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/repos/1/blob/download?commit_sha="+commit+"&path=doc%2Fpage.html&inline=1", nil)
+	recorder := httptest.NewRecorder()
+	server.handleBlob(recorder, req, repoID, true)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("download blob status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
 	return recorder
 }

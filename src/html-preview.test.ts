@@ -16,6 +16,37 @@ function fileContent(filePath: string, content: string): FileContent {
 }
 
 describe('buildHTMLPreviewSrcdoc', () => {
+  it('starts resources from markup and inline scripts concurrently', async () => {
+    let releaseResources = () => {}
+    const resourceGate = new Promise<void>((resolve) => {
+      releaseResources = resolve
+    })
+    const loadResource = vi.fn(async (_repoID: number, _commit: string, filePath: string) => {
+      await resourceGate
+      return {
+        dataURL: `data:image/png;base64,${btoa(filePath)}`,
+        mimeType: 'image/png',
+        text: ''
+      }
+    })
+
+    const rendering = buildHTMLPreviewSrcdoc(
+      fileContent(
+        'doc/page.html',
+        '<!doctype html><html><body><img src="assets/hero.png"><script>const first="assets/first.png"; const second="assets/second.png"</script></body></html>'
+      ),
+      loadResource
+    )
+
+    await Promise.resolve()
+    await Promise.resolve()
+    const startedPaths = loadResource.mock.calls.map((call) => call[2]).sort()
+    releaseResources()
+    await rendering
+
+    expect(startedPaths).toEqual(['doc/assets/first.png', 'doc/assets/hero.png', 'doc/assets/second.png'])
+  })
+
   it('inlines local nested HTML and its local assets without network iframe requests', async () => {
     const loadResource = vi.fn(async (_repoID: number, _commit: string, filePath: string) => {
       if (filePath === 'doc/prototype.html') {

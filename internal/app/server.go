@@ -21,6 +21,8 @@ import (
 	"time"
 )
 
+const immutableBlobCacheControl = "private, max-age=31536000, immutable"
+
 type Server struct {
 	cfg     Config
 	db      *sql.DB
@@ -653,6 +655,8 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request, repoID int64
 			disposition = "inline"
 		}
 		w.Header().Set("Content-Disposition", disposition+`; filename="`+sanitizeFileName(filePath)+`"`)
+		w.Header().Set("Cache-Control", immutableBlobCacheControl)
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
 		return
@@ -684,6 +688,7 @@ func (s *Server) handleBlobInlinePath(w http.ResponseWriter, r *http.Request, re
 	w.Header().Set("Content-Disposition", `inline; filename="`+sanitizeFileName(filePath)+`"`)
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Cross-Origin-Resource-Policy", "cross-origin")
+	w.Header().Set("Cache-Control", immutableBlobCacheControl)
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
