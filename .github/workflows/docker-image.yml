@@ -16,7 +16,46 @@ env:
   IMAGE_NAME: ghcr.io/tursom/doc-harbor
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend unit tests
+        run: npm test
+
+      - name: Build static pages
+        run: npm run build
+
+      - name: Check page bundle budgets
+        run: npm run check:bundle
+
+      - name: Run backend tests
+        run: go test ./...
+
+      - name: Install browser for static-page tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Run static-page browser tests
+        run: npx playwright test
+
   build-and-push:
+    needs: verify
     runs-on: ubuntu-latest
 
     steps:

@@ -12,10 +12,8 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -727,34 +725,41 @@ func splitPath(p string) []string {
 
 func (s *Server) webHandler() http.Handler {
 	fileSystem := os.DirFS(s.cfg.WebDir)
-	fileServer := http.FileServer(http.FS(fileSystem))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
+		if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
 			writeError(w, errNotFound("not found"))
 			return
 		}
-		cleanPath := path.Clean(strings.TrimPrefix(r.URL.Path, "/"))
-		if cleanPath == "." {
+		cleanPath := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+		if cleanPath == "." || cleanPath == "" {
 			cleanPath = "index.html"
+		} else if info, err := fs.Stat(fileSystem, cleanPath); err == nil && info.IsDir() {
+			cleanPath = path.Join(cleanPath, "index.html")
+		} else if err != nil {
+			directoryIndex := path.Join(cleanPath, "index.html")
+			if fileExists(fileSystem, directoryIndex) {
+				cleanPath = directoryIndex
+			}
 		}
 		if !fileExists(fileSystem, cleanPath) {
-			cleanPath = "index.html"
-		}
-		if cleanPath == "index.html" {
-			http.ServeFile(w, r, filepath.Join(s.cfg.WebDir, "index.html"))
+			serveWebNotFound(w, r, fileSystem)
 			return
 		}
-		r2 := new(http.Request)
-		*r2 = *r
-		r2.URL = cloneURL(r.URL)
-		r2.URL.Path = "/" + cleanPath
-		fileServer.ServeHTTP(w, r2)
+		http.ServeFileFS(w, r, fileSystem, cleanPath)
 	})
 }
 
-func cloneURL(u *url.URL) *url.URL {
-	copy := *u
-	return &copy
+func serveWebNotFound(w http.ResponseWriter, r *http.Request, fileSystem fs.FS) {
+	data, err := fs.ReadFile(fileSystem, "404.html")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusNotFound)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(data)
+	}
 }
 
 func fileExists(fileSystem fs.FS, name string) bool {

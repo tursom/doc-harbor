@@ -240,9 +240,16 @@ export const api = {
       body: JSON.stringify({ question, scope_override: scope })
     })
   },
-  async streamAI(sessionID: number, question: string, scope: AIQuestionScope, onEvent: (event: AIStreamEvent) => void | Promise<void>) {
+  async streamAI(
+    sessionID: number,
+    question: string,
+    scope: AIQuestionScope,
+    onEvent: (event: AIStreamEvent) => void | Promise<void>,
+    signal?: AbortSignal
+  ) {
     const response = await fetch(`/api/ai/sessions/${sessionID}/messages/stream`, {
       method: 'POST',
+      signal,
       headers: {
         'Content-Type': 'application/json',
         Accept: 'text/event-stream'

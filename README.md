@@ -32,14 +32,25 @@ go mod download
 go run ./cmd/doc-harbor
 ```
 
-启动前端开发服务：
+启动 Astro 静态多页面前端开发服务：
 
 ```bash
 npm install
 npm run dev
 ```
 
-前端默认代理 `/api` 到 `http://127.0.0.1:8080`。
+前端默认代理 `/api` 到 `http://127.0.0.1:8080`。生产构建会生成独立的静态页面：
+
+- `/`：文档浏览
+- `/history/`：Git 历史
+- `/scans/`：扫描记录
+- `/ai/`：AI 问答
+- `/ai/config/`：AI 配置
+- `/ai/diagnostics/`：AI 诊断
+- `/settings/`：系统设置
+- `/html-preview/`：独立 HTML 预览
+
+页面框架在构建阶段生成 HTML，运行时数据继续通过同源 `/api` 从 Go 服务加载。Vue 只负责动态交互区域；Markdown、DOMPurify、Mermaid 和 HTML 预览实现按需加载。
 
 也可以构建前端后由 Go 服务直接托管：
 
@@ -47,6 +58,17 @@ npm run dev
 npm run build
 WEB_DIR=./dist go run ./cmd/doc-harbor
 ```
+
+前端与静态页面验证：
+
+```bash
+npm test
+npm run build
+npm run check:bundle
+npm run test:e2e
+```
+
+`check:bundle` 会检查每个静态页面的首屏 JavaScript gzip 预算。Playwright 测试使用 Go 静态托管器验证目录页面、真实多页导航、旧链接兼容和依赖延迟加载。
 
 ## 配置
 

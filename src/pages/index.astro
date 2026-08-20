@@ -1,0 +1,12 @@
+---
+import StaticAppPage from '../components/StaticAppPage.astro'
+---
+
+<StaticAppPage title="DocHarbor" />
+
+<script>
+  import { legacyPageRedirect } from '../lib/navigation'
+
+  const target = legacyPageRedirect(window.location.href)
+  if (target) window.location.replace(target)
+</script>

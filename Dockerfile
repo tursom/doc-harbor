@@ -1,8 +1,8 @@
 FROM node:26-alpine AS web
 WORKDIR /src
 COPY package.json package-lock.json* ./
-RUN npm install
-COPY index.html tsconfig.json vite.config.ts ./
+RUN npm ci
+COPY astro.config.mjs tsconfig.json ./
 COPY public ./public
 COPY src ./src
 RUN npm run build

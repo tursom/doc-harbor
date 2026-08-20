@@ -1,5 +1,6 @@
 import { inlineBlobURL } from './api'
 import type { FileContent } from './types'
+import { isHTMLContent } from './lib/content-type'
 
 export interface HTMLPreviewResource {
   dataURL: string
@@ -253,10 +254,6 @@ function resolveLocalResourcePath(currentFilePath: string, source: string) {
 
 function dataURLSuffix(suffix: string) {
   return suffix.startsWith('#') ? suffix : ''
-}
-
-function isHTMLContent(content: FileContent) {
-  return isHTMLResource(content.file_path, content.mime_type)
 }
 
 function isHTMLResource(filePath: string, mimeType: string) {

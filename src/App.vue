@@ -1,24 +1,5 @@
 <template>
-  <main v-if="isHTMLPreviewRoute" class="html-viewer-shell">
-    <div v-if="htmlViewerError" class="html-viewer-state">
-      <FileDown :size="30" />
-      <h1>HTML 预览不可用</h1>
-      <p>{{ htmlViewerError }}</p>
-      <a class="command" :href="htmlViewerBackURL">返回文档</a>
-    </div>
-    <iframe
-      v-else-if="htmlViewerContent && htmlViewerSrcdoc"
-      class="html-viewer-frame"
-      sandbox="allow-scripts"
-      :srcdoc="htmlViewerSrcdoc"
-      :title="htmlViewerContent.title || htmlViewerContent.file_path"
-    ></iframe>
-    <div v-else class="html-viewer-state">
-      <BookOpen :size="30" />
-      <p>正在加载 HTML 预览</p>
-    </div>
-  </main>
-  <main v-else class="app-shell" :class="{ 'ai-mode': tab === 'ai' }">
+  <main class="app-shell" :class="{ 'ai-mode': tab === 'ai' }">
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark" aria-hidden="true">
@@ -36,22 +17,22 @@
       </button>
 
       <nav class="global-nav" aria-label="全局功能">
-        <button :class="{ active: tab === 'ai' }" type="button" @click="switchTab('ai')">
+        <a :class="{ active: tab === 'ai' }" :href="tabHref('ai')">
           <Bot :size="16" />
           AI 问答
-        </button>
-        <button :class="{ active: tab === 'ai-config' }" type="button" @click="switchTab('ai-config')">
+        </a>
+        <a :class="{ active: tab === 'ai-config' }" :href="tabHref('ai-config')">
           <SlidersHorizontal :size="16" />
           AI 配置
-        </button>
-        <button :class="{ active: tab === 'ai-diagnostics' }" type="button" @click="switchTab('ai-diagnostics')">
+        </a>
+        <a :class="{ active: tab === 'ai-diagnostics' }" :href="tabHref('ai-diagnostics')">
           <Activity :size="16" />
           AI 诊断
-        </button>
-        <button :class="{ active: tab === 'settings' }" type="button" @click="switchTab('settings')">
+        </a>
+        <a :class="{ active: tab === 'settings' }" :href="tabHref('settings')">
           <Settings :size="16" />
           系统设置
-        </button>
+        </a>
       </nav>
 
       <div class="repo-list">
@@ -173,18 +154,18 @@
 
       <section v-if="selectedRepo || isGlobalTab" class="work-grid">
         <nav v-if="!isGlobalTab" class="tabs">
-          <button :class="{ active: tab === 'docs' }" type="button" @click="switchTab('docs')">
+          <a :class="{ active: tab === 'docs' }" :href="tabHref('docs')">
             <BookOpen :size="16" />
             文档
-          </button>
-          <button :class="{ active: tab === 'history' }" type="button" @click="switchTab('history')">
+          </a>
+          <a :class="{ active: tab === 'history' }" :href="tabHref('history')">
             <GitBranch :size="16" />
             历史
-          </button>
-          <button :class="{ active: tab === 'runs' }" type="button" @click="switchTab('runs')">
+          </a>
+          <a :class="{ active: tab === 'runs' }" :href="tabHref('runs')">
             <ListChecks :size="16" />
             扫描
-          </button>
+          </a>
         </nav>
 
         <section v-if="tab === 'docs' && selectedRepo" class="docs-panel">
@@ -344,7 +325,7 @@
               <option value="">全部分支</option>
               <option v-for="branch in branches" :key="branch.ref_name" :value="branch.ref_name">{{ branch.ref_name }}</option>
             </select>
-            <button class="command" type="button" @click="loadHistory">
+            <button class="command" type="button" @click="loadHistory()">
               <RefreshCw :size="16" />
               刷新
             </button>
@@ -994,7 +975,6 @@
 </template>
 
 <script setup lang="ts">
-import DOMPurify from 'dompurify'
 import {
   Activity,
   Bot,
@@ -1018,11 +998,12 @@ import {
   SlidersHorizontal,
   X
 } from 'lucide-vue-next'
-import { marked } from 'marked'
-import mermaid from 'mermaid'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { APIRequestError, api, blobURL, downloadURL, htmlPreviewURL } from './api'
-import { buildHTMLPreviewSrcdoc, type HTMLPreviewResource } from './html-preview'
+import { isHTMLContent } from './lib/content-type'
+import { loadHTMLPreviewResource } from './lib/html-preview-resource'
+import { pageURL } from './lib/navigation'
+import type { AppTab } from './lib/navigation'
 import type {
   AICostTier,
   AIContractCoverageItem,
@@ -1051,7 +1032,7 @@ import type {
   ScanRun
 } from './types'
 
-type AppTab = 'docs' | 'history' | 'runs' | 'ai' | 'ai-config' | 'ai-diagnostics' | 'settings'
+const props = withDefaults(defineProps<{ initialTab?: AppTab }>(), { initialTab: 'docs' })
 type AIEvidenceChainItem = {
   id: string
   kind: 'stage' | 'provider'
@@ -1070,14 +1051,11 @@ const fileContent = ref<FileContent | null>(null)
 const htmlPreviewSrcdoc = ref('')
 const htmlPreviewLoading = ref(false)
 const htmlPreviewError = ref('')
-const htmlViewerContent = ref<FileContent | null>(null)
-const htmlViewerSrcdoc = ref('')
-const htmlViewerError = ref('')
 const docEvents = ref<PathEvent[]>([])
 const commits = ref<CommitSummary[]>([])
 const selectedCommit = ref<CommitDetail | null>(null)
 const scanRuns = ref<ScanRun[]>([])
-const tab = ref<AppTab>('docs')
+const tab = ref<AppTab>(props.initialTab)
 const viewMode = ref<'latest' | 'branch'>('latest')
 const selectedBranch = ref('')
 const historyBranch = ref('')
@@ -1142,15 +1120,17 @@ const latestExcludeText = ref('archive/*, tmp/*, dependabot/*')
 const branchPriorityText = ref('main, master, release/*, develop, feature/*')
 const scanPathsText = ref('.')
 const searchResultDir = '搜索结果'
-const isHTMLPreviewRoute = window.location.pathname === '/html-preview'
 let applyingURLState = false
 let repoSelectionRequest = 0
 let fileListRequest = 0
 let fileOpenRequest = 0
 let historyRequest = 0
 let htmlPreviewBuildRequest = 0
-let htmlViewerBuildRequest = 0
+let markdownRenderRequest = 0
 let aiStreamSequence = 0
+let aiStreamController: AbortController | null = null
+let mermaidInitialized = false
+const messageMarkdownRenderer = ref<(content: string) => string>((content) => content)
 
 interface AIProviderPreset {
   key: string
@@ -1248,7 +1228,7 @@ const breadcrumbs = computed(() => {
 const canGoParent = computed(() => currentDir.value !== '.' && currentDir.value !== searchResultDir)
 
 const githubWebhookURL = computed(() =>
-  selectedRepo.value ? `${window.location.origin}/api/webhooks/github/${selectedRepo.value.id}` : ''
+  selectedRepo.value && typeof window !== 'undefined' ? `${window.location.origin}/api/webhooks/github/${selectedRepo.value.id}` : ''
 )
 
 const isGlobalTab = computed(() => isGlobalTabName(tab.value))
@@ -1258,6 +1238,8 @@ const workspaceTitle = computed(() => {
   if (tab.value === 'ai-config') return 'AI 配置'
   if (tab.value === 'ai-diagnostics') return 'AI 诊断'
   if (tab.value === 'settings') return '系统设置'
+  if (tab.value === 'history' && !selectedRepo.value) return 'Git 历史'
+  if (tab.value === 'runs' && !selectedRepo.value) return '扫描记录'
   return selectedRepo.value?.name || '仓库配置'
 })
 
@@ -1343,33 +1325,6 @@ watch(fileContent, (content) => {
   void rebuildHTMLPreview(content)
 })
 
-watch(htmlViewerContent, (content) => {
-  void rebuildHTMLViewer(content)
-})
-
-const htmlViewerBackURL = computed(() => {
-  const content = htmlViewerContent.value
-  if (content) {
-    return `/?${new URLSearchParams({
-      repo: String(content.repo_id),
-      version: String(content.version_id),
-      view: 'latest',
-      dir: dirNameFromPath(content.file_path)
-    })}`
-  }
-  const params = new URLSearchParams(window.location.search)
-  const repoID = Number(params.get('repo') || 0)
-  const versionID = Number(params.get('version') || 0)
-  if (repoID > 0 && versionID > 0) {
-    return `/?${new URLSearchParams({
-      repo: String(repoID),
-      version: String(versionID),
-      view: 'latest'
-    })}`
-  }
-  return '/'
-})
-
 const diagnosticsWorkflow = computed(() => diagnosticsDetail.value?.agent_workflow || null)
 
 const diagnosticsCoverage = computed<AIContractCoverageReport | null>(
@@ -1421,28 +1376,43 @@ const graphWidth = computed(() => {
   return Math.max(96, graphLanePadding * 2 + (maxLane + 1) * graphLaneGap)
 })
 
-const renderedHtml = computed(() => {
-  if (!fileContent.value?.content || !isMarkdownContent(fileContent.value)) return ''
+const renderedHtml = ref('')
+
+watch(fileContent, (content) => {
+  rebuildMarkdownPreview(content)
+})
+
+async function rebuildMarkdownPreview(content: FileContent | null) {
+  const requestID = ++markdownRenderRequest
+  if (!content?.content || !isMarkdownContent(content)) {
+    renderedHtml.value = ''
+    return
+  }
+  const [{ marked }, { default: DOMPurify }] = await Promise.all([import('marked'), import('dompurify')])
+  if (requestID !== markdownRenderRequest || content !== fileContent.value) return
   const renderer = new marked.Renderer()
   renderer.image = ({ href, title, text }) => {
-    const src = resolveMarkdownResourceURL(href)
+    const src = resolveMarkdownResourceURL(href, content)
     const titleAttr = title ? ` title="${escapeAttr(title)}"` : ''
     return `<img data-doc-harbor-src="${escapeAttr(src)}" alt="${escapeAttr(text || '')}"${titleAttr}>`
   }
   renderer.link = ({ href, title, text }) => {
-    const target = resolveMarkdownLinkURL(href)
+    const target = resolveMarkdownLinkURL(href, content)
     const titleAttr = title ? ` title="${escapeAttr(title)}"` : ''
     return `<a href="${escapeAttr(target)}"${titleAttr}>${text}</a>`
   }
-  const html = marked.parse(fileContent.value.content, {
+  const html = marked.parse(content.content, {
     async: false,
     renderer
   }) as string
-  return DOMPurify.sanitize(html, {
+  const sanitized = DOMPurify.sanitize(html, {
     ADD_TAGS: ['svg', 'path', 'g', 'marker', 'defs', 'linearGradient', 'stop', 'rect', 'circle', 'line', 'polyline', 'polygon', 'text', 'tspan'],
     ADD_ATTR: ['data-doc-harbor-src', 'viewBox', 'd', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'points', 'marker-end', 'stroke', 'fill', 'transform', 'class', 'style', 'target', 'rel']
   })
-})
+  if (requestID === markdownRenderRequest && content === fileContent.value) {
+    renderedHtml.value = sanitized
+  }
+}
 
 watch(renderedHtml, async () => {
   await nextTick()
@@ -1451,74 +1421,14 @@ watch(renderedHtml, async () => {
 })
 
 onMounted(async () => {
-  mermaid.initialize({
-    startOnLoad: false,
-    securityLevel: 'strict',
-    theme: 'default',
-    htmlLabels: false,
-    themeVariables: {
-      actorBkg: '#1f2937',
-      actorBorder: '#38bdf8',
-      actorLineColor: '#38bdf8',
-      actorTextColor: '#f8fafc',
-      activationBkgColor: '#e0f2fe',
-      activationBorderColor: '#0ea5e9',
-      labelBoxBkgColor: '#ffffff',
-      labelBoxBorderColor: '#94a3b8',
-      labelTextColor: '#1f2937',
-      loopTextColor: '#1f2937',
-      noteBkgColor: '#fff7ed',
-      noteBorderColor: '#fb923c',
-      noteTextColor: '#1f2937',
-      signalColor: '#64748b',
-      signalTextColor: '#1f2937',
-      sequenceNumberColor: '#ffffff'
-    }
-  })
-  if (isHTMLPreviewRoute) {
-    await loadHTMLViewer()
-    return
-  }
   await loadAll()
   window.addEventListener('popstate', applyURLState)
 })
 
 onBeforeUnmount(() => {
-  if (isHTMLPreviewRoute) return
+  aiStreamController?.abort()
   window.removeEventListener('popstate', applyURLState)
 })
-
-async function loadHTMLViewer() {
-  htmlViewerError.value = ''
-  const params = new URLSearchParams(window.location.search)
-  const repoID = Number(params.get('repo') || 0)
-  const versionID = Number(params.get('version') || 0)
-  if (repoID <= 0 || versionID <= 0) {
-    htmlViewerError.value = '缺少 repo 或 version 参数'
-    return
-  }
-  try {
-    const content = await api.content(repoID, versionID)
-    if (!content.previewable) {
-      htmlViewerError.value = '当前文件不可预览'
-      htmlViewerContent.value = content
-      return
-    }
-    if (!isHTMLContent(content)) {
-      htmlViewerError.value = '当前文件不是 HTML 文件'
-      htmlViewerContent.value = content
-      return
-    }
-    if (!content.content) {
-      htmlViewerError.value = 'HTML 内容为空'
-      htmlViewerContent.value = content
-      return
-    }
-    htmlViewerContent.value = content
-  } catch (err) {
-    htmlViewerError.value = err instanceof Error ? err.message : String(err)
-  }
-}
 
 async function rebuildHTMLPreview(content: FileContent | null) {
   const requestID = ++htmlPreviewBuildRequest
@@ -1527,6 +1437,7 @@ async function rebuildHTMLPreview(content: FileContent | null) {
   htmlPreviewLoading.value = Boolean(content?.content && isHTMLContent(content))
   if (!content?.content || !isHTMLContent(content)) return
   try {
+    const { buildHTMLPreviewSrcdoc } = await import('./html-preview')
     const srcdoc = await buildHTMLPreviewSrcdoc(content, loadHTMLPreviewResource)
     if (requestID !== htmlPreviewBuildRequest) return
     htmlPreviewSrcdoc.value = srcdoc
@@ -1538,55 +1449,6 @@ async function rebuildHTMLPreview(content: FileContent | null) {
   }
 }
 
-async function rebuildHTMLViewer(content: FileContent | null) {
-  const requestID = ++htmlViewerBuildRequest
-  htmlViewerSrcdoc.value = ''
-  if (!content?.content || !isHTMLContent(content)) return
-  try {
-    const srcdoc = await buildHTMLPreviewSrcdoc(content, loadHTMLPreviewResource)
-    if (requestID !== htmlViewerBuildRequest) return
-    htmlViewerSrcdoc.value = srcdoc
-  } catch (err) {
-    if (requestID !== htmlViewerBuildRequest) return
-    htmlViewerError.value = err instanceof Error ? err.message : String(err)
-  }
-}
-
-async function loadHTMLPreviewResource(repoID: number, commit: string, filePath: string): Promise<HTMLPreviewResource> {
-  const response = await fetch(blobURL(repoID, commit, filePath, true), { credentials: 'same-origin' })
-  if (!response.ok) {
-    throw new Error(`加载 HTML 预览资源失败：${filePath}（HTTP ${response.status}）`)
-  }
-  if (response.redirected && new URL(response.url, window.location.href).origin !== window.location.origin) {
-    throw new Error(`HTML 预览资源鉴权失效：${filePath}`)
-  }
-
-  const blob = await response.blob()
-  const mimeType = blob.type || response.headers.get('Content-Type') || 'application/octet-stream'
-  const [dataURL, text] = await Promise.all([
-    blobToDataURL(blob),
-    isTextPreviewResource(filePath, mimeType) ? blob.text() : Promise.resolve('')
-  ])
-  return { dataURL, mimeType, text }
-}
-
-function blobToDataURL(blob: Blob) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.addEventListener('load', () => resolve(String(reader.result || '')))
-    reader.addEventListener('error', () => reject(reader.error || new Error('读取 HTML 预览资源失败')))
-    reader.readAsDataURL(blob)
-  })
-}
-
-function isTextPreviewResource(filePath: string, mimeType: string) {
-  return (
-    /^text\//i.test(mimeType) ||
-    /(?:javascript|json|xml|svg)/i.test(mimeType) ||
-    /\.(?:css|html?|js|mjs|cjs|json|svg|txt|xml)$/i.test(filePath)
-  )
-}
-
 async function loadAll() {
   await withBusy(async () => {
     const response = await api.repos()
@@ -1594,9 +1456,19 @@ async function loadAll() {
     const urlState = readURLState()
     if (isGlobalTabName(urlState.tab)) {
       tab.value = urlState.tab
-      if (selectedRepo.value) {
-        const refreshed = repos.value.find((repo) => repo.id === selectedRepo.value?.id)
-        if (refreshed) selectedRepo.value = refreshed
+      const urlRepo = urlState.repoID ? repos.value.find((repo) => repo.id === urlState.repoID) : null
+      if (urlRepo) {
+        selectedRepo.value = urlRepo
+      } else if (selectedRepo.value) {
+        selectedRepo.value = repos.value.find((repo) => repo.id === selectedRepo.value?.id) || null
+      }
+      if (tab.value === 'ai' && selectedRepo.value && urlState.versionID) {
+        await openVersion(urlState.versionID, { syncURL: false })
+        const params = new URLSearchParams(window.location.search)
+        if (params.get('scope') === 'file' && fileContent.value) {
+          aiScopeMode.value = 'current_file'
+          aiQuestion.value = params.get('question') || `基于当前文件 ${fileContent.value.file_path} 回答：`
+        }
       }
       await loadGlobalTabData(urlState.tab)
       return
@@ -1618,7 +1490,10 @@ async function loadAll() {
 }
 
 async function openRepo(repo: Repository) {
-  if (isGlobalTab.value) tab.value = 'docs'
+  if (isGlobalTab.value) {
+    window.location.assign(`/?${new URLSearchParams({ repo: String(repo.id) })}`)
+    return
+  }
   await selectRepo(repo)
 }
 
@@ -1650,7 +1525,7 @@ async function selectRepo(repo: Repository, options: { state?: URLState; syncURL
     await openVersion(state.versionID, { syncURL: false })
     if (requestID !== repoSelectionRequest) return
   }
-  if (tab.value === 'history') await loadHistory()
+  if (tab.value === 'history') await loadHistory(state?.commit)
   if (requestID !== repoSelectionRequest) return
   if (tab.value === 'runs') await loadScanRuns()
   if (requestID !== repoSelectionRequest) return
@@ -1753,11 +1628,7 @@ async function scanSelected() {
 }
 
 async function switchTab(nextTab: AppTab) {
-  tab.value = nextTab
-  updateURL({ clearVersion: nextTab !== 'docs' })
-  if (nextTab === 'history') await loadHistory()
-  if (nextTab === 'runs') await loadScanRuns()
-  await loadGlobalTabData(nextTab)
+  window.location.assign(tabHref(nextTab))
 }
 
 async function goParent() {
@@ -1810,24 +1681,26 @@ async function saveRepo() {
   })
 }
 
-async function loadHistory() {
+async function loadHistory(commitSHA = selectedCommit.value?.sha || '') {
   if (!selectedRepo.value) return
   const response = await api.history(selectedRepo.value.id, historyBranch.value, 120)
   commits.value = response.items
   selectedCommit.value = null
-  if (commits.value[0]) {
-    await openCommit(commits.value[0].sha)
+  const targetSHA = commitSHA || commits.value[0]?.sha
+  if (targetSHA) {
+    await openCommit(targetSHA, { syncURL: false })
   }
 }
 
 async function changeHistoryBranch() {
-  await loadHistory()
+  await loadHistory('')
   updateURL({ clearVersion: true })
 }
 
-async function openCommit(sha: string) {
+async function openCommit(sha: string, options: { syncURL?: boolean } = {}) {
   if (!selectedRepo.value) return
   selectedCommit.value = await api.commit(selectedRepo.value.id, sha)
+  if (options.syncURL !== false) updateURL()
 }
 
 async function loadScanRuns() {
@@ -1876,6 +1749,7 @@ async function loadAIPage() {
   error.value = ''
   aiPageError.value = ''
   try {
+    await ensureMessageMarkdownRenderer()
     const [settings, response] = await Promise.all([api.aiSettings(), api.aiSessions({ limit: '50' })])
     aiSettings.value = settings
     aiSessions.value = response.items || []
@@ -1967,11 +1841,15 @@ async function sendAIQuestion() {
     aiCandidates.value = []
     aiCitations.value = []
     aiEvidenceChain.value = []
-    await api.streamAI(selectedAISession.value.id, question, buildAIScope(), handleAIStreamEvent)
+    const controller = new AbortController()
+    aiStreamController = controller
+    await api.streamAI(selectedAISession.value.id, question, buildAIScope(), handleAIStreamEvent, controller.signal)
     await refreshAISessions()
   } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') return
     aiPageError.value = err instanceof Error ? err.message : String(err)
   } finally {
+    aiStreamController = null
     aiBusy.value = false
   }
 }
@@ -2223,32 +2101,29 @@ function buildAIScope(): AIQuestionScope {
 
 async function askWithCurrentFile() {
   if (!fileContent.value || !canAskWithCurrentFile.value) return
-  aiScopeMode.value = 'current_file'
-  aiQuestion.value = `基于当前文件 ${fileContent.value.file_path} 回答：`
-  await switchTab('ai')
+  const question = `基于当前文件 ${fileContent.value.file_path} 回答：`
+  window.location.assign(
+    `/ai/?${new URLSearchParams({
+      repo: String(fileContent.value.repo_id),
+      version: String(fileContent.value.version_id),
+      scope: 'file',
+      question
+    })}`
+  )
 }
 
 async function openAICitation(citation: AIMessageCitation) {
-  const repo = repos.value.find((item) => item.id === citation.repo_id)
-  if (repo) {
-    await selectRepo(repo, { syncURL: false })
-  } else {
+  if (!repos.value.some((item) => item.id === citation.repo_id)) {
     aiPageError.value = `未找到引用所属仓库：${citation.repo_name || citation.repo_id}`
     return
   }
-  tab.value = 'docs'
-  if (citation.version_id > 0) {
-    currentDir.value = parentDir(citation.file_path)
-    await loadFiles(currentDir.value, { syncURL: false })
-    try {
-      await openVersion(citation.version_id)
-    } catch (err) {
-      error.value = err instanceof Error ? err.message : String(err)
-    }
-  } else {
-    currentDir.value = parentDir(citation.file_path)
-    await loadFiles(currentDir.value)
-  }
+  const params = new URLSearchParams({
+    repo: String(citation.repo_id),
+    view: 'latest',
+    dir: parentDir(citation.file_path)
+  })
+  if (citation.version_id > 0) params.set('version', String(citation.version_id))
+  window.location.assign(`/?${params}`)
 }
 
 async function loadAIConfig() {
@@ -2533,7 +2408,12 @@ function handleAISettingsError(err: unknown) {
 }
 
 function renderMessageMarkdown(content: string) {
-  return DOMPurify.sanitize(marked.parse(content || '', { async: false }) as string)
+  return messageMarkdownRenderer.value(content)
+}
+
+async function ensureMessageMarkdownRenderer() {
+  const [{ marked }, { default: DOMPurify }] = await Promise.all([import('marked'), import('dompurify')])
+  messageMarkdownRenderer.value = (content) => DOMPurify.sanitize(marked.parse(content || '', { async: false }) as string)
 }
 
 function messageNotice(message: AIMessage): AINotice | null {
@@ -2576,6 +2456,10 @@ async function loadGlobalTabData(nextTab: AppTab) {
 
 function isGlobalTabName(value: AppTab) {
   return value === 'ai' || value === 'ai-config' || value === 'ai-diagnostics' || value === 'settings'
+}
+
+function tabHref(nextTab: AppTab) {
+  return pageURL(nextTab, new URLSearchParams(), { repo: selectedRepo.value?.id })
 }
 
 async function withBusy(fn: () => Promise<void>) {
@@ -2766,16 +2650,14 @@ function graphConnectorPath(fromLane: number, toLane: number) {
   return `M ${fromX} ${graphCenterY} C ${fromX} ${midY}, ${toX} ${midY}, ${toX} ${graphRowHeight}`
 }
 
-function resolveMarkdownResourceURL(href: string) {
-  const current = fileContent.value
+function resolveMarkdownResourceURL(href: string, current = fileContent.value) {
   if (!current || isExternalMarkdownURL(href)) return href
   const resolved = resolveRepoRelativePath(current.file_path, href)
   return blobURL(current.repo_id, current.source_commit_sha, resolved, true)
 }
 
-function resolveMarkdownLinkURL(href: string) {
+function resolveMarkdownLinkURL(href: string, current = fileContent.value) {
   if (isExternalMarkdownURL(href)) return href
-  const current = fileContent.value
   if (!current) return href
   const [pathPart, suffix] = splitMarkdownURLSuffix(href)
   if (!pathPart) return href
@@ -2813,16 +2695,6 @@ function resolveRepoRelativePath(currentFilePath: string, href: string) {
 
 function isMarkdownContent(content: FileContent) {
   return content.extension === '.md' || content.extension === '.markdown'
-}
-
-function isHTMLContent(content: FileContent) {
-  return content.extension === '.html' || content.extension === '.htm' || /^text\/html\b/i.test(content.mime_type || '')
-}
-
-function dirNameFromPath(filePath: string) {
-  const parts = filePath.split('/').filter(Boolean)
-  parts.pop()
-  return parts.length ? parts.join('/') : '.'
 }
 
 function armMarkdownImageRetries() {
@@ -2866,6 +2738,7 @@ interface URLState {
   branch: string
   dir?: string
   versionID?: number
+  commit?: string
 }
 
 function readURLState(): URLState {
@@ -2885,11 +2758,12 @@ function readURLState(): URLState {
       tabParam === 'ai-diagnostics' ||
       tabParam === 'settings'
         ? tabParam
-        : 'docs',
+        : tab.value,
     view: viewParam === 'branch' ? 'branch' : 'latest',
     branch: params.get('branch') || '',
     dir: dirParam === null ? undefined : dirParam || '.',
-    versionID: versionID > 0 ? versionID : undefined
+    versionID: versionID > 0 ? versionID : undefined,
+    commit: params.get('commit') || undefined
   }
 }
 
@@ -2914,23 +2788,18 @@ async function applyURLState() {
 function updateURL(options: { clearVersion?: boolean } = {}) {
   if (applyingURLState) return
   const params = new URLSearchParams()
-  if (isGlobalTab.value) {
-    params.set('tab', tab.value)
-    const nextURL = `${window.location.pathname}?${params.toString()}${window.location.hash}`
-    if (nextURL !== `${window.location.pathname}${window.location.search}${window.location.hash}`) {
-      window.history.pushState(null, '', nextURL)
-    }
-    return
-  }
   if (!selectedRepo.value) return
   params.set('repo', String(selectedRepo.value.id))
-  if (tab.value !== 'docs') params.set('tab', tab.value)
-  params.set('view', viewMode.value)
-  const branch = tab.value === 'history' ? historyBranch.value : selectedBranch.value
-  if ((viewMode.value === 'branch' || tab.value === 'history') && branch) params.set('branch', branch)
-  if (currentDir.value !== searchResultDir) params.set('dir', currentDir.value)
-  const versionID = options.clearVersion ? 0 : fileContent.value?.version_id
-  if (versionID) params.set('version', String(versionID))
+  if (tab.value === 'history') {
+    if (historyBranch.value) params.set('branch', historyBranch.value)
+    if (selectedCommit.value?.sha) params.set('commit', selectedCommit.value.sha)
+  } else if (tab.value === 'docs') {
+    params.set('view', viewMode.value)
+    if (viewMode.value === 'branch' && selectedBranch.value) params.set('branch', selectedBranch.value)
+    if (currentDir.value !== searchResultDir) params.set('dir', currentDir.value)
+    const versionID = options.clearVersion ? 0 : fileContent.value?.version_id
+    if (versionID) params.set('version', String(versionID))
+  }
   const nextURL = `${window.location.pathname}?${params.toString()}${window.location.hash}`
   if (nextURL !== `${window.location.pathname}${window.location.search}${window.location.hash}`) {
     window.history.pushState(null, '', nextURL)
@@ -2960,6 +2829,35 @@ function normalizeBrowserDir(value: string) {
 
 async function renderMermaid() {
   const blocks = document.querySelectorAll<HTMLElement>('.markdown-body code.language-mermaid')
+  if (!blocks.length) return
+  const [{ default: mermaid }, { default: DOMPurify }] = await Promise.all([import('mermaid'), import('dompurify')])
+  if (!mermaidInitialized) {
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      theme: 'default',
+      htmlLabels: false,
+      themeVariables: {
+        actorBkg: '#1f2937',
+        actorBorder: '#38bdf8',
+        actorLineColor: '#38bdf8',
+        actorTextColor: '#f8fafc',
+        activationBkgColor: '#e0f2fe',
+        activationBorderColor: '#0ea5e9',
+        labelBoxBkgColor: '#ffffff',
+        labelBoxBorderColor: '#94a3b8',
+        labelTextColor: '#1f2937',
+        loopTextColor: '#1f2937',
+        noteBkgColor: '#fff7ed',
+        noteBorderColor: '#fb923c',
+        noteTextColor: '#1f2937',
+        signalColor: '#64748b',
+        signalTextColor: '#1f2937',
+        sequenceNumberColor: '#ffffff'
+      }
+    })
+    mermaidInitialized = true
+  }
   let index = 0
   for (const block of blocks) {
     const source = block.textContent || ''
@@ -2969,7 +2867,7 @@ async function renderMermaid() {
       const result = await mermaid.render(`doc-harbor-mermaid-${Date.now()}-${index++}`, source)
       const wrapper = document.createElement('div')
       wrapper.className = 'mermaid-render'
-      wrapper.innerHTML = sanitizeMermaidSVG(result.svg)
+      wrapper.innerHTML = sanitizeMermaidSVG(result.svg, DOMPurify)
       pre.replaceWith(wrapper)
     } catch (err) {
       pre.classList.add('mermaid-error')
@@ -2981,7 +2879,7 @@ async function renderMermaid() {
   }
 }
 
-function sanitizeMermaidSVG(svg: string) {
+function sanitizeMermaidSVG(svg: string, DOMPurify: typeof import('dompurify').default) {
   return DOMPurify.sanitize(svg, {
     USE_PROFILES: { svg: true, svgFilters: true },
     ADD_TAGS: ['marker'],

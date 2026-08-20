@@ -1,0 +1,16 @@
+---
+import App from '../App.vue'
+import AppLayout from '../layouts/AppLayout.astro'
+import type { AppTab } from '../lib/navigation'
+
+interface Props {
+  title: string
+  tab?: AppTab
+}
+
+const { title, tab = 'docs' } = Astro.props
+---
+
+<AppLayout title={title}>
+  <App initialTab={tab} client:load />
+</AppLayout>

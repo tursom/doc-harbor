@@ -191,7 +191,7 @@ a {
   gap: 8px;
 }
 
-.global-nav button {
+.global-nav a {
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 7px;
   background: rgba(255, 255, 255, 0.06);
@@ -204,7 +204,7 @@ a {
   text-align: left;
 }
 
-.global-nav button.active {
+.global-nav a.active {
   border-color: #d8f36b;
   background: #d8f36b;
   color: #17201a;
@@ -400,7 +400,7 @@ a {
   padding: 14px 24px 0;
 }
 
-.tabs button,
+.tabs a,
 .segmented button {
   border: 1px solid #c9d2c6;
   background: #ffffff;
@@ -413,7 +413,7 @@ a {
   padding: 0 12px;
 }
 
-.tabs button.active,
+.tabs a.active,
 .segmented button.active {
   background: #20382c;
   color: #ffffff;
@@ -1756,6 +1756,10 @@ textarea {
     gap: 10px;
   }
 
+  .app-shell.ai-mode .global-nav {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
   .repo-list {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -1786,6 +1790,13 @@ textarea {
 }
 
 @media (max-width: 720px) {
+  .app-shell.ai-mode {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+    grid-template-rows: auto auto;
+  }
+
   .topbar,
   .file-header {
     flex-direction: column;
@@ -1808,7 +1819,23 @@ textarea {
   }
 
   .app-shell.ai-mode .sidebar {
-    max-height: 24vh;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .app-shell.ai-mode .global-nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .app-shell.ai-mode .repo-list {
+    max-height: 112px;
+    overflow: auto;
+  }
+
+  .app-shell.ai-mode .workspace {
+    height: auto;
+    min-height: 0;
+    overflow: visible;
   }
 
   .app-shell.ai-mode .topbar {
@@ -1816,7 +1843,9 @@ textarea {
   }
 
   .app-shell.ai-mode .ai-panel {
-    grid-template-rows: minmax(76px, 0.6fr) minmax(0, 2.1fr) minmax(76px, 0.8fr);
+    flex: none;
+    grid-template-rows: 220px minmax(480px, 65vh) 260px;
+    overflow: visible;
     gap: 10px;
   }
 
