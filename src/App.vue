@@ -61,11 +61,14 @@
             <button class="mini-command" type="button" :disabled="webhookSecretLoading" @click="toggleWebhookSecret">
               {{ webhookSecretVisible ? '隐藏 Secret' : '显示 Secret' }}
             </button>
-            <button v-if="webhookSecretVisible && webhookSecret" class="mini-command" type="button" @click="copyWebhookSecret">
+            <button class="mini-command" type="button" :disabled="webhookSecretLoading" @click="refreshWebhookSecret">
+              {{ webhookSecretLoading ? '处理中…' : '刷新 Secret' }}
+            </button>
+            <button v-if="webhookSecretVisible && webhookSecret" class="mini-command" type="button" :disabled="webhookSecretLoading" @click="copyWebhookSecret">
               复制 Secret
             </button>
             <code v-if="webhookSecretVisible && webhookSecret" class="secret-value">{{ webhookSecret }}</code>
-            <span v-if="webhookSecretVisible && !webhookSecret" class="secret-missing">未配置 GITHUB_WEBHOOK_SECRET</span>
+            <span v-if="webhookSecretVisible && !webhookSecret" class="secret-missing">未配置 Webhook Secret，可点击“刷新 Secret”生成</span>
           </div>
           <p v-if="!selectedRepo && !isGlobalTab">配置 Git 仓库后开始同步和扫描文档</p>
         </div>
@@ -2484,6 +2487,7 @@ async function withBusy(fn: () => Promise<void>) {
 }
 
 async function toggleWebhookSecret() {
+  if (webhookSecretLoading.value) return
   if (webhookSecretVisible.value) {
     resetWebhookSecret()
     return
@@ -2501,8 +2505,27 @@ async function toggleWebhookSecret() {
   }
 }
 
+// Secret 在所有仓库间共享；请求期间共用加载状态，防止重复刷新或读取到旧值。
+async function refreshWebhookSecret() {
+  if (webhookSecretLoading.value) return
+  if (!window.confirm('刷新 GitHub Webhook Secret 后，所有仓库的旧密钥将立即失效。你需要更新所有仓库的 Webhook Secret，以及 GitHub Actions 工作流中使用的签名密钥。确定刷新吗？')) return
+  webhookSecretLoading.value = true
+  error.value = ''
+  // 请求失败也可能是响应丢失，因此先清除旧值，避免继续展示和复制可能已失效的密钥。
+  resetWebhookSecret()
+  try {
+    const response = await api.refreshGithubWebhookSecret()
+    webhookSecret.value = response.configured ? response.secret : ''
+    webhookSecretVisible.value = true
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    webhookSecretLoading.value = false
+  }
+}
+
 async function copyWebhookSecret() {
-  if (!webhookSecret.value) return
+  if (webhookSecretLoading.value || !webhookSecret.value) return
   error.value = ''
   try {
     await navigator.clipboard.writeText(webhookSecret.value)
@@ -2514,7 +2537,7 @@ async function copyWebhookSecret() {
 function resetWebhookSecret() {
   webhookSecret.value = ''
   webhookSecretVisible.value = false
-  webhookSecretLoading.value = false
+  // 切换仓库只清除展示；加载状态由请求的 finally 释放，避免并发刷新共享密钥。
 }
 
 function resetForm() {

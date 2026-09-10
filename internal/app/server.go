@@ -221,11 +221,25 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request, repoID int64
 }
 
 func (s *Server) handleGitHubWebhookSecret(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	// 查询和刷新共用受保护的管理路径，避免部署中公开的 Webhook 通配路径
+	// 意外新增一个未受保护的刷新入口；响应中的密钥也不能被浏览器或代理缓存。
+	w.Header().Set("Cache-Control", "no-store")
+	var secret string
+	var err error
+	switch r.Method {
+	case http.MethodGet:
+		secret, err = s.githubWebhookSecret(r.Context())
+	case http.MethodPost:
+		secret, err = s.rotateGitHubWebhookSecret(r.Context())
+	default:
+		w.Header().Set("Allow", "GET, POST")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	secret := s.cfg.GitHubWebhookSecret
+	if err != nil {
+		writeError(w, errUnavailable("webhook settings storage is unavailable"))
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"configured": secret != "",
 		"secret":     secret,
@@ -237,7 +251,12 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if s.cfg.GitHubWebhookSecret == "" {
+	secret, err := s.githubWebhookSecret(r.Context())
+	if err != nil {
+		writeError(w, errUnavailable("webhook settings storage is unavailable"))
+		return
+	}
+	if secret == "" {
 		writeError(w, errUnavailable("github webhook secret is not configured"))
 		return
 	}
@@ -260,7 +279,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	if !verifyGitHubSignature(s.cfg.GitHubWebhookSecret, body, r.Header.Get("X-Hub-Signature-256")) {
+	if !verifyGitHubSignature(secret, body, r.Header.Get("X-Hub-Signature-256")) {
 		writeError(w, errUnauthorized("invalid github webhook signature"))
 		return
 	}

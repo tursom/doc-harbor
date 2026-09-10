@@ -147,6 +147,10 @@ export const api = {
   async githubWebhookSecret() {
     return request<{ configured: boolean; secret: string }>('/api/webhooks/github/secret')
   },
+  // 由后端生成并持久化所有仓库共享的新密钥，返回结构与读取接口保持一致。
+  async refreshGithubWebhookSecret() {
+    return request<{ configured: boolean; secret: string }>('/api/webhooks/github/secret', { method: 'POST' })
+  },
   async aiSettings() {
     return request<AISettingsSummary>('/api/ai/settings')
   },

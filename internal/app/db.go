@@ -43,6 +43,12 @@ func openDB(ctx context.Context, cfg Config) (*sql.DB, error) {
 
 func migrate(ctx context.Context, db *sql.DB) error {
 	stmts := []string{
+		// 全局 Webhook 密钥只保留当前有效值；已有部署在首次刷新前仍使用环境变量。
+		`CREATE TABLE IF NOT EXISTS github_webhook_settings (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			secret TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS repositories (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,

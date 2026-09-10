@@ -38,7 +38,7 @@ http://127.0.0.1:14220
 DocHarbor 的主界面分为三块：
 
 - 左侧仓库列表：切换已配置仓库，查看默认分支和最近扫描状态。
-- 顶部仓库信息：显示仓库 URL、GitHub Webhook URL、Secret 显示按钮、刷新、扫描和配置按钮。
+- 顶部仓库信息：显示仓库 URL、GitHub Webhook URL、Secret 显示和刷新按钮、列表刷新、扫描和配置按钮。
 - 主工作区：包含 **文档**、**历史**、**扫描** 三个页签。
 
 ![文档预览界面](assets/user-guide/01-doc-preview.png)
@@ -249,13 +249,15 @@ https://<你的域名>/api/webhooks/github/<repoID>
 
 ### 11.1 配置服务端 Secret
 
-启动服务时设置共享 secret：
+可以在页面点击 **刷新 Secret**，由服务端生成随机密钥并持久化到数据库；首次未配置时也可以使用此操作生成。也可以在启动服务时通过环境变量提供初始共享密钥：
 
 ```bash
 GITHUB_WEBHOOK_SECRET=your-random-secret docker compose up --build -d
 ```
 
-所有仓库共享这一个 secret。为空时 webhook 入口不可用。
+所有仓库共享同一个 Secret，**数据库中的密钥优先于 `GITHUB_WEBHOOK_SECRET` 环境变量**；只有数据库未保存密钥时才使用环境变量。两者均未配置时，Webhook 入口不可用。
+
+刷新成功后新密钥立即生效，无需重启服务；旧密钥立即失效。密钥保存在数据库中，重启后仍然有效，请持久化并备份数据库（默认位于 `DATA_DIR`，自定义 `DB_DSN` 时以实际数据库位置为准）。刷新后仅修改环境变量不会覆盖数据库中的密钥。
 
 ### 11.2 在 GitHub 仓库配置 Webhook
 
@@ -265,16 +267,24 @@ GITHUB_WEBHOOK_SECRET=your-random-secret docker compose up --build -d
 | --- | --- |
 | Payload URL | `https://<你的域名>/api/webhooks/github/<repoID>` |
 | Content type | `application/json` |
-| Secret | 与 `GITHUB_WEBHOOK_SECRET` 一致 |
+| Secret | 与页面显示的当前有效 Secret 一致 |
 | Events | `Just the push event` |
 
 GitHub 的 `ping` 事件用于测试连通性；`push` 事件会异步触发扫描并立即返回 `202 Accepted`。
 
-### 11.3 在 UI 显示和复制 Secret
+### 11.3 在 UI 显示、复制和刷新 Secret
 
-点击页面顶部的 **显示 Secret**，DocHarbor 会从后端读取当前部署环境中的 `GITHUB_WEBHOOK_SECRET` 并明文展示。点击 **复制 Secret** 可复制到剪贴板。
+点击页面顶部的 **显示 Secret**，DocHarbor 会从后端读取当前有效密钥并明文展示。点击 **复制 Secret** 可复制到剪贴板。
 
-注意：DocHarbor 自身没有用户权限系统，显示 Secret 的能力必须依赖 Pangolin 或其他外层访问控制保护。
+需要更换密钥时：
+
+1. 点击 **刷新 Secret**。确认框会明确提示：所有仓库的旧密钥立即失效，必须更新 Webhook 和 GitHub Actions 工作流中使用的签名密钥。
+2. 确认后，服务端生成随机密钥并保存到数据库，页面自动显示新密钥供复制。请求期间相关按钮禁用，失败时显示错误信息。
+3. 复制新密钥，更新所有仓库的 GitHub Webhook Secret，以及使用该密钥签名请求的 GitHub Actions 配置（直接写在 workflow 中的密钥或 Actions Secrets）。更新完成前，使用旧密钥的请求将无法通过签名校验。
+
+刷新无需重启 DocHarbor。如果请求失败或响应丢失，可点击 **显示 Secret** 重新读取服务端当前有效值，确认刷新是否已生效。
+
+注意：DocHarbor 自身没有用户权限系统，读取和刷新 Secret 的能力必须依赖 Pangolin 或其他外层访问控制保护。`/api/webhooks/github/secret` 的 **GET 和 POST 都必须要求认证并限制为可信管理人员访问**，不能随仓库 Webhook 接收路径一起旁路认证。
 
 ### 11.4 Pangolin 路径放行
 
@@ -299,7 +309,7 @@ api/webhooks/github/secret
 api/webhooks/github/*
 ```
 
-规则 1 必须排在规则 2 前面，避免 `secret` 接口被公开。也可以不用通配符，逐个仓库精确放行：
+规则 1 必须排在规则 2 前面，并同时保护 GET 和 POST，避免密钥读取或刷新接口被公开。也可以不用通配符，逐个仓库精确放行：
 
 ```text
 /api/webhooks/github/1
@@ -361,7 +371,7 @@ DocHarbor 镜像默认使用 `tini` 作为入口，`docker-compose.yml` 也启�
 | `MAX_PREVIEW_FILE_SIZE` | `2097152` | Markdown 预览大小上限 |
 | `ALLOWED_GIT_HOSTS` | 空 | Git host 白名单，逗号分隔；空表示不限制 |
 | `ALLOW_LOCAL_GIT` | `0` | 是否允许本地路径或 `file://` 仓库 |
-| `GITHUB_WEBHOOK_SECRET` | 空 | GitHub Webhook 共享 secret |
+| `GITHUB_WEBHOOK_SECRET` | 空 | 数据库未保存密钥时使用的 GitHub Webhook 共享 Secret；数据库密钥优先 |
 
 AI provider API key 通过前端 AI 配置页录入。DocHarbor 会在 `DATA_DIR/secrets/ai-master.key` 自动生成本机加密主密钥，并随数据目录持久化；不需要额外配置环境变量。
 
@@ -448,8 +458,8 @@ Mermaid 代码块语法错误时，DocHarbor 会保留原始代码块并显示�
 
 检查：
 
-- `GITHUB_WEBHOOK_SECRET` 是否配置。
-- GitHub Webhook Secret 是否和服务端一致。
+- 数据库中是否已生成 Secret，或是否配置了 `GITHUB_WEBHOOK_SECRET`。
+- GitHub Webhook Secret 是否和页面显示的服务端当前有效值一致；刷新后是否已更新所有仓库的 Webhook 和相关 Actions 签名密钥。
 - GitHub Webhook Content type 是否为 `application/json`。
 - GitHub 事件是否选择了 push。
 - Pangolin 是否对 `/api/webhooks/github/<repoID>` 设置了旁路认证。
@@ -490,7 +500,11 @@ DocHarbor 的 UI 使用同一组 HTTP API。自动化脚本可以直接调用这
 | `GET` | `/api/repos/{repoID}/history` | 仓库 Git 历史 |
 | `GET` | `/api/repos/{repoID}/commits/{sha}` | commit 详情和变更文件 |
 | `GET` | `/api/repos/{repoID}/scan-runs` | 扫描记录 |
+| `GET` | `/api/webhooks/github/secret` | 读取当前有效共享密钥，返回 `{configured, secret}`；必须保护访问 |
+| `POST` | `/api/webhooks/github/secret` | 生成随机共享密钥并持久化到数据库，返回 `{configured, secret}`；必须保护访问 |
 | `POST` | `/api/webhooks/github/{repoID}` | GitHub Webhook |
+
+Secret 的 GET 接口保留原有返回结构：`configured` 为布尔值，`secret` 为字符串。POST 无需请求体，成功返回相同结构（`configured: true`，`secret` 为新密钥）。每次 POST 都会更换所有仓库共享的密钥，立即使旧值失效，无需重启；不要自动重试刷新请求，响应不确定时先 GET 确认当前值。自动化调用同样必须通过外层认证，避免在日志中输出返回的明文密钥。
 
 构建发布：
 
