@@ -452,7 +452,9 @@ func (s *Scanner) scanEnabled(ctx context.Context, trigger string) {
 		return
 	}
 	for _, repo := range repos {
-		if !repo.Enabled {
+		// 关闭自动拉取的仓库同时跳过启动扫描和周期扫描，手动扫描及 Webhook
+		// 仍直接调用 Scan，不受此设置影响，也不会隐藏已经索引的文档。
+		if !repo.Enabled || repo.SyncIntervalSeconds == -1 {
 			continue
 		}
 		if trigger == "scheduled" {

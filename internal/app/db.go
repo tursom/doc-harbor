@@ -614,7 +614,8 @@ func withRepositoryDefaults(repo Repository) Repository {
 	if len(repo.BranchPriority) == 0 {
 		repo.BranchPriority = []string{"main", "master", "release/*", "develop", "feature/*"}
 	}
-	if repo.SyncIntervalSeconds <= 0 {
+	// SyncIntervalSeconds 为 -1 时关闭启动和定时扫描；0 保留为兼容旧客户端的默认值。
+	if repo.SyncIntervalSeconds <= 0 && repo.SyncIntervalSeconds != -1 {
 		repo.SyncIntervalSeconds = 3600
 	}
 	if repo.MaxFileSizeBytes <= 0 {
@@ -656,7 +657,8 @@ func mergeRepository(current, patch Repository) Repository {
 		current.CredentialRef = patch.CredentialRef
 	}
 	current.Enabled = patch.Enabled || current.Enabled
-	if patch.SyncIntervalSeconds > 0 {
+	// 显式的 -1 可关闭自动拉取；省略字段（零值）时保留当前设置。
+	if patch.SyncIntervalSeconds > 0 || patch.SyncIntervalSeconds == -1 {
 		current.SyncIntervalSeconds = patch.SyncIntervalSeconds
 	}
 	if patch.MaxFileSizeBytes > 0 {

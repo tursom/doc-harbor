@@ -106,12 +106,21 @@
             Git URL
             <input v-model="form.repo_url" required placeholder="git@github.com:org/repo.git" />
           </label>
+          <label>
+            <input
+              type="checkbox"
+              :checked="form.sync_interval_seconds !== -1"
+              @change="form.sync_interval_seconds = ($event.target as HTMLInputElement).checked ? 3600 : -1"
+            />
+            自动拉取 Git 仓库
+          </label>
+          <small>关闭后不在启动时或按周期自动拉取，仍可手动扫描或通过 Webhook 更新。</small>
           <div class="form-grid">
             <label>
               默认分支
               <input v-model="form.default_branch" placeholder="main" />
             </label>
-            <label>
+            <label v-if="form.sync_interval_seconds !== -1">
               扫描周期秒
               <input v-model.number="form.sync_interval_seconds" type="number" min="60" />
             </label>
