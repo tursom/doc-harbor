@@ -8,6 +8,8 @@ services:
     environment:
       DATA_DIR: /data
       HTTP_ADDR: :14220
+      # 留空不限制；填写逗号分隔的来源网段，限制所有 HTTP 页面和接口。
+      ALLOWED_CLIENT_CIDRS: ${ALLOWED_CLIENT_CIDRS:-}
       WEB_DIR: /app/web/dist
       ALLOW_LOCAL_GIT: "0"
       ALLOWED_GIT_HOSTS: ""

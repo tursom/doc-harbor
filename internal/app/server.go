@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/netip"
 	"os"
 	"path"
 	"strconv"
@@ -26,19 +27,26 @@ type Server struct {
 	db      *sql.DB
 	git     *Git
 	scanner *Scanner
+	// 启动时解析网段，配置错误直接阻止启动，避免误配置导致访问限制失效。
+	allowedClientPrefixes []netip.Prefix
 }
 
 func NewServer(cfg Config) (*Server, error) {
+	prefixes, err := parseAllowedClientCIDRs(cfg.AllowedClientCIDRs)
+	if err != nil {
+		return nil, err
+	}
 	db, err := openDB(context.Background(), cfg)
 	if err != nil {
 		return nil, err
 	}
 	git := newGit(cfg)
 	return &Server{
-		cfg:     cfg,
-		db:      db,
-		git:     git,
-		scanner: newScanner(db, git),
+		cfg:                   cfg,
+		db:                    db,
+		git:                   git,
+		scanner:               newScanner(db, git),
+		allowedClientPrefixes: prefixes,
 	}, nil
 }
 
@@ -63,7 +71,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/webhooks/github/secret", s.handleGitHubWebhookSecret)
 	mux.HandleFunc("/api/webhooks/github/", s.handleGitHubWebhook)
 	mux.Handle("/", s.webHandler())
-	return recoverMiddleware(mux)
+	return recoverMiddleware(s.restrictClientNetworks(mux))
 }
 
 func recoverMiddleware(next http.Handler) http.Handler {

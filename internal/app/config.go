@@ -9,14 +9,16 @@ import (
 )
 
 type Config struct {
-	DataDir               string
-	HTTPAddr              string
-	DBDSN                 string
-	GitBin                string
-	WebDir                string
-	DefaultScanInterval   time.Duration
-	MaxPreviewFileSize    int64
-	AllowedGitHosts       []string
+	DataDir             string
+	HTTPAddr            string
+	DBDSN               string
+	GitBin              string
+	WebDir              string
+	DefaultScanInterval time.Duration
+	MaxPreviewFileSize  int64
+	AllowedGitHosts     []string
+	// AllowedClientCIDRs 限制 HTTP 连接来源，空列表保持不限制。
+	AllowedClientCIDRs    []string
 	AllowLocalGit         bool
 	GitCommandTimeout     time.Duration
 	SchedulerPollInterval time.Duration
@@ -24,6 +26,12 @@ type Config struct {
 }
 
 func LoadConfig() Config {
+	// 网段白名单不使用会丢弃空项的 csvEnv：逗号分隔中的空项也应在启动时报错，
+	// 防止仅填写逗号等无效配置被当成“不限制访问”。
+	var allowedClientCIDRs []string
+	if raw := env("ALLOWED_CLIENT_CIDRS", ""); raw != "" {
+		allowedClientCIDRs = strings.Split(raw, ",")
+	}
 	dataDir := env("DATA_DIR", "./data")
 	dbDSN := env("DB_DSN", filepath.Join(dataDir, "doc-harbor.db"))
 	if strings.HasPrefix(dbDSN, "file:") {
@@ -41,6 +49,7 @@ func LoadConfig() Config {
 		DefaultScanInterval:   secondsEnv("DEFAULT_SCAN_INTERVAL", 3600),
 		MaxPreviewFileSize:    int64Env("MAX_PREVIEW_FILE_SIZE", 2*1024*1024),
 		AllowedGitHosts:       csvEnv("ALLOWED_GIT_HOSTS"),
+		AllowedClientCIDRs:    allowedClientCIDRs,
 		AllowLocalGit:         boolEnv("ALLOW_LOCAL_GIT", false),
 		GitCommandTimeout:     secondsEnv("GIT_COMMAND_TIMEOUT", 120),
 		SchedulerPollInterval: secondsEnv("SCHEDULER_POLL_INTERVAL", 60),

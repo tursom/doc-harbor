@@ -76,6 +76,7 @@ npm run test:e2e
 | --- | --- | --- |
 | `DATA_DIR` | `./data` | 数据目录，存放 SQLite 和 bare mirror |
 | `HTTP_ADDR` | `:8080` | HTTP 监听地址 |
+| `ALLOWED_CLIENT_CIDRS` | 空 | HTTP 来源网段白名单，逗号分隔 IPv4/IPv6 CIDR；空表示不限制，非法配置阻止启动。按 TCP 对端匹配，所有页面/API/Webhook 均生效，不信任转发头 |
 | `DB_DSN` | `${DATA_DIR}/doc-harbor.db` | SQLite DSN |
 | `GIT_BIN` | `git` | Git 命令 |
 | `WEB_DIR` | `./web/dist` | 静态前端目录 |

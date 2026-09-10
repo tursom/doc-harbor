@@ -364,6 +364,7 @@ DocHarbor 镜像默认使用 `tini` 作为入口，`docker-compose.yml` 也启�
 | --- | --- | --- |
 | `DATA_DIR` | `./data` | SQLite 和 bare mirror 数据目录 |
 | `HTTP_ADDR` | `:8080` | HTTP 监听地址；Compose 中为 `:14220` |
+| `ALLOWED_CLIENT_CIDRS` | 空 | 允许访问 HTTP 服务的来源网段，逗号分隔 IPv4/IPv6 CIDR；空表示不限制，非法网段阻止启动 |
 | `DB_DSN` | `${DATA_DIR}/doc-harbor.db` | SQLite DSN |
 | `GIT_BIN` | `git` | Git 命令路径 |
 | `WEB_DIR` | `./web/dist` | 静态前端目录 |
@@ -374,6 +375,17 @@ DocHarbor 镜像默认使用 `tini` 作为入口，`docker-compose.yml` 也启�
 | `GITHUB_WEBHOOK_SECRET` | 空 | 数据库未保存密钥时使用的 GitHub Webhook 共享 Secret；数据库密钥优先 |
 
 AI provider API key 通过前端 AI 配置页录入。DocHarbor 会在 `DATA_DIR/secrets/ai-master.key` 自动生成本机加密主密钥，并随数据目录持久化；不需要额外配置环境变量。
+
+可以通过 `ALLOWED_CLIENT_CIDRS` 限制来源网段，例如：
+
+```bash
+ALLOWED_CLIENT_CIDRS='192.168.10.0/24,10.20.0.0/16,127.0.0.1/32,::1/128' docker compose up -d
+```
+
+直接运行程序时也使用同名环境变量。配置修改后需重启程序或重新创建容器。单个 IPv4 主机用 `/32`，单个 IPv6 主机用 `/128`；多个网段满足任意一个即可访问。未配置时不限制，配置后网段外来源返回 HTTP 403，规则适用于页面、API、健康检查和 Webhook，不隐式放行本机。
+
+来源以 TCP 连接对端为准，不使用 `X-Forwarded-For`、`X-Real-IP` 或 `Forwarded` 请求头。经过 Pangolin、反向代理或 Docker 网络地址转换时，应按应用实际看到的连接来源配置；如需限制代理前的原始访客网段，请在代理层配置。直接调用 Webhook 的 GitHub Actions runner 也必须满足来源限制，否则更新通知会被拒绝。
+
 
 ### 13.3 数据和凭据挂载
 
