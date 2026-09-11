@@ -57,7 +57,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			default_branch TEXT NOT NULL DEFAULT 'main',
 			tracked_branches TEXT NOT NULL DEFAULT '["*"]',
 			latest_include_branches TEXT NOT NULL DEFAULT '["*"]',
-			latest_exclude_branches TEXT NOT NULL DEFAULT '["archive/*","tmp/*","dependabot/*"]',
+			latest_exclude_branches TEXT NOT NULL DEFAULT '["archive/*","tmp/*","dependabot/*","backup/*"]',
 			stale_branch_days INTEGER NOT NULL DEFAULT 180,
 			branch_priority TEXT NOT NULL DEFAULT '["main","master","release/*","develop","feature/*"]',
 			credential_ref TEXT NOT NULL DEFAULT '',
@@ -358,7 +358,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
-	return nil
+	return migrateBackupLatestDefaults(ctx, db)
 }
 
 func nowString() string {
@@ -479,7 +479,7 @@ func scanRepository(row repoScanner) (Repository, error) {
 	}
 	repo.TrackedBranches = decodeStringList(tracked, []string{"*"})
 	repo.LatestIncludeBranches = decodeStringList(include, []string{"*"})
-	repo.LatestExcludeBranches = decodeStringList(exclude, []string{"archive/*", "tmp/*", "dependabot/*"})
+	repo.LatestExcludeBranches = decodeStringList(exclude, []string{"archive/*", "tmp/*", "dependabot/*", "backup/*"})
 	repo.BranchPriority = decodeStringList(priority, []string{"main", "master", "release/*", "develop", "feature/*"})
 	repo.Enabled = scanBool(enabled)
 	return repo, nil
@@ -612,7 +612,7 @@ func withRepositoryDefaults(repo Repository) Repository {
 		repo.LatestIncludeBranches = []string{"*"}
 	}
 	if len(repo.LatestExcludeBranches) == 0 {
-		repo.LatestExcludeBranches = []string{"archive/*", "tmp/*", "dependabot/*"}
+		repo.LatestExcludeBranches = []string{"archive/*", "tmp/*", "dependabot/*", "backup/*"}
 	}
 	if repo.StaleBranchDays <= 0 {
 		repo.StaleBranchDays = 180

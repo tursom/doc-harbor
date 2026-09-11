@@ -1284,20 +1284,29 @@ textarea {
   background: transparent;
   color: #26342e;
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) auto;
+  grid-template-columns: 20px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
-  padding: 0 8px;
+  padding: 6px 8px;
   text-align: left;
 }
 
-.file-row span {
+/* 内容列允许收缩，标题与分支各占一行；目录没有分支时保持单行居中。 */
+.file-row-details {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.file-row-title,
+.file-row-branch {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.file-row small {
+.file-row-branch {
   color: #6b7d70;
 }
 

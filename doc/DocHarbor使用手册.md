@@ -61,11 +61,14 @@ DocHarbor 的主界面分为三块：
 | 扫描周期秒 | 开启自动拉取时的后台定时扫描间隔 | `3600` |
 | 追踪分支 | 需要同步和扫描的分支，支持 `*` 和通配模式 | `*`、`main, release/*` |
 | 智能最新 include | 参与智能最新计算的分支范围 | `*` |
-| 智能最新 exclude | 从智能最新排除的分支 | `archive/*, tmp/*, dependabot/*` |
+| 智能最新 exclude | 从智能最新排除的分支 | `archive/*, tmp/*, dependabot/*, backup/*` |
 | 分支优先级 | 时间相同时的分支排序 | `main, master, release/*, develop` |
 | 扫描目录 | 每行一个目录，只索引这些目录下的文件 | `doc`、`docs` |
 
 ### 3.2 分支规则怎么理解
+
+默认排除 `backup/*`，避免备份分支成为“智能最新”的文档来源。升级时会执行一次迁移：仍使用旧默认排除规则（`archive/*`、`tmp/*`、`dependabot/*`）的仓库自动补上 `backup/*`，并重算已有索引，无需重新拉取 Git。自定义规则保持不变；如需排除备份分支，请自行添加 `backup/*`。
+
 
 - **追踪分支** 决定哪些分支会被扫描。
 - **智能最新 include/exclude** 决定哪些分支参与“智能最新”视图。
@@ -77,7 +80,7 @@ DocHarbor 的主界面分为三块：
 ```text
 追踪分支：*
 智能最新 include：*
-智能最新 exclude：archive/*, tmp/*, dependabot/*
+智能最新 exclude：archive/*, tmp/*, dependabot/*, backup/*
 分支优先级：main, master, release/*, develop, feature/*
 扫描目录：doc
 ```

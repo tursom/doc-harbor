@@ -128,6 +128,78 @@ test('mobile AI navigation exposes every global page without horizontal overflow
   expect(await page.locator('body').evaluate((body) => body.scrollWidth === body.clientWidth)).toBe(true)
 })
 
+// 使用远超侧栏宽度的真实分支形态，并检查几何尺寸，防止仅 DOM 可见但标题已被挤掉的假通过。
+for (const width of [1440, 390]) {
+  test(`document titles survive long backup branches at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 })
+    await mockHistory(page)
+    const branch = `backup/main-before-doc-index-migration-${'20260820-abcdef123456-'.repeat(8)}`
+    const title = '部署操作手册'
+    await page.route('**/api/repos/7/files?**', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          items: [
+            { kind: 'dir', name: '运维文档', path: 'docs' },
+            { kind: 'file', name: 'deploy.md', path: 'deploy.md', title, version_id: 42, source_branch: branch },
+            { kind: 'file', name: 'README.md', path: 'README.md', version_id: 43, source_branch: 'main' }
+          ]
+        })
+      })
+    )
+    await page.goto('/?repo=7')
+    const row = page.locator('.file-row').filter({ hasText: title })
+    const heading = row.locator('.file-row-title')
+    const source = row.locator('.file-row-branch')
+    await expect(heading).toBeVisible()
+    await expect(heading).toHaveText(title)
+    await expect(source).toHaveText(branch)
+    await expect(source).toHaveAttribute('title', branch)
+    const sizes = await row.evaluate((element) => {
+      const heading = element.querySelector<HTMLElement>('.file-row-title')!
+      const source = element.querySelector<HTMLElement>('.file-row-branch')!
+      const titleBox = heading.getBoundingClientRect()
+      const branchBox = source.getBoundingClientRect()
+      const rowBox = element.getBoundingClientRect()
+      return {
+        titleWidth: heading.clientWidth,
+        titleScrollWidth: heading.scrollWidth,
+        titleBottom: titleBox.bottom,
+        branchTop: branchBox.top,
+        branchWidth: source.clientWidth,
+        branchScrollWidth: source.scrollWidth,
+        branchOverflow: getComputedStyle(source).textOverflow,
+        contained: titleBox.left >= rowBox.left && titleBox.right <= rowBox.right &&
+          branchBox.left >= rowBox.left && branchBox.right <= rowBox.right,
+        rowOverflow: element.scrollWidth > element.clientWidth
+      }
+    })
+    // 短标题完整显示，长分支在次行省略，两者都必须位于按钮内部。
+    expect(sizes.titleWidth).toBeGreaterThan(100)
+    expect(sizes.titleScrollWidth).toBe(sizes.titleWidth)
+    expect(sizes.branchTop).toBeGreaterThanOrEqual(sizes.titleBottom)
+    expect(sizes.branchWidth).toBeGreaterThan(0)
+    expect(sizes.branchScrollWidth).toBeGreaterThan(sizes.branchWidth)
+    expect(sizes.branchOverflow).toBe('ellipsis')
+    expect(sizes.contained).toBe(true)
+    expect(sizes.rowOverflow).toBe(false)
+    expect(await page.locator('.file-list').evaluate((list) => list.scrollWidth === list.clientWidth)).toBe(true)
+    expect(await page.locator('body').evaluate((body) => body.scrollWidth === body.clientWidth)).toBe(true)
+
+    // 无标题的文件仍显示文件名；目录不预留分支行，并且仍可正常进入。
+    await expect(page.locator('.file-row-title').filter({ hasText: 'README.md' })).toBeVisible()
+    const directory = page.getByRole('button', { name: '运维文档', exact: true })
+    await expect(directory.locator('.file-row-branch')).toHaveCount(0)
+    const directoryBox = await directory.boundingBox()
+    const fileBox = await row.boundingBox()
+    expect(directoryBox!.height).toBeLessThan(fileBox!.height)
+    await directory.click()
+    await expect(page.getByRole('navigation', { name: '目录路径' }).getByRole('button', { name: 'docs', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: '上一级', exact: true })).toBeEnabled()
+  })
+}
+
 test('standalone HTML preview reports missing parameters without loading the main app', async ({ page }) => {
   const scripts: string[] = []
   page.on('request', (request) => {

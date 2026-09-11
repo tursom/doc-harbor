@@ -138,7 +138,7 @@
           </label>
           <label>
             智能最新 exclude
-            <input v-model="latestExcludeText" placeholder="archive/*, tmp/*, dependabot/*" />
+            <input v-model="latestExcludeText" placeholder="archive/*, tmp/*, dependabot/*, backup/*" />
           </label>
           <label>
             分支优先级
@@ -225,8 +225,13 @@
                 >
                   <Folder v-if="entry.kind === 'dir'" :size="16" />
                   <FileText v-else :size="16" />
-                  <span>{{ entry.kind === 'dir' ? entry.name : entry.title || entry.name }}</span>
-                  <small v-if="entry.kind === 'file'">{{ entry.source_branch }}</small>
+                  <!-- 标题和来源分支分行排列，避免长分支名挤占标题；目录仅显示名称。 -->
+                  <span class="file-row-details">
+                    <span class="file-row-title" :title="entry.kind === 'dir' ? entry.name : entry.title || entry.name">
+                      {{ entry.kind === 'dir' ? entry.name : entry.title || entry.name }}
+                    </span>
+                    <small v-if="entry.kind === 'file'" class="file-row-branch" :title="entry.source_branch">{{ entry.source_branch }}</small>
+                  </span>
                 </button>
               </div>
             </aside>
@@ -1128,7 +1133,7 @@ const form = ref<Partial<Repository>>({
 })
 const trackedBranchesText = ref('*')
 const latestIncludeText = ref('*')
-const latestExcludeText = ref('archive/*, tmp/*, dependabot/*')
+const latestExcludeText = ref('archive/*, tmp/*, dependabot/*, backup/*')
 const branchPriorityText = ref('main, master, release/*, develop, feature/*')
 const scanPathsText = ref('.')
 const searchResultDir = '搜索结果'
@@ -2551,7 +2556,7 @@ function resetForm() {
   }
   trackedBranchesText.value = '*'
   latestIncludeText.value = '*'
-  latestExcludeText.value = 'archive/*, tmp/*, dependabot/*'
+  latestExcludeText.value = 'archive/*, tmp/*, dependabot/*, backup/*'
   branchPriorityText.value = 'main, master, release/*, develop, feature/*'
   scanPathsText.value = '.'
 }
