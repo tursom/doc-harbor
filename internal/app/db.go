@@ -358,7 +358,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
-	return migrateBackupLatestDefaults(ctx, db)
+	if err := migrateBackupLatestDefaults(ctx, db); err != nil {
+		return err
+	}
+	return migratePiAI(ctx, db)
 }
 
 func nowString() string {

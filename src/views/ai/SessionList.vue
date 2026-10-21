@@ -22,7 +22,8 @@ const groups = computed(() => groupSessions(props.sessions))
       <section v-for="group in groups" :key="group.day" :aria-label="group.day">
         <h4 class="session-day">{{ group.day }}</h4>
         <button v-for="session in group.items" :key="session.id" class="session-row" :class="{ active: selectedId === session.id }" type="button" :aria-current="selectedId === session.id ? 'true' : undefined" @click="$emit('select', session)">
-          <span :title="session.title">{{ session.title || '新的 AI 问答' }}</span>
+          <span class="session-title" :title="session.title">{{ session.title || '新的 AI 问答' }}</span>
+          <small v-if="session.engine !== 'pi'" class="legacy-badge">旧版</small>
           <time :datetime="session.updated_at" :title="formatTime(session.updated_at)">{{ sessionTime(session.updated_at) }}</time>
         </button>
       </section>
@@ -37,10 +38,11 @@ const groups = computed(() => groupSessions(props.sessions))
 .session-head h3 { flex: 1; margin: 0; color: var(--fg-muted); font-size: var(--fs-sm); }
 .session-list { flex: 1; overflow-y: auto; padding: 0 6px 12px; }
 .session-day { margin: 0; padding: 12px 10px 4px; font-size: var(--fs-xs); color: var(--fg-subtle); }
-.session-row { display: flex; flex-direction: column; gap: 1px; width: 100%; padding: 7px 10px; border: 0; border-radius: 6px; background: none; color: var(--fg); text-align: left; cursor: pointer; }
+.session-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 6px; width: 100%; padding: 7px 10px; border: 0; border-radius: 6px; background: none; color: var(--fg); text-align: left; cursor: pointer; }
+.legacy-badge { color: var(--fg-muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; font-size: var(--fs-xs); }
 .session-row:hover { background: var(--surface-2); }
 .session-row.active { background: var(--surface-3); }
 .session-row span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-row time { color: var(--fg-subtle); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.session-row time { grid-column: 1 / -1; color: var(--fg-subtle); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
 .session-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 </style>

@@ -103,6 +103,8 @@ type aiProviderMutationRequest struct {
 }
 
 type aiSettingsResponse struct {
+	Engine                  string                      `json:"engine"`
+	PiPool                  any                         `json:"pi_pool"`
 	Enabled                 bool                        `json:"enabled"`
 	Status                  string                      `json:"status"`
 	DefaultProviderKey      string                      `json:"default_provider_key"`
@@ -776,6 +778,10 @@ func (s *Server) handleAISubroutes(w http.ResponseWriter, r *http.Request) {
 	case "sessions":
 		s.handleAISessions(w, r, parts[1:])
 	case "runs":
+		if len(parts) == 3 && parts[2] == "feedback" {
+			s.handlePiFeedback(w, r, parts[1])
+			return
+		}
 		s.handleAIRuns(w, r, parts[1:])
 	default:
 		writeError(w, errNotFound("not found"))
@@ -794,6 +800,8 @@ func (s *Server) handleAIStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	active, _ = s.withSecretMetadata(r.Context(), active)
 	writeJSON(w, http.StatusOK, map[string]any{
+		"engine":            s.cfg.AIEngine,
+		"pi_pool":           s.pi.pool.Stats(),
 		"enabled":           active.Config.Enabled,
 		"config_version":    active.Version,
 		"config_hash":       active.ConfigHash,
@@ -1322,6 +1330,8 @@ func (s *Server) buildAISettingsResponse(ctx context.Context) (aiSettingsRespons
 	encryptionReady := s.aiEncryptionReady()
 	status := aiSettingsStatus(active, len(activeRouteProviderKeys) > 0, len(routeProviderKeys) > 0, editableStatus, lastTest, encryptionReady)
 	return aiSettingsResponse{
+		Engine:                  s.cfg.AIEngine,
+		PiPool:                  s.pi.pool.Stats(),
 		Enabled:                 active.Config.Enabled,
 		Status:                  status,
 		DefaultProviderKey:      defaultKey,
@@ -2415,6 +2425,13 @@ func (s *Server) handleAISessions(w http.ResponseWriter, r *http.Request, parts 
 				writeError(w, err)
 				return
 			}
+			if s.cfg.AIEngine == "pi" {
+				if _, err := s.db.ExecContext(r.Context(), `UPDATE ai_sessions SET engine='pi' WHERE id=?`, session.ID); err != nil {
+					writeError(w, err)
+					return
+				}
+				session.Engine = "pi"
+			}
 			writeJSON(w, http.StatusCreated, session)
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -2452,9 +2469,23 @@ func (s *Server) handleAISessions(w http.ResponseWriter, r *http.Request, parts 
 		}
 		return
 	}
+	if s.handlePiSessionSubroute(w, r, sessionID, parts[1:]) {
+		return
+	}
 	if parts[1] != "messages" {
 		writeError(w, errNotFound("not found"))
 		return
+	}
+	if r.Method == http.MethodPost {
+		session, err := getAISession(r.Context(), s.db, sessionID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if session.Engine == "pi" || s.cfg.AIEngine == "pi" {
+			writeError(w, errConflict("此会话不支持旧版提问接口；旧会话只读，pi 会话请使用 runs 接口"))
+			return
+		}
 	}
 	if len(parts) == 3 && parts[2] == "stream" {
 		if r.Method != http.MethodPost {
@@ -3224,7 +3255,7 @@ func (s *Server) viewerKey(r *http.Request) string {
 }
 
 func listAISessions(ctx context.Context, db *sql.DB, limit int, viewer, q, archived string) ([]AISession, error) {
-	query := `SELECT id, title, viewer_key, scope_json, created_at, updated_at, archived_at FROM ai_sessions WHERE 1=1`
+	query := `SELECT id, title, viewer_key, scope_json, created_at, updated_at, archived_at, engine, pi_session_file FROM ai_sessions WHERE 1=1`
 	args := []any{}
 	if viewer = strings.TrimSpace(viewer); viewer != "" {
 		query += ` AND viewer_key = ?`
@@ -3276,7 +3307,7 @@ func listAIHistorySessions(ctx context.Context, db *sql.DB, req aiHistorySession
 	if limit > 200 {
 		limit = 200
 	}
-	query := `SELECT id, title, viewer_key, scope_json, created_at, updated_at, archived_at FROM ai_sessions WHERE 1=1`
+	query := `SELECT id, title, viewer_key, scope_json, created_at, updated_at, archived_at, engine, pi_session_file FROM ai_sessions WHERE 1=1`
 	args := []any{}
 	if viewer := strings.TrimSpace(req.Viewer); viewer != "" {
 		query += ` AND viewer_key = ?`
@@ -4319,7 +4350,7 @@ func createAISession(ctx context.Context, db *sql.DB, title, viewer string, scop
 }
 
 func getAIHistorySession(ctx context.Context, db *sql.DB, id int64, viewer string) (AISession, error) {
-	query := `SELECT id, title, viewer_key, scope_json, created_at, updated_at, archived_at
+	query := `SELECT id, title, viewer_key, scope_json, created_at, updated_at, archived_at, engine, pi_session_file
 		FROM ai_sessions WHERE id = ?`
 	args := []any{id}
 	if viewer = strings.TrimSpace(viewer); viewer != "" {
@@ -4363,7 +4394,7 @@ func getAIHistorySessionDetail(ctx context.Context, db *sql.DB, sessionID int64,
 }
 
 func getAISession(ctx context.Context, db *sql.DB, id int64) (AISession, error) {
-	row := db.QueryRowContext(ctx, `SELECT id, title, viewer_key, scope_json, created_at, updated_at, archived_at
+	row := db.QueryRowContext(ctx, `SELECT id, title, viewer_key, scope_json, created_at, updated_at, archived_at, engine, pi_session_file
 		FROM ai_sessions WHERE id = ?`, id)
 	session, err := scanAISession(row)
 	if err != nil {
@@ -4378,7 +4409,7 @@ func getAISession(ctx context.Context, db *sql.DB, id int64) (AISession, error) 
 func scanAISession(row repoScanner) (AISession, error) {
 	var session AISession
 	if err := row.Scan(&session.ID, &session.Title, &session.ViewerKey, &session.ScopeJSON, &session.CreatedAt,
-		&session.UpdatedAt, &session.ArchivedAt); err != nil {
+		&session.UpdatedAt, &session.ArchivedAt, &session.Engine, &session.PiSessionFile); err != nil {
 		return AISession{}, err
 	}
 	return session, nil

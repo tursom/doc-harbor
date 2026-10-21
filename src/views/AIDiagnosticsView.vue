@@ -1,78 +1,132 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { KeyRound, RefreshCw, Search } from 'lucide-vue-next'
 import StatusPill from '../components/ui/StatusPill.vue'
-import BranchTag from '../components/ui/BranchTag.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
 import Notice from '../components/ui/Notice.vue'
-import { useDiagnostics, listText, coverageDeltaText, stepJSON, seconds } from '../composables/useDiagnostics'
+import { useDiagnostics, diagnosticStatuses, diagnosticStatusLabel, diagnosticStatusVariant, runDuration, runTokens, feedbackLabel } from '../composables/useDiagnostics'
 import { formatTime } from '../lib/format'
-import { diagnosticLabel, statusLabel } from '../lib/labels'
+import type { PiCitation } from '../ai-pi-types'
 
-const { token, status, query, runs, detail, loading, detailLoading, error, selectedID, nextCursor, workflow, taskFrame, contract, coverage, coverageItems, emptyMessage, loadRuns, openRun } = useDiagnostics()
-// 此页只加载自身数据；未输入 Token 时不发送诊断请求。
-onMounted(() => { if (token.value.trim()) void loadRuns() })
+const { token, rememberToken, storageError, status, query, negativeOnly, runs, detail, loading, detailLoading, error, detailError, selectedID, nextCursor, emptyMessage, loadRuns, openRun } = useDiagnostics()
+const turn = computed(() => detail.value?.transcript)
+const usage = computed(() => turn.value?.usage || detail.value?.run)
+const feedback = computed(() => detail.value?.run.feedback || turn.value?.feedback)
+const citations = computed<PiCitation[]>(() => {
+  if (turn.value) return turn.value.citations
+  // 正文暂不可用时仍展示运行记录中已经持久化的核实结果。
+  try { const value: unknown = JSON.parse(detail.value?.run.citations_json || '[]'); return Array.isArray(value) ? value : [] }
+  catch { return [] }
+})
+const answerHTML = ref('')
+let renderRequest = 0
+// Markdown 只在有回答时加载；清空旧 HTML 并校验序号，防止切换令牌后闪回旧回答。
+watch(() => turn.value?.answer, async (answer) => {
+  const request = ++renderRequest
+  answerHTML.value = ''
+  if (!answer) return
+  try {
+    const [{ marked }, { default: DOMPurify }] = await Promise.all([import('marked'), import('dompurify')])
+    const html = DOMPurify.sanitize(await marked.parse(answer, { async: false }), { USE_PROFILES: { html: true } })
+    if (request === renderRequest) answerHTML.value = html
+  } catch { /* 加载失败时由模板显示完整原文，诊断内容不会因此丢失。 */ }
+}, { immediate: true, flush: 'sync' })
+
+const citationLabels = { verified: '已核实', path_only: '仅文件匹配', unverified: '未核实' }
+const toolLabels: Record<string, string> = { list_repos: '查看仓库', list_branches: '查看分支', list_docs: '浏览文档目录', search_docs: '搜索文档', search_code: '搜索代码', read: '阅读文件', list_dir: '浏览目录', git_log: '查看提交', diff_files: '比较分支' }
+function toolLabel(tool: string) {
+  // 实际会话同时存在单下划线和双下划线的 MCP 名称；完整工具名保留在悬停提示中。
+  return toolLabels[tool.replace(/^mcp(?:__|_)docharbor(?:__|_)/, '')] || tool
+}
+function citationURL(value: string) {
+  // 仅允许站内及 HTTP 文档链接；Markdown 的 URL 则统一经过 DOMPurify。
+  try { const url = new URL(value, window.location.origin); return ['http:', 'https:'].includes(url.protocol) ? url.href : undefined }
+  catch { return undefined }
+}
+function json(value: unknown) { return JSON.stringify(value, null, 2) }
 </script>
 
 <template>
   <section class="diagnostics-page">
-    <header class="page-heading"><h2>AI 诊断</h2><p>查看每次问答的任务框架、检索轮次、证据覆盖和校验结果</p></header>
+    <header class="page-heading"><h2>AI 诊断</h2><p>查看问答的完整工具调用、最终回答、引用核实和运行用量</p></header>
     <form class="toolbar" @submit.prevent="loadRuns()">
-      <label class="search-field token-field"><KeyRound :size="15" /><input v-model.trim="token" type="password" autocomplete="off" placeholder="诊断 Token" aria-label="诊断 Token" /></label>
-      <select v-model="status" aria-label="状态"><option value="">全部状态</option><option v-for="value in ['succeeded', 'completed_with_gaps', 'insufficient_evidence', 'failed']" :key="value" :value="value">{{ statusLabel(value) }}</option></select>
+      <label class="search-field token-field"><KeyRound :size="15" /><input v-model.trim="token" type="password" autocomplete="off" placeholder="诊断令牌" aria-label="诊断令牌" /></label>
+      <select v-model="status" aria-label="状态"><option value="">全部状态</option><option v-for="value in diagnosticStatuses" :key="value" :value="value">{{ diagnosticStatusLabel(value) }}</option></select>
       <label class="search-field query-field"><Search :size="15" /><input v-model="query" placeholder="按问题关键词筛选" aria-label="关键词" /></label>
+      <label class="check"><input v-model="negativeOnly" type="checkbox" />只看 👎</label>
       <button class="btn" type="submit" :disabled="loading || !token.trim()"><RefreshCw :size="15" />{{ loading ? '读取中…' : '读取' }}</button>
-      <p class="token-help">需要 <code>ai.diagnostics.read</code> 能力的 Token，在<a href="/settings/">系统设置</a>中签发</p>
+      <div class="token-help"><label class="check"><input v-model="rememberToken" type="checkbox" />仅在当前标签页会话内记住令牌</label><span>默认不保存令牌。需要 <code>ai.diagnostics.read</code> 能力，可在<a href="/settings/#access-tokens" target="_blank" rel="noopener noreferrer">系统设置</a>中签发，再回到本页读取。</span></div>
     </form>
-    <div v-if="error" class="error-notice"><Notice variant="danger">{{ error }}</Notice></div>
+    <div v-if="storageError" class="error-notice"><Notice variant="warn">{{ storageError }}</Notice></div>
+    <div v-if="!token.trim() && selectedID" class="error-notice"><Notice variant="info">已保留目标 Run #{{ selectedID }}。请先输入诊断令牌；如需签发，请打开<a href="/settings/#access-tokens" target="_blank" rel="noopener noreferrer">系统设置</a>，完成后回到本页读取。</Notice></div>
+    <div v-if="error" class="error-notice" role="alert"><Notice variant="danger">{{ error }} <a href="/settings/#access-tokens" target="_blank" rel="noopener noreferrer">打开系统设置</a></Notice></div>
     <div class="diagnostics-layout">
-      <aside class="run-list" aria-label="诊断 Run 列表">
-        <button v-for="item in runs" :key="item.run.id" class="run-row" :class="{ active: selectedID === item.run.id }" type="button" :aria-pressed="selectedID === item.run.id" @click="openRun(item.run.id)">
-          <span class="run-meta"><StatusPill :status="item.run.status" /><code>#{{ item.run.id }}</code><time :title="formatTime(item.run.started_at)">{{ formatTime(item.run.started_at) }} · {{ seconds(item.duration_ms) }}</time></span>
-          <span class="question" :title="item.user_question || item.session.title">{{ item.user_question || item.session.title }}</span>
+      <aside class="run-list" aria-label="诊断运行列表" :aria-busy="loading">
+        <button v-for="run in runs" :key="run.id" class="run-row" :class="{ active: selectedID === run.id }" type="button" :aria-pressed="selectedID === run.id" @click="openRun(run.id)">
+          <span class="run-meta"><StatusPill :status="run.status" :label="diagnosticStatusLabel(run.status)" :variant="diagnosticStatusVariant(run.status)" /><code>#{{ run.id }}</code><time>{{ formatTime(run.started_at) }}</time></span>
+          <span class="question" :title="run.question">{{ run.question || '未记录问题' }}</span>
+          <span class="run-stats"><span>模型 {{ run.model || '—' }}</span><span>{{ runDuration(run) }} · {{ run.tool_calls }} 次工具调用</span><span>{{ runTokens(run).toLocaleString() }} token · {{ feedbackLabel(run.feedback?.rating) }}</span></span>
         </button>
-        <EmptyState v-if="!runs.length" :message="loading ? '正在读取 Run…' : emptyMessage" />
+        <EmptyState v-if="!runs.length" :message="loading ? '正在读取运行记录…' : emptyMessage" />
         <button v-if="nextCursor" class="btn more-runs" type="button" :disabled="loading" @click="loadRuns(true)">{{ loading ? '读取中…' : '读取更多' }}</button>
       </aside>
       <article class="diagnostics-detail" :aria-busy="detailLoading">
-        <EmptyState v-if="detailLoading" message="正在读取诊断详情…" />
+        <Notice v-if="detailError" variant="danger" role="alert">{{ detailError }} <a href="/settings/#access-tokens" target="_blank" rel="noopener noreferrer">打开系统设置</a><button class="btn retry" type="button" @click="selectedID && openRun(selectedID)">重试详情</button></Notice>
+        <EmptyState v-else-if="detailLoading" message="正在读取诊断详情…" />
         <template v-else-if="detail">
-          <header class="detail-heading"><div><h3>Run #{{ detail.run.id }}</h3><p>{{ detail.user_message.content }}</p></div><StatusPill :status="detail.run.verification_status || detail.run.status" /></header>
+          <header class="detail-heading"><div><h3>Run #{{ detail.run.id }}</h3><p class="question-text">{{ detail.run.question }}</p><small>会话 #{{ detail.session.id }} · {{ detail.session.title }} · {{ detail.run.role }}</small></div><StatusPill :status="detail.run.status" :label="diagnosticStatusLabel(detail.run.status)" :variant="diagnosticStatusVariant(detail.run.status)" /></header>
           <Notice v-if="detail.run.error_message" variant="danger">{{ detail.run.error_message }}</Notice>
-          <div class="stage-grid">
-            <section><h4>任务框架</h4><strong :title="taskFrame?.intent || detail.run.intent">{{ diagnosticLabel(taskFrame?.intent || detail.run.intent) }}</strong><small>{{ taskFrame?.user_goal || '暂无任务说明' }}</small><small v-if="taskFrame?.target_artifacts?.length">目标：{{ listText(taskFrame.target_artifacts) }}</small></section>
-            <section><h4>证据契约</h4><strong>{{ contract?.contract_id || '—' }}</strong><small :title="`必需：${listText(contract?.required_keys)}；建议：${listText(contract?.recommended_keys)}`">必需 {{ contract?.required_keys?.length || 0 }} 项 · 建议 {{ contract?.recommended_keys?.length || 0 }} 项</small><small>必需：{{ listText(contract?.required_keys) }}</small><small>建议：{{ listText(contract?.recommended_keys) }}</small></section>
-            <section><h4>证据包</h4><strong>{{ workflow?.evidence_bundle?.bundle_id || '—' }}</strong><small>{{ workflow?.evidence_bundle?.group_count ?? 0 }} 组 · 排除 {{ workflow?.evidence_bundle?.excluded_count ?? 0 }} 条</small></section>
-            <section><h4>回答校验</h4><strong :title="workflow?.verification_report?.status || detail.run.verification_status">{{ diagnosticLabel(workflow?.verification_report?.status || detail.run.verification_status) }}</strong><small :title="workflow?.verification_report?.next_action">下一步：{{ diagnosticLabel(workflow?.verification_report?.next_action) }}</small><small v-if="workflow?.verification_report?.failed_checks?.length">未通过：{{ listText(workflow.verification_report.failed_checks) }}</small></section>
-          </div>
-          <section class="diagnostic-block"><h4>检索轮次 · {{ workflow?.retrieval_rounds?.length || 0 }}</h4>
-            <div v-if="workflow?.retrieval_rounds?.length" class="table-scroll"><table><thead><tr><th>轮次</th><th>原因</th><th>查询</th><th class="number">新证据</th></tr></thead><tbody><template v-for="round in workflow.retrieval_rounds" :key="round.round"><tr><td><code>R{{ round.round }}</code></td><td :title="round.reason">{{ diagnosticLabel(round.reason) }}</td><td>{{ (round.searches || []).map(search => search.query).join(' · ') || '—' }}</td><td class="number">{{ round.new_evidence_count }}</td></tr><tr class="round-extra"><td colspan="4"><div>缺失键：<code>{{ listText(round.missing_contract_keys) }}</code></div><div>覆盖变化：{{ coverageDeltaText(round.coverage_delta) }}</div></td></tr></template></tbody></table></div>
-            <EmptyState v-else message="暂无检索轮次" />
+          <dl class="usage-grid" aria-label="本次用量">
+            <div><dt>模型</dt><dd>{{ detail.run.model || '—' }}<small>{{ detail.run.provider_key }}</small></dd></div>
+            <div><dt>耗时 / 工具调用</dt><dd>{{ runDuration(detail.run) }} / {{ detail.run.tool_calls }} 次</dd></div>
+            <div><dt>输入 / 输出 token</dt><dd>{{ usage?.input_tokens.toLocaleString() }} / {{ usage?.output_tokens.toLocaleString() }}</dd></div>
+            <div><dt>缓存读取 token</dt><dd>{{ usage?.cache_read_tokens.toLocaleString() }}</dd></div>
+            <div v-if="turn?.usage.cache_write_tokens !== undefined"><dt>缓存写入 token</dt><dd>{{ turn.usage.cache_write_tokens.toLocaleString() }}</dd></div>
+            <div v-if="usage?.cost !== undefined"><dt>费用</dt><dd>{{ usage.cost.toFixed(6) }}</dd></div>
+          </dl>
+          <section class="diagnostic-block"><h4>用户反馈</h4><p>{{ feedbackLabel(feedback?.rating) }}</p><p v-if="feedback?.comment" class="plain-text">{{ feedback.comment }}</p></section>
+          <Notice v-if="!turn" variant="warn">此运行暂无可回放的过程记录，以下仍可查看已保存的引用与 stderr。</Notice>
+          <section class="diagnostic-block"><h4>工具调用 · {{ turn?.steps.length || 0 }}</h4>
+            <details v-for="(step, index) in turn?.steps || []" :key="`${detail.run.id}:${step.call_id}:${index}`" class="step">
+              <summary><span>{{ index + 1 }}.</span><strong :title="step.tool">{{ toolLabel(step.tool) }}</strong><span class="step-summary">{{ step.summary || '暂无摘要' }}</span><StatusPill :status="step.is_error ? 'failed' : 'succeeded'" :label="step.is_error ? '工具错误' : '已完成'" :variant="step.is_error ? 'danger' : 'ok'" /></summary>
+              <h5>调用参数</h5><pre>{{ json(step.args) }}</pre><h5>完整结果</h5><pre class="tool-result">{{ step.preview || '工具未返回文本结果' }}</pre>
+            </details>
+            <EmptyState v-if="!turn?.steps.length" message="暂无工具调用记录" />
           </section>
-          <section class="diagnostic-block"><div class="section-heading"><h4>契约覆盖</h4><StatusPill v-if="coverage?.status" :status="coverage.status" /></div><div v-for="item in coverageItems" :key="item.key" class="coverage-row"><StatusPill :status="item.status" /><code>{{ item.key }}</code><small>{{ item.reason || item.missing_detail || '暂无说明' }}</small></div><EmptyState v-if="!coverageItems.length" message="暂无契约覆盖信息" /></section>
-          <section class="diagnostic-block"><h4>步骤 · {{ detail.steps?.length || 0 }}</h4><details v-for="step in detail.steps || []" :key="step.id" class="step"><summary><StatusPill :status="step.status" /><strong :title="step.agent_name">{{ diagnosticLabel(step.agent_name) }}</strong><code>{{ step.step_type }}</code><span class="step-duration">{{ step.latency_ms }} ms</span></summary><p v-if="step.error_message" class="step-error">{{ step.error_message }}</p><pre>{{ stepJSON(step) }}</pre></details><EmptyState v-if="!detail.steps?.length" message="暂无步骤记录" /></section>
-          <section class="diagnostic-block"><h4>数据源 · {{ detail.data_sources?.repositories?.length || 0 }}</h4><div v-for="source in detail.data_sources?.repositories || []" :key="source.id" class="source-row"><div class="source-heading"><strong>{{ source.name }}</strong><BranchTag :label="source.default_target?.branch || source.default_branch" neutral /><StatusPill :status="source.latest_scan?.status || 'not_scanned'" /></div><small>扫描目录：<code>{{ (source.scan_paths || []).map(path => path.path).join(', ') || '—' }}</code></small></div><EmptyState v-if="!detail.data_sources?.repositories?.length" message="暂无数据源" /></section>
+          <section class="diagnostic-block"><h4>最终回答</h4><div v-if="answerHTML" class="answer-markdown" v-html="answerHTML"></div><pre v-else-if="turn?.answer" class="answer-raw">{{ turn.answer }}</pre><EmptyState v-else message="暂无最终回答" /></section>
+          <section class="diagnostic-block"><h4>引用核实 · {{ citations.length }}</h4>
+            <div v-if="citations.length" class="table-scroll"><table><thead><tr><th>引用</th><th>核实状态</th><th>行范围</th></tr></thead><tbody><tr v-for="(citation, index) in citations" :key="`${citation.key}:${index}`"><td><a v-if="citation.url && citationURL(citation.url)" :href="citationURL(citation.url)" target="_blank" rel="noopener noreferrer">{{ citation.key }}</a><code v-else>{{ citation.key }}</code></td><td><StatusPill :status="citation.status" :label="citationLabels[citation.status]" :variant="citation.status === 'verified' ? 'ok' : 'warn'" /><small v-if="citation.status !== 'verified'">这段内容没有在本次检索中读到，请自行核对。</small></td><td>L{{ citation.line_start }}–{{ citation.line_end }}</td></tr></tbody></table></div>
+            <EmptyState v-else message="暂无引用核实记录" />
+          </section>
+          <section class="diagnostic-block"><h4>原始消息 · {{ turn?.messages.length || 0 }}</h4><details v-if="turn?.messages.length" :key="detail.run.id" class="step"><summary>展开完整原始消息（包含 context、补充说明与工具数据）</summary><pre>{{ json(turn.messages) }}</pre></details><EmptyState v-else message="暂无原始消息" /></section>
+          <section class="diagnostic-block"><h4>stderr 尾部</h4><pre v-if="detail.run.stderr_tail" class="stderr">{{ detail.run.stderr_tail }}</pre><EmptyState v-else message="暂无 stderr 输出" /></section>
         </template>
-        <EmptyState v-else :message="runs.length ? '选择 Run 查看诊断详情' : emptyMessage" />
+        <EmptyState v-else-if="!detailError" :message="selectedID ? `等待读取 Run #${selectedID}` : runs.length ? '选择运行记录查看详情' : emptyMessage" />
       </article>
     </div>
   </section>
 </template>
 
 <style scoped>
-.diagnostics-page { min-width: 0; color: var(--fg); } .page-heading { padding: 16px 24px; border-bottom: 1px solid var(--border); } h2 { margin: 0; font-size: var(--fs-xl); } .page-heading p { margin: 3px 0 0; color: var(--fg-muted); font-size: var(--fs-sm); }
-.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 24px; border-bottom: 1px solid var(--border); } .search-field { display: flex; gap: 8px; align-items: center; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 6px; color: var(--fg-subtle); min-width: 0; background: var(--surface); }
-.token-field { width: 260px; } .query-field { width: 220px; } .search-field input { width: 100%; min-width: 0; border: 0; height: 30px; color: var(--fg); background: transparent; font: inherit; } .token-field input { font-family: var(--font-mono); } select { width: auto; height: 32px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--fg); font: inherit; }
-.token-help { margin: 0 0 0 auto; font-size: var(--fs-xs); color: var(--fg-subtle); overflow-wrap: anywhere; } a { color: var(--accent-text); } .error-notice { padding: 12px 24px; }
-.diagnostics-layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); min-height: 520px; } .run-list { min-width: 0; border-right: 1px solid var(--border); padding: 8px; } .run-row { display: grid; gap: 5px; width: 100%; text-align: left; border: 0; border-radius: 6px; background: transparent; color: var(--fg); padding: 10px; cursor: pointer; font: inherit; } .run-row:hover { background: var(--surface-2); } .run-row.active { background: var(--surface-3); }
-.run-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; color: var(--fg-subtle); font-size: var(--fs-xs); } time { font-variant-numeric: tabular-nums; } .question { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .more-runs { margin: 12px; }
-.diagnostics-detail { min-width: 0; padding: 24px; } .detail-heading { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 24px; } .detail-heading > div { flex: 1; min-width: 0; } h3 { margin: 0; font-size: var(--fs-lg); } .detail-heading p { margin: 4px 0 0; color: var(--fg-muted); overflow-wrap: anywhere; }
-.stage-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 20px 0; } .stage-grid section { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; padding: 12px 14px; border-right: 1px solid var(--border); min-width: 0; overflow-wrap: anywhere; } .stage-grid section:last-child { border-right: 0; } h4 { margin: 0; color: var(--fg-muted); font-size: var(--fs-sm); font-weight: 600; } .stage-grid strong { font: 600 var(--fs-sm) var(--font-mono); } small { font-size: var(--fs-xs); color: var(--fg-muted); }
-.diagnostic-block { margin-top: 24px; } .diagnostic-block > h4, .section-heading { margin-bottom: 10px; } .section-heading, .source-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
-.table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; } table { border-collapse: collapse; width: 100%; text-align: left; font-size: var(--fs-sm); } th, td { padding: 8px 12px; border-bottom: 1px solid var(--border); } th { background: var(--surface-2); color: var(--fg-muted); font-weight: 600; } td { overflow-wrap: anywhere; } tr:last-child td { border-bottom: 0; } .number { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; } .round-extra { color: var(--fg-muted); font-size: var(--fs-xs); } .round-extra td { background: var(--surface-2); }
-code, pre { font-family: var(--font-mono); } .coverage-row { display: grid; grid-template-columns: 86px minmax(100px, 1fr) minmax(0, 2fr); align-items: start; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; } .coverage-row code { font-size: var(--fs-xs); } .coverage-row:last-child { border-bottom: 0; }
-.step { margin-top: 8px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; } .step summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer; font-size: var(--fs-sm); } .step summary code { overflow-wrap: anywhere; color: var(--fg-muted); min-width: 0; } .step-duration { margin-left: auto; color: var(--fg-subtle); font-variant-numeric: tabular-nums; } pre { max-width: 100%; overflow-x: auto; margin: 0; padding: 14px; background: var(--surface-2); border-top: 1px solid var(--border); font-size: var(--fs-xs); } .step-error { color: var(--danger); margin: 8px 12px; overflow-wrap: anywhere; }
-.source-row { padding: 12px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; } .source-heading { margin-bottom: 5px; }
-@media (max-width: 1080px) { .diagnostics-layout { grid-template-columns: 260px minmax(0, 1fr); } .stage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .stage-grid section:nth-child(2) { border-right: 0; } .stage-grid section:nth-child(-n+2) { border-bottom: 1px solid var(--border); } }
-@media (max-width: 860px) { .page-heading { padding: 16px; } .toolbar { padding: 12px 16px; } .token-field { width: 100%; } .query-field { flex: 1; width: auto; } .token-help { width: 100%; margin-top: 4px; } .diagnostics-layout { grid-template-columns: minmax(0, 1fr); min-height: 0; } .run-list { border-right: 0; border-bottom: 1px solid var(--border); max-height: 300px; overflow-y: auto; } .diagnostics-detail { padding: 20px 16px; } .coverage-row { grid-template-columns: 76px minmax(0, 1fr); } .coverage-row small { grid-column: 2; } .table-scroll table { min-width: 440px; } .stage-grid section { padding: 12px; } }
+.diagnostics-page { min-width: 0; color: var(--fg); overflow-wrap: anywhere; }
+.page-heading { padding: 16px 24px; border-bottom: 1px solid var(--border); } h2 { margin: 0; font-size: var(--fs-xl); } .page-heading p { margin: 3px 0 0; color: var(--fg-muted); font-size: var(--fs-sm); }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 24px; border-bottom: 1px solid var(--border); }
+.search-field { display: flex; gap: 8px; align-items: center; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 6px; color: var(--fg-subtle); min-width: 0; background: var(--surface); }
+.search-field svg { flex-shrink: 0; } .token-field { width: 250px; } .query-field { width: 220px; } .search-field input { width: 100%; min-width: 0; border: 0; height: 30px; color: var(--fg); background: transparent; font: inherit; } .token-field input { font-family: var(--font-mono); }
+select { width: auto; max-width: 100%; height: 32px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--fg); font: inherit; }
+.check { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); } .check input { flex-shrink: 0; } .toolbar > .check { flex: 0 0 auto; white-space: nowrap; } .token-help { display: flex; flex-wrap: wrap; gap: 8px 16px; width: 100%; color: var(--fg-muted); font-size: var(--fs-xs); } .token-help .check { font-size: inherit; }
+a { color: var(--accent-text); } .error-notice { padding: 12px 24px; } .retry { margin: 8px; }
+.diagnostics-layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); min-height: 520px; } .run-list { min-width: 0; border-right: 1px solid var(--border); padding: 8px; }
+.run-row { display: grid; gap: 6px; width: 100%; text-align: left; border: 0; border-radius: 6px; background: transparent; color: var(--fg); padding: 10px; cursor: pointer; font: inherit; } .run-row:hover { background: var(--surface-2); } .run-row.active { background: var(--surface-3); } .run-row > * { min-width: 0; }
+.run-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; color: var(--fg-subtle); font-size: var(--fs-xs); } time { font-variant-numeric: tabular-nums; } .question { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; } .run-stats { display: grid; gap: 3px; color: var(--fg-muted); font-size: var(--fs-xs); } .more-runs { margin: 12px; }
+.diagnostics-detail { min-width: 0; padding: 24px; } .detail-heading { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 16px; margin-bottom: 20px; } .detail-heading > div { flex: 1; min-width: 0; } h3 { margin: 0; font-size: var(--fs-lg); } .detail-heading p { margin: 6px 0; } .question-text, .plain-text { white-space: pre-wrap; } small { display: block; font-size: var(--fs-xs); color: var(--fg-muted); }
+.usage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 20px 0; } .usage-grid > div { min-width: 0; background: var(--surface); padding: 12px; } dt { font-size: var(--fs-xs); color: var(--fg-muted); } dd { margin: 5px 0 0; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+.diagnostic-block { margin-top: 24px; min-width: 0; } h4 { margin: 0 0 10px; color: var(--fg-muted); font-size: var(--fs-sm); } h5 { margin: 12px; font-size: var(--fs-xs); color: var(--fg-muted); }
+.step { margin-top: 8px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; } .step summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; cursor: pointer; font-size: var(--fs-sm); } .step-summary { color: var(--fg-muted); flex: 1 1 160px; min-width: 0; }
+code, pre { font-family: var(--font-mono); } pre { box-sizing: border-box; max-width: 100%; max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; padding: 14px; background: var(--surface-2); border-radius: 6px; font-size: var(--fs-xs); line-height: 1.65; } .step pre { border-radius: 0; } .answer-raw { max-height: none; }
+.table-scroll { max-width: 100%; overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; } table { border-collapse: collapse; width: 100%; min-width: 460px; table-layout: fixed; text-align: left; font-size: var(--fs-sm); } th, td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; } th { background: var(--surface-2); color: var(--fg-muted); font-weight: 600; } th:first-child { width: 44%; } th:last-child { width: 20%; } td small { margin-top: 6px; } tr:last-child td { border-bottom: 0; }
+.answer-markdown { line-height: 1.7; font-size: var(--fs-sm); } .answer-markdown :deep(pre) { max-width: 100%; overflow: auto; padding: 12px; background: var(--surface-2); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; } .answer-markdown :deep(img) { max-width: 100%; } .answer-markdown :deep(table) { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; } .answer-markdown :deep(td), .answer-markdown :deep(th) { padding: 6px 10px; border: 1px solid var(--border); } .answer-markdown :deep(a) { color: var(--accent-text); } .answer-markdown :deep(blockquote) { margin-left: 0; padding-left: 12px; border-left: 3px solid var(--border-strong); color: var(--fg-muted); }
+@media (max-width: 1080px) { .diagnostics-layout { grid-template-columns: 280px minmax(0, 1fr); } }
+@media (max-width: 860px) { .page-heading { padding: 16px; } .toolbar { padding: 12px 16px; } .token-field { box-sizing: border-box; width: 100%; } .query-field { flex: 1 1 160px; width: auto; } .token-help { gap: 8px; } .error-notice { padding: 12px 16px; } .diagnostics-layout { grid-template-columns: minmax(0, 1fr); min-height: 0; } .run-list { border-right: 0; border-bottom: 1px solid var(--border); max-height: 340px; overflow-y: auto; } .diagnostics-detail { padding: 20px 16px; } .detail-heading { gap: 8px; } }
+@media (max-width: 420px) { .usage-grid { grid-template-columns: minmax(0, 1fr); } }
 </style>

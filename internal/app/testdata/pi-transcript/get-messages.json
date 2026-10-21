@@ -1,0 +1,152 @@
+{
+  "id": "fixture",
+  "type": "response",
+  "command": "get_messages",
+  "success": true,
+  "data": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "",
+        "sections": {
+          "preamble": "只读问答"
+        },
+        "timestamp": 1733234401000
+      },
+      {
+        "role": "user",
+        "content": "<context>\nrole: 产品\nscope: 当前仓库 游戏服务\n</context>\n\n秒杀库存有哪些限制？",
+        "timestamp": 1733234401000
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "该内容只在诊断显示。"
+          },
+          {
+            "type": "text",
+            "text": "先读取方案。"
+          },
+          {
+            "type": "toolCall",
+            "id": "call_read",
+            "name": "mcp_docharbor_read",
+            "arguments": {
+              "repo": "游戏服务",
+              "path": "doc/库存 方案.md",
+              "start_line": 40
+            }
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "fixture",
+        "model": "fixture",
+        "usage": {
+          "input": 10,
+          "output": 2,
+          "cacheRead": 3,
+          "cacheWrite": 1,
+          "totalTokens": 16,
+          "cost": {
+            "input": 0.01,
+            "output": 0.02,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0.03
+          }
+        },
+        "stopReason": "toolUse",
+        "timestamp": 1733234401000
+      },
+      {
+        "role": "toolResult",
+        "toolCallId": "call_read",
+        "toolName": "mcp_docharbor_read",
+        "content": [
+          {
+            "type": "text",
+            "text": "读取第 40-42 行，共 100 行\n== 游戏服务@main:doc/库存 方案.md#L40-42\n   40\t人工归还有数量限制。\n   41\t仅允许有效订单。"
+          }
+        ],
+        "details": {
+          "fixture": "完整诊断字段"
+        },
+        "isError": false,
+        "timestamp": 1733234401000
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "也说明异常情况。"
+          }
+        ],
+        "timestamp": 1733234401000
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "仅允许有效订单。[游戏服务@main:doc/库存 方案.md#L41-45]"
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "fixture",
+        "model": "fixture",
+        "usage": {
+          "input": 10,
+          "output": 2,
+          "cacheRead": 3,
+          "cacheWrite": 1,
+          "totalTokens": 16,
+          "cost": {
+            "input": 0.01,
+            "output": 0.02,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0.03
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 1733234401000
+      },
+      {
+        "role": "user",
+        "content": "<context>\nrole: 测试\nscope: 全部仓库\n</context>\n\n解释 <context>原文</context>。",
+        "timestamp": 1733234401000
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "保留原文 context。"
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "fixture",
+        "model": "fixture",
+        "usage": {
+          "input": 10,
+          "output": 2,
+          "cacheRead": 3,
+          "cacheWrite": 1,
+          "totalTokens": 16,
+          "cost": {
+            "input": 0.01,
+            "output": 0.02,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0.03
+          }
+        },
+        "stopReason": "aborted",
+        "timestamp": 1733234401000
+      }
+    ]
+  }
+}

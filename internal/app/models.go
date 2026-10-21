@@ -295,13 +295,16 @@ type AIMemoryConfig struct {
 }
 
 type AISession struct {
-	ID         int64  `json:"id"`
-	Title      string `json:"title"`
-	ViewerKey  string `json:"viewer_key"`
-	ScopeJSON  string `json:"scope_json"`
-	CreatedAt  string `json:"created_at"`
-	UpdatedAt  string `json:"updated_at"`
-	ArchivedAt string `json:"archived_at"`
+	ID     int64  `json:"id"`
+	Engine string `json:"engine"`
+	// 只在服务端使用相对文件名，避免向浏览器暴露数据目录。
+	PiSessionFile string `json:"-"`
+	Title         string `json:"title"`
+	ViewerKey     string `json:"viewer_key"`
+	ScopeJSON     string `json:"scope_json"`
+	CreatedAt     string `json:"created_at"`
+	UpdatedAt     string `json:"updated_at"`
+	ArchivedAt    string `json:"archived_at"`
 }
 
 type AIMessage struct {

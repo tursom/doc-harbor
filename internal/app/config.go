@@ -23,6 +23,14 @@ type Config struct {
 	GitCommandTimeout     time.Duration
 	SchedulerPollInterval time.Duration
 	GitHubWebhookSecret   string
+	// pi 引擎先显式启用；通过人工评估后再调整默认值。
+	AIEngine              string
+	PIBin                 string
+	AIPIPoolSize          int
+	AIPIMaxRunsPerProcess int
+	AIRunTimeout          time.Duration
+	AIMaxToolCalls        int
+	MCPEnabled            bool
 }
 
 func LoadConfig() Config {
@@ -54,6 +62,13 @@ func LoadConfig() Config {
 		GitCommandTimeout:     secondsEnv("GIT_COMMAND_TIMEOUT", 120),
 		SchedulerPollInterval: secondsEnv("SCHEDULER_POLL_INTERVAL", 60),
 		GitHubWebhookSecret:   env("GITHUB_WEBHOOK_SECRET", ""),
+		AIEngine:              env("AI_ENGINE", "legacy"),
+		PIBin:                 env("PI_BIN", "pi"),
+		AIPIPoolSize:          int(int64Env("AI_PI_POOL_SIZE", 3)),
+		AIPIMaxRunsPerProcess: int(int64Env("AI_PI_MAX_RUNS_PER_PROCESS", 100)),
+		AIRunTimeout:          secondsEnv("AI_RUN_TIMEOUT_SECONDS", 300),
+		AIMaxToolCalls:        int(int64Env("AI_MAX_TOOL_CALLS", 40)),
+		MCPEnabled:            boolEnv("MCP_ENABLED", true),
 	}
 }
 

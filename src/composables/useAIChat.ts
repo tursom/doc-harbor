@@ -1,5 +1,6 @@
 import { computed, nextTick, ref, shallowRef, type Ref } from 'vue'
 import { api } from '../api'
+import { piApi } from '../api-pi'
 import type { AIMessage, AIMessageCitation, AINotice, AIQuestionScope, AIServiceCandidate, AISettingsSummary, AIStreamEvent, AISession, FileContent, Repository } from '../types'
 import { coverageDeltaText, coverageStatus, numberCitations, type EvidenceStep } from '../views/ai/chat'
 
@@ -26,6 +27,9 @@ export function useAIChat(repos: Ref<Repository[]>, selectedRepo: Ref<Repository
   const numberedCitations = computed(() => numberCitations(citations.value))
   const canAskWithCurrentFile = computed(() => Boolean(fileContent.value && fileContent.value.file_size <= 1024 * 1024))
   const busy = computed(() => loading.value || streaming.value)
+  // 引擎属于会话；当前配置只决定新会话以及旧会话是否仍允许提问。
+  const isPi = computed(() => (selectedSession.value ? selectedSession.value.engine || 'legacy' : settings.value?.engine || 'legacy') === 'pi')
+  const legacyReadOnly = computed(() => selectedSession.value?.engine !== 'pi' && settings.value?.engine === 'pi')
   let generation = 0
   let stepSequence = 0
   let controller: AbortController | null = null
@@ -73,6 +77,8 @@ export function useAIChat(repos: Ref<Repository[]>, selectedRepo: Ref<Repository
   }
 
   async function loadMessages(sessionID: number, request: number) {
+    // pi 的正文由独立 composable 读取，不能向旧 messages 接口发送请求。
+    if (selectedSession.value?.engine === 'pi') return
     const response = await api.aiMessages(sessionID)
     if (request !== generation) return
     messages.value = response.items || []
@@ -81,7 +87,7 @@ export function useAIChat(repos: Ref<Repository[]>, selectedRepo: Ref<Repository
     await scrollToBottom()
   }
 
-  /** URL 显式会话不受历史列表的 50 条窗口限制；即便不在列表也直接读取消息。 */
+  /** URL 显式会话不受列表窗口限制；先读取真实详情，才能确定正文接口。 */
   async function initialize() {
     stopGeneration()
     const request = generation
@@ -113,10 +119,10 @@ export function useAIChat(repos: Ref<Repository[]>, selectedRepo: Ref<Repository
         scopeMode.value = 'current_repo'
       }
       const sessionID = Number(params.get('session'))
-      const session = sessionID > 0 ? sessions.value.find((item) => item.id === sessionID) || {
-        id: sessionID, title: `会话 #${sessionID}`, viewer_key: '', scope_json: '', created_at: '', updated_at: '', archived_at: ''
-      } : sessions.value[0]
+      const session = sessionID > 0 ? sessions.value.find((item) => item.id === sessionID) || await piApi.session(sessionID) : sessions.value[0]
+      if (request !== generation) return
       if (session) {
+        if (!sessions.value.some((item) => item.id === session.id)) sessions.value.unshift(session)
         selectedSession.value = session
         await loadMessages(session.id, request)
       }
@@ -181,7 +187,7 @@ export function useAIChat(repos: Ref<Repository[]>, selectedRepo: Ref<Repository
     loading.value = true
     error.value = ''
     try {
-      await createSession(request)
+      return await createSession(request)
     } catch (err) {
       if (request === generation) error.value = errorText(err)
     } finally {
@@ -207,7 +213,7 @@ export function useAIChat(repos: Ref<Repository[]>, selectedRepo: Ref<Repository
   }
 
   async function sendQuestion() {
-    if (!question.value.trim() || busy.value) return
+    if (!question.value.trim() || busy.value || isPi.value || legacyReadOnly.value || !settings.value?.enabled) return
     const request = ++generation
     const text = question.value.trim()
     streaming.value = true
@@ -386,6 +392,7 @@ export function useAIChat(repos: Ref<Repository[]>, selectedRepo: Ref<Repository
   return {
     sessions, selectedSession, messages, settings, question, scopeMode, includeBranchCandidates, fileContent,
     loading, streaming, busy, error, candidates, citations, numberedCitations, evidenceChain, notices,
+    isPi, legacyReadOnly,
     messageListRef, markdownRenderer, canAskWithCurrentFile, initialize, refresh, selectSession, newSession,
     sendQuestion, stopGeneration, buildScope, openCitation, syncURL
   }

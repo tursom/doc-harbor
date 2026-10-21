@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test'
+import type { PiDiagnosticDetail, PiRun, PiTurn } from '../../src/ai-pi-types'
 import type {
   AIAgentRun, AIDiagnosticsRunDetailResponse, AIMessage, AIMessageCitation, AISession,
   AISettingsSummary, CommitDetail, DocVersion, FileContent, FileEntry, Repository, ScanRun
@@ -100,6 +101,7 @@ export const commits: CommitDetail[] = [
   }))
 ]
 export const aiSettings: AISettingsSummary = {
+	engine: 'legacy', pi_pool: { total: 2, busy: 1, idle: 1, starting: 0, queued: 0 },
   enabled: true, status: 'enabled', default_provider_key: 'demo-primary', default_provider_name: '示例云模型',
   default_model: 'demo-chat-v1', route_provider_keys: ['demo-primary', 'demo-backup'],
   active_route_provider_keys: ['demo-primary', 'demo-backup'], has_unapplied_changes: false, encryption_ready: true,
@@ -178,13 +180,32 @@ const diagnostics: AIDiagnosticsRunDetailResponse = {
   }
 }
 
+export const piRun: PiRun = {
+  id: 51, session_id: 31, status: 'succeeded', question: messages[0]!.content, role: '开发', scope_json: JSON.stringify(scope),
+  provider_key: 'demo-primary', model: 'demo-chat-v1', tool_calls: 2, input_tokens: 460, output_tokens: 110, cache_read_tokens: 100,
+  cost: 0.0042, citations_json: '[]', error_message: '', stderr_tail: '示例运行没有异常。', started_at: timestamp, finished_at: '2026-10-21T03:40:02Z',
+  feedback: { rating: -1, comment: '希望补充回滚条件。' }
+}
+export const piTurn: PiTurn = {
+  run_id: 51, question: messages[0]!.content, role: '开发', scope, status: 'succeeded',
+  steps: [{ call_id: 'search-1', tool: 'mcp__docharbor__search_docs', args: { query: '灯塔 发布' }, summary: '找到 2 处匹配，分布在 1 个文件', is_error: false, preview: '== lighthouse-demo@main:docs/deploy.md#L5-18\nL5: 发布检查' },
+    { call_id: 'read-1', tool: 'mcp__docharbor__read', args: { repo: 'lighthouse-demo', path: 'docs/deploy.md', start_line: 5, end_line: 18 }, summary: '读取第 5-18 行，共 30 行', is_error: false, preview: '读取第 5-18 行，共 30 行\n== lighthouse-demo@main:docs/deploy.md#L5-18\n5\t确认健康检查通过，并核对发布分支。' }],
+  answer: '发布前需要确认健康检查通过，并核对候选分支。[lighthouse-demo@main:docs/deploy.md#L5-18]\n\n回滚条件需要进一步核对。[lighthouse-demo@main:docs/deploy.md#L25-28]',
+  citations: [{ key: 'lighthouse-demo@main:docs/deploy.md#L5-18', repo: 'lighthouse-demo', ref: 'main', path: 'docs/deploy.md', line_start: 5, line_end: 18, status: 'verified', url: '/?repo=7&version=42' },
+    { key: 'lighthouse-demo@main:docs/deploy.md#L25-28', repo: 'lighthouse-demo', ref: 'main', path: 'docs/deploy.md', line_start: 25, line_end: 28, status: 'unverified', url: '/?repo=7&version=42' }],
+  usage: { input_tokens: 460, output_tokens: 110, cache_read_tokens: 100, cost: 0.0042 }, feedback: piRun.feedback!, model: piRun.model,
+  provider_key: piRun.provider_key, started_at: timestamp, finished_at: piRun.finished_at, duration_ms: 2000, tool_calls: 2
+}
+piRun.citations_json = JSON.stringify(piTurn.citations)
+export const piDiagnostics: PiDiagnosticDetail = { run: piRun, session: { ...sessions[1]!, engine: 'pi' }, transcript: { ...piTurn, messages: [{ role: 'user', content: piTurn.question }, { role: 'toolResult', content: [{ type: 'text', text: piTurn.steps[1]!.preview }] }] } }
+
 /** 每个测试独立保存状态；所有 /api 请求在浏览器端拦截，绝不读写真实服务数据。 */
 export async function mockRedesign(page: Page) {
   const state = {
     repo: structuredClone(repository), patches: [] as Partial<Repository>[], secretRotations: 0,
     questions: [] as { question: string; scope_override: unknown }[], unexpected: [] as string[],
     repoReads: 0, messageReads: [] as number[], secret: fixtureSecret,
-    createdRepos: [] as Repository[], scannedRepos: [] as number[]
+    createdRepos: [] as Repository[], scannedRepos: [] as number[], tokenRequests: [] as Record<string, unknown>[]
   }
   await page.route('**/api/**', async (route) => {
     const request = route.request()
@@ -229,11 +250,13 @@ export async function mockRedesign(page: Page) {
       if (method === 'POST') { state.secretRotations++; state.secret = `${fixtureSecret}-rotated` }
       return json({ configured: true, secret: state.secret })
     }
-    if (path === '/api/tokens' && method === 'POST') return json({
-      token: fixtureToken, expires_at: '2026-10-21T11:40:00Z', ...request.postDataJSON()
-    })
+    if (path === '/api/tokens' && method === 'POST') {
+      state.tokenRequests.push(request.postDataJSON())
+      return json({ token: fixtureToken, expires_at: '2026-10-21T11:40:00Z', ...request.postDataJSON() })
+    }
     if (path === '/api/ai/settings') return json(aiSettings)
     if (path === '/api/ai/sessions') return json(method === 'POST' ? sessions[1] : { items: sessions })
+    if (/\/api\/ai\/sessions\/\d+$/.test(path) && method === 'GET') return json(sessions.find(item => item.id === Number(path.split('/')[4])) || { ...sessions[1], id: Number(path.split('/')[4]) })
     if (/\/api\/ai\/sessions\/\d+\/messages$/.test(path) && method === 'GET') {
       const sessionID = Number(path.split('/')[4])
       state.messageReads.push(sessionID)
@@ -258,6 +281,8 @@ export async function mockRedesign(page: Page) {
       assistant_status: 'completed', duration_ms: 2000 }] })
     if (path === '/api/access/ai/diagnostics/runs/51') return json(diagnostics)
     if (path === '/api/access/ai/diagnostics/data-sources') return json(diagnostics.data_sources)
+    if (path === '/api/access/ai/runs') return json({ items: [piRun] })
+    if (path === '/api/access/ai/runs/51') return json(piDiagnostics)
     // 未知接口直接失败并由测试断言，避免返回空对象掩盖页面与 API 契约不匹配。
     state.unexpected.push(`${method} ${path}`)
     return json({ error: `Unmocked endpoint: ${method} ${path}` }, 501)

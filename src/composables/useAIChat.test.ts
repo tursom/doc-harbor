@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api'
+import { piApi } from '../api-pi'
 import type { AIMessage, AIMessageCitation, AISettingsSummary, AIStreamEvent, AISession, FileContent, Repository } from '../types'
 import { useAIChat } from './useAIChat'
 
@@ -22,7 +23,8 @@ beforeEach(() => {
   window.history.replaceState(null, '', '/ai/')
   const repo = { id: 7, name: 'Docs' } as Repository
   chat = useAIChat(ref([repo]), ref(repo))
-  vi.spyOn(api, 'aiSettings').mockResolvedValue({ enabled: false } as AISettingsSummary)
+  vi.spyOn(api, 'aiSettings').mockResolvedValue({ enabled: true, engine: 'legacy' } as AISettingsSummary)
+  vi.spyOn(piApi, 'session').mockImplementation(async id => session(id))
   vi.spyOn(api, 'aiSessions').mockResolvedValue({ items: [session(1), session(2)] })
   // 每次 HTTP 响应都是新数组，测试桩也保持这一点，避免一次流式 push 污染下一会话。
   vi.spyOn(api, 'aiMessages').mockImplementation(async () => ({ items: [], citations: [], service_candidates: [] }))
@@ -38,6 +40,7 @@ describe('AI URL restoration', () => {
     vi.spyOn(api, 'content').mockResolvedValue({ repo_id: 7, version_id: 42, branch: 'release', source_commit_sha: 'abcdef', file_path: 'doc/api.md', file_size: 200 } as FileContent)
     const stream = vi.spyOn(api, 'streamAI')
     await chat.initialize()
+    expect(piApi.session).toHaveBeenCalledWith(99)
     expect(api.aiMessages).toHaveBeenCalledWith(99)
     expect(chat.selectedSession.value?.id).toBe(99)
     expect(chat.question.value).toBe('解释接口')
@@ -63,6 +66,42 @@ describe('AI URL restoration', () => {
 })
 
 describe('AI request lifecycle', () => {
+  it('reads the real engine for URL sessions outside the history window without requesting legacy messages', async () => {
+    window.history.replaceState(null, '', '/ai/?session=99')
+    vi.mocked(piApi.session).mockResolvedValue({ ...session(99), engine: 'pi' })
+    await chat.initialize()
+    expect(chat.isPi.value).toBe(true)
+    expect(chat.selectedSession.value?.engine).toBe('pi')
+    expect(api.aiMessages).not.toHaveBeenCalled()
+    await chat.refresh()
+    expect(api.aiMessages).not.toHaveBeenCalled()
+  })
+
+  it('routes pi selection away from legacy messages and enforces legacy read-only after config switches', async () => {
+    await chat.initialize()
+    vi.mocked(api.aiMessages).mockClear()
+    await chat.selectSession({ ...session(3), engine: 'pi' })
+    expect(api.aiMessages).not.toHaveBeenCalled()
+    chat.settings.value = { enabled: true, engine: 'pi' } as AISettingsSummary
+    await chat.selectSession({ ...session(1), engine: 'legacy' })
+    expect(chat.isPi.value).toBe(false)
+    expect(chat.legacyReadOnly.value).toBe(true)
+    const stream = vi.spyOn(api, 'streamAI')
+    chat.question.value = '不可发送'
+    await chat.sendQuestion()
+    expect(stream).not.toHaveBeenCalled()
+    expect(chat.question.value).toBe('不可发送')
+  })
+
+  it('does not offer local retrieval when AI is disabled', async () => {
+    await chat.initialize()
+    chat.settings.value!.enabled = false
+    const stream = vi.spyOn(api, 'streamAI')
+    chat.question.value = '不可发送'
+    await chat.sendQuestion()
+    expect(stream).not.toHaveBeenCalled()
+  })
+
   it('ignores stale session reads after a faster selection', async () => {
     const first = deferred<typeof emptyMessages>()
     vi.mocked(api.aiMessages).mockImplementation((id) => id === 1 ? first.promise : Promise.resolve({ ...emptyMessages, items: [message(22, 2, 'new')] }))

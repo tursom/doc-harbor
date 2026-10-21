@@ -1,0 +1,318 @@
+import { expect, test as base, type Page } from '@playwright/test'
+import { documentContent, files, fixtureSHA, repository } from './fixtures/redesign'
+import { mockPi, piAnswer, piCitations, piSession } from './fixtures/pi'
+
+type PiMock = Awaited<ReturnType<typeof mockPi>>
+const test = base.extend<{ pi: PiMock }>({
+  pi: [async ({ page }, use) => {
+    const pi = await mockPi(page)
+    await use(pi)
+    expect(pi.base.unexpected, '未知 API 必须由 fixture 拒绝，不能访问真实服务').toEqual([])
+  }, { auto: true }]
+})
+
+const piURL = `/ai/?repo=7&session=${piSession.id}`
+const composer = (page: Page) => page.getByRole('textbox', { name: '提问内容', exact: true })
+const turn = (page: Page, question: string) => page.getByRole('article', { name: `问题：${question}`, exact: true })
+
+async function openPi(page: Page, pi: PiMock) {
+  await page.goto(piURL)
+  await expect(page.getByRole('region', { name: 'pi AI 对话', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '发送', exact: true })).toBeDisabled()
+  await expect.poll(() => pi.transcriptReads.length).toBeGreaterThan(0)
+}
+
+async function ask(page: Page, pi: PiMock, question = '灯塔发布需要哪些检查？') {
+  const count = pi.requests.length
+  await composer(page).fill(question)
+  await composer(page).press('Enter')
+  await expect.poll(() => pi.requests.length).toBe(count + 1)
+  await pi.connected()
+  await expect(turn(page, question)).toBeVisible()
+  return turn(page, question)
+}
+
+test('分段 SSE 展示排队、工具进度和正文，done 更新引用核实且可跳转原文', async ({ page, pi }) => {
+  await openPi(page, pi)
+  const article = await ask(page, pi)
+  await pi.emit({ type: 'queued', position: 3 })
+  await expect(article.getByRole('status')).toHaveText('排队中，前面还有 2 个问题')
+  await expect(article.getByText('等待可用的问答进程…', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '停止生成', exact: true })).toBeVisible()
+  await expect(composer(page)).toHaveAttribute('placeholder', '补充说明，会在当前步骤结束后交给助手')
+
+  await pi.start()
+  await pi.emit({ type: 'tool_start', call_id: 'search-1', tool: 'mcp__docharbor__search_docs', args: { query: '灯塔 发布' } })
+  await expect(article.getByText('搜索文档', { exact: true })).toBeVisible()
+  await expect(article.getByText('进行中…', { exact: true })).toBeVisible()
+  await pi.emit({ type: 'tool_end', call_id: 'search-1', summary: '找到 2 处匹配', is_error: false, preview: '虚构检索命中：docs/deploy.md' })
+  await expect(article.getByText('找到 2 处匹配', { exact: true })).toBeVisible()
+  await expect(article.getByText('进行中…', { exact: true })).toHaveCount(0)
+  await article.locator('summary').filter({ hasText: '搜索文档' }).click()
+  await expect(article.getByText('虚构检索命中：docs/deploy.md', { exact: true })).toBeVisible()
+
+  await pi.emit({ type: 'tool_start', call_id: 'read-1', tool: 'mcp__docharbor__read', args: {
+    repo: 'lighthouse-demo', ref: 'main', path: 'docs/deploy.md', start_line: 5, end_line: 18
+  } })
+  await expect(article.getByText('阅读', { exact: true })).toBeVisible()
+  await expect(article.getByText(/docs\/deploy.md · 第 5-18 行/)).toBeVisible()
+  await pi.emit({ type: 'tool_end', call_id: 'read-1', summary: '读取第 5-18 行，共 30 行', is_error: false, preview: 'L5: 确认健康检查通过。' })
+  await pi.emit({ type: 'notice', message: '正在重试临时模型错误。' })
+  await expect(article.getByText('正在重试临时模型错误。', { exact: true })).toBeVisible()
+  await pi.emit({ type: 'text', delta: '发布前先确认健康检查。' })
+  await expect(article.getByText('发布前先确认健康检查。', { exact: true })).toBeVisible()
+  await expect(article.getByRole('button', { name: '没有帮助', exact: true })).toHaveCount(0)
+  await pi.emit({ type: 'text', delta: `[${piCitations[0]!.key}]\n\n回滚条件仍需核对。[${piCitations[1]!.key}]` })
+  const pendingCitation = article.getByText('deploy.md#L25-28', { exact: true })
+  await expect(pendingCitation).toBeVisible()
+  await expect(pendingCitation).not.toHaveClass(/warn/)
+  const reads = pi.transcriptReads.length
+  await pi.finish()
+  await expect.poll(() => pi.transcriptReads.length).toBeGreaterThan(reads)
+  await expect(article.getByRole('button', { name: '没有帮助', exact: true })).toBeVisible()
+  await expect(article.locator('details.pi-process')).not.toHaveAttribute('open', '')
+  await expect(article.getByText('查阅 1 个文件 · 搜索 1 次 · 2 秒', { exact: true })).toBeVisible()
+  await expect(article.getByText('正在重试临时模型错误。', { exact: true })).toHaveCount(0)
+
+  const verified = article.getByRole('link', { name: 'deploy.md#L5-18', exact: true })
+  const unverified = article.getByRole('link', { name: 'deploy.md#L25-28', exact: true })
+  await expect(verified).not.toHaveClass(/warn/)
+  await expect(unverified).toHaveClass(/warn/)
+  await expect(unverified).toHaveAttribute('title', `${piCitations[1]!.key}\n这段内容没有在本次检索中读到，请自行核对`)
+  await expect(unverified).toHaveAttribute('href', piCitations[1]!.url)
+  const citations = page.getByRole('tabpanel', { name: '引用 1', exact: true })
+  await expect(citations.getByRole('article')).toHaveCount(1)
+  await expect(citations.getByText('未核实', { exact: true })).toBeVisible()
+  await expect(citations.getByRole('link', { name: /^L/ })).toHaveCount(2)
+
+  // 真正打开新标签页，验证目标可被现有文档路由解析，而不只比较 href。
+  // page.route 的拦截不继承到 popup，因此在点击前给整个 context 安装虚构 API。
+  await page.context().route('**/api/**', async route => {
+    const method = route.request().method()
+    const path = new URL(route.request().url()).pathname
+    const json = (body: unknown) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) })
+    // popup 的页面级路由不继承自 opener；只提供这次跳转所需的虚构文档读取。
+    if (method === 'GET' && path === '/api/repos') return json({ items: [repository] })
+    if (method === 'GET' && path === '/api/repos/7/branches') return json({ items: [{ id: 1, repo_id: 7, ref_type: 'branch', ref_name: 'main', commit_sha: fixtureSHA }] })
+    if (method === 'GET' && path === '/api/repos/7/files') return json({ items: files })
+    if (method === 'GET' && path === '/api/repos/7/versions/42/content') return json(documentContent)
+    if (method === 'GET' && path === '/api/repos/7/documents/11/history') return json({ events: [] })
+    pi.base.unexpected.push(`popup ${method} ${path}`)
+    return route.fulfill({ status: 501, contentType: 'application/json', body: JSON.stringify({ error: `Unmocked popup API: ${path}` }) })
+  })
+  const popupPromise = page.waitForEvent('popup')
+  await unverified.click()
+  const popup = await popupPromise
+  await expect(popup).toHaveURL(/\/\?repo=7&version=42$/)
+  await expect(popup.getByRole('heading', { name: '发布前检查', exact: true })).toBeVisible()
+  await popup.close()
+
+  await page.getByRole('tab', { name: '本次用量', exact: true }).click()
+  const usage = page.getByRole('tabpanel', { name: '本次用量', exact: true })
+  for (const value of ['demo-chat-v1', '2.0 秒', '2 次', '460', '110', '100', '$0.004200']) {
+    await expect(usage.getByText(value, { exact: true })).toBeVisible()
+  }
+  const runID = pi.requests[0]!.runID
+  await expect(article.getByRole('link', { name: '查看过程记录', exact: true })).toHaveAttribute('href', new RegExp(`run=${runID}$`))
+  expect(pi.base.messageReads).toEqual([])
+})
+
+test('运行中 Enter 发补充，Shift+Enter 与三种 IME 路径不会误发新 run 或 steer', async ({ page, pi }) => {
+  await openPi(page, pi)
+  const article = await ask(page, pi)
+  await pi.start()
+  const input = composer(page)
+  await input.fill('只检查 main 分支')
+  await input.press('Shift+Enter')
+  await expect(input).toHaveValue('只检查 main 分支\n')
+  for (const init of [{ key: 'Enter', code: 'Enter', isComposing: true }, { key: 'Enter', code: 'Enter', keyCode: 229 }]) {
+    await input.dispatchEvent('keydown', init)
+    await expect(input).toHaveValue('只检查 main 分支\n')
+  }
+  await input.dispatchEvent('compositionstart')
+  await input.press('Enter')
+  await input.dispatchEvent('compositionend')
+  expect(pi.steers).toEqual([])
+  expect(pi.requests).toHaveLength(1)
+  await input.fill('只检查 main 分支')
+  await input.press('Enter')
+  await expect.poll(() => pi.steers).toEqual([{ sessionID: 71, text: '只检查 main 分支' }])
+  await expect(input).toHaveValue('')
+  await expect(article.getByText('补充说明：只检查 main 分支', { exact: true })).toBeVisible()
+  await expect(article.getByText('补充说明已发送，会在当前步骤结束后交给助手。', { exact: true })).toBeVisible()
+  expect(pi.requests).toHaveLength(1)
+  expect(pi.aborts).toEqual([])
+  await pi.emit({ type: 'text', delta: piAnswer })
+  await pi.finish()
+  await expect(page.getByRole('button', { name: '发送', exact: true })).toBeVisible()
+})
+
+test('显式停止只发一次 abort，等待 SSE 确认后保留部分回答并显示已停止', async ({ page, pi }) => {
+  await openPi(page, pi)
+  const article = await ask(page, pi)
+  await pi.start()
+  await pi.emit({ type: 'text', delta: '已读取发布检查，后续内容尚未生成。' })
+  await page.getByRole('button', { name: '停止生成', exact: true }).click()
+  await expect.poll(() => pi.aborts).toEqual([71])
+  await expect(article.getByText('正在停止…', { exact: true })).toBeVisible()
+  await expect(article.getByText('已停止', { exact: true })).toHaveCount(0)
+  await pi.finish({ status: 'aborted', citations: [] })
+  await expect(article.getByText('已停止', { exact: true })).toBeVisible()
+  await expect(article.getByText('已读取发布检查，后续内容尚未生成。', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '停止生成', exact: true })).toHaveCount(0)
+  await expect(article.getByRole('button', { name: '重试', exact: true })).toBeEnabled()
+  await page.reload()
+  await expect(turn(page, '灯塔发布需要哪些检查？').getByText('已停止', { exact: true })).toBeVisible()
+  expect(pi.aborts).toEqual([71])
+})
+
+test('👎 无需意见即可保存，跳过后可补充意见且刷新恢复反馈', async ({ page, pi }) => {
+  await openPi(page, pi)
+  const article = await ask(page, pi)
+  await pi.start()
+  await pi.emit({ type: 'text', delta: piAnswer })
+  await pi.finish()
+  const down = article.getByRole('button', { name: '没有帮助', exact: true })
+  await down.click()
+  const runID = pi.requests[0]!.runID
+  await expect.poll(() => pi.feedbacks).toEqual([{ runID, rating: -1 }])
+  await expect(down).toHaveAttribute('aria-pressed', 'true')
+  await expect(article.getByRole('textbox', { name: '反馈意见', exact: true })).toBeVisible()
+  await article.getByRole('button', { name: '跳过说明', exact: true }).click()
+  await expect(article.getByText('反馈已保存', { exact: true })).toBeVisible()
+  expect(pi.feedbacks).toHaveLength(1)
+  await down.click()
+  await article.getByRole('textbox', { name: '反馈意见', exact: true }).fill('  请补充回滚条件。  ')
+  await article.getByRole('button', { name: '保存意见', exact: true }).click()
+  await expect.poll(() => pi.feedbacks[1]).toEqual({ runID, rating: -1, comment: '请补充回滚条件。' })
+  await page.reload()
+  await expect(down).toHaveAttribute('aria-pressed', 'true')
+  await down.click()
+  await expect(article.getByRole('textbox', { name: '反馈意见', exact: true })).toHaveValue('请补充回滚条件。')
+})
+
+test('pi 配置下旧会话只读，仍展示旧消息，新建会话后走 pi transcript', async ({ page, pi }) => {
+  await page.goto('/ai/?repo=7&session=31')
+  await expect(page.getByText('旧版会话仅供查阅。', { exact: false })).toBeVisible()
+  await expect(page.getByText('灯塔服务发布前要检查什么？', { exact: true })).toBeVisible()
+  await expect(page.getByText(/发布前需要确认健康检查通过/)).toBeVisible()
+  await expect(composer(page)).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '发送', exact: true })).toHaveCount(0)
+  expect(pi.base.messageReads).toContain(31)
+  expect(pi.transcriptReads).not.toContain(31)
+  await page.getByRole('button', { name: '新建 pi 问答', exact: true }).click()
+  await expect(page).toHaveURL(/session=72/)
+  await expect(composer(page)).toBeVisible()
+  await expect.poll(() => pi.transcriptReads).toContain(72)
+  await ask(page, pi, '新会话的检查步骤')
+  expect(pi.requests[0]!.sessionID).toBe(72)
+  expect(pi.base.questions).toEqual([])
+  await pi.start()
+  await pi.finish({ citations: [] })
+})
+
+test('切离正在运行的 pi 会话只断 SSE，不发 abort，返回后轮询恢复后台结果', async ({ page, pi }) => {
+  await openPi(page, pi)
+  await ask(page, pi)
+  await pi.start()
+  await pi.emit({ type: 'text', delta: '离页前的部分回答。' })
+  const runID = pi.requests[0]!.runID
+  // 切到旧会话会卸载 PiChat，真实触发 onScopeDispose，而非测试直接调用清理函数。
+  await page.getByRole('button', { name: /灯塔发布与回滚.*旧版/ }).click()
+  await expect(page).toHaveURL(/session=31/)
+  await expect.poll(() => pi.disconnects).toContainEqual({ runID, reason: 'signal_abort' })
+  expect(pi.aborts).toEqual([])
+  expect(pi.turn(runID).status).toBe('running')
+  await page.getByRole('button', { name: /pi 发布检查/ }).click()
+  await expect(page).toHaveURL(/session=71/)
+  const article = turn(page, '灯塔发布需要哪些检查？')
+  await expect(article.getByText('离页前的部分回答。', { exact: true })).toBeVisible()
+  await expect(article.getByText('正在查阅并回答…', { exact: true })).toBeVisible()
+  const reads = pi.transcriptReads.length
+  pi.completeInBackground(runID)
+  await expect.poll(() => pi.transcriptReads.length).toBeGreaterThan(reads)
+  await expect(article.getByRole('link', { name: 'deploy.md#L25-28', exact: true })).toHaveClass(/warn/)
+  await expect(article.getByRole('button', { name: '没有帮助', exact: true })).toBeVisible()
+  await expect(article.getByText('离页前的部分回答。', { exact: true })).toHaveCount(0)
+  expect(pi.requests).toHaveLength(1)
+  expect(pi.aborts).toEqual([])
+  await page.reload()
+  await expect(article.getByRole('link', { name: 'deploy.md#L25-28', exact: true })).toBeVisible()
+  expect(pi.requests).toHaveLength(1)
+})
+
+test('角色持久化并切换三条示例，示例只填输入框，请求包含所选角色和范围', async ({ page, pi }) => {
+  await openPi(page, pi)
+  const roles = page.getByRole('group', { name: '提问角色', exact: true })
+  await roles.getByRole('button', { name: '产品', exact: true }).click()
+  await expect(roles.getByRole('button', { name: '产品', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  const productExample = page.getByRole('button', { name: '秒杀库存人工归还有哪些限制条件？', exact: true })
+  await productExample.click()
+  await expect(composer(page)).toHaveValue('秒杀库存人工归还有哪些限制条件？')
+  expect(pi.requests).toEqual([])
+  await page.reload()
+  await expect(roles.getByRole('button', { name: '产品', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  expect(await page.evaluate(() => localStorage.getItem('docharbor.ai.role'))).toBe('产品')
+  await roles.getByRole('button', { name: '测试', exact: true }).click()
+  await expect(productExample).toHaveCount(0)
+  for (const text of ['CDK 激活失败时，返回的错误码分别代表什么？', '秒杀库存归还失败后会怎么重试？', '礼物订单缺少账号名时会出现什么现象？']) {
+    await expect(page.getByRole('button', { name: text, exact: true })).toBeVisible()
+  }
+  await page.getByRole('button', { name: '秒杀库存归还失败后会怎么重试？', exact: true }).click()
+  await page.getByRole('combobox', { name: '检索范围', exact: true }).selectOption('current_repo')
+  await composer(page).press('Enter')
+  await expect.poll(() => pi.requests.length).toBe(1)
+  expect(pi.requests[0]!.input).toMatchObject({ question: '秒杀库存归还失败后会怎么重试？', role: '测试', scope: { repo_mode: 'current_repo', repo_ids: [7] } })
+  await pi.start()
+  await pi.finish({ citations: [] })
+})
+
+test('模型错误以原问题、角色和范围创建新 run，工具上限只填回问题供缩小范围', async ({ page, pi }) => {
+  await openPi(page, pi)
+  await page.getByRole('group', { name: '提问角色', exact: true }).getByRole('button', { name: '开发', exact: true }).click()
+  await page.getByRole('combobox', { name: '检索范围', exact: true }).selectOption('current_repo')
+  const article = await ask(page, pi, '查阅灯塔发布相关代码')
+  await pi.start()
+  await pi.emit({ type: 'error', message: '模型暂时不可用。' })
+  await pi.finish({ status: 'failed', message: '模型暂时不可用。', citations: [] })
+  await expect(article.getByText('模型暂时不可用。', { exact: true })).toBeVisible()
+  await page.getByRole('group', { name: '提问角色', exact: true }).getByRole('button', { name: '产品', exact: true }).click()
+  await page.getByRole('combobox', { name: '检索范围', exact: true }).selectOption('global')
+  await article.getByRole('button', { name: '重试', exact: true }).click()
+  await expect.poll(() => pi.requests.length).toBe(2)
+  expect(pi.requests[1]!.input).toEqual(pi.requests[0]!.input)
+  expect(pi.requests[1]!.runID).not.toBe(pi.requests[0]!.runID)
+  await pi.start()
+  await pi.emit({ type: 'tool_start', call_id: 'limit-1', tool: 'mcp__docharbor__search_code', args: { query: 'release' } })
+  await pi.emit({ type: 'tool_end', call_id: 'limit-1', summary: '工具调用次数达到上限', is_error: true, preview: '工具调用次数达到上限，请缩小检索范围。' })
+  await pi.finish({ status: 'failed', message: '工具调用次数达到上限，请缩小检索范围。', citations: [] })
+  const latest = turn(page, '查阅灯塔发布相关代码').last()
+  // 相同原因也出现在折叠的工具 preview；这里验证用户直接可见的失败状态。
+  await expect(latest.locator('.turn-status').getByText('工具调用次数达到上限，请缩小检索范围。', { exact: true })).toBeVisible()
+  await latest.getByRole('button', { name: '缩小范围后重试', exact: true }).click()
+  await expect(composer(page)).toHaveValue('查阅灯塔发布相关代码')
+  await expect(composer(page)).toBeFocused()
+  expect(pi.requests).toHaveLength(2)
+  await page.reload()
+  await expect(turn(page, '查阅灯塔发布相关代码')).toHaveCount(2)
+  await expect(latest.getByRole('button', { name: '缩小范围后重试', exact: true })).toBeVisible()
+  await expect(turn(page, '查阅灯塔发布相关代码').first().getByRole('button', { name: '重试', exact: true })).toBeVisible()
+})
+
+test('SSE 提前 EOF 不冒充已完成，继续从后台历史恢复且不重复提问', async ({ page, pi }) => {
+  await openPi(page, pi)
+  const article = await ask(page, pi)
+  await pi.start()
+  await pi.emit({ type: 'text', delta: '连接中断前的内容。' })
+  const reads = pi.transcriptReads.length
+  await pi.end()
+  await expect.poll(() => pi.transcriptReads.length).toBeGreaterThan(reads)
+  await expect(article.getByText('连接中断前的内容。', { exact: true })).toBeVisible()
+  await expect(article.getByText('正在查阅并回答…', { exact: true })).toBeVisible()
+  await expect(article.getByRole('button', { name: '没有帮助', exact: true })).toHaveCount(0)
+  pi.completeInBackground()
+  await expect(article.getByRole('link', { name: 'deploy.md#L5-18', exact: true })).toBeVisible()
+  await expect(article.getByRole('button', { name: '没有帮助', exact: true })).toBeVisible()
+  expect(pi.requests).toHaveLength(1)
+  expect(pi.aborts).toEqual([])
+})

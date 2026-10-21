@@ -33,8 +33,7 @@ export function useAISettings() {
   const formComplete = computed(() => Boolean(form.value.name.trim() && form.value.base_url.trim() && form.value.model.trim()))
   const canTest = computed(() => !busy.value && hasKey.value && Boolean(form.value.base_url.trim() && form.value.model.trim()))
   const canSave = computed(() => !busy.value && formComplete.value && (settings.value?.enabled || hasKey.value))
-  const canEnable = computed(() => !busy.value && Boolean(settings.value?.route_provider_keys.length && settings.value.providers.some(p => p.is_default && p.usable)))
-  const activeRoutes = computed(() => (settings.value?.active_route_provider_keys || []).map(key => settings.value?.providers.find(p => p.provider_key === key)).filter((p): p is AISettingsProviderSummary => Boolean(p)))
+  const canEnable = computed(() => !busy.value && Boolean(settings.value?.providers.some(p => p.is_default && p.usable)))
   const replacements = computed(() => (settings.value?.providers || []).filter(p => p.provider_key !== deleting.value?.provider_key && p.usable))
   const deleteBlocked = computed(() => Boolean(deleting.value?.is_default && settings.value?.enabled && !replacements.value.some(p => p.provider_key === replacementKey.value)))
 
@@ -108,13 +107,15 @@ export function useAISettings() {
     formError.value = ''
     const enable = !settings.value?.enabled
     try {
-      const payload = { ...form.value }
+      // 旧版路由字段在过渡期仍由后端保存，普通编辑只提交可见字段，避免重置旧配置。
+      const { provider_key, name, base_url, model, api_key, timeout_seconds } = form.value
+      const payload = { name, base_url, model, api_key, timeout_seconds }
       // 已有项始终 PATCH 自身；默认供应商专用 PUT 会改变路由默认项，不能用于普通编辑。
-      const response = payload.provider_key
-        ? await api.updateAIProvider(payload.provider_key, { ...payload, test_before_save: enable })
+      const response = provider_key
+        ? await api.updateAIProvider(provider_key, { ...payload, test_before_save: enable })
         : settings.value?.providers.length
           ? await api.createAIProvider({ ...payload, test_before_save: enable })
-          : await api.saveAIDefaultProvider({ ...payload, enable })
+          : await api.saveAIDefaultProvider({ ...defaults(), ...payload, enable })
       settings.value = response.settings
       // 保存与应用是两个接口；先记住新 key，应用失败时再次保存不会重复创建。
       form.value.provider_key = response.provider.provider_key
@@ -185,5 +186,5 @@ export function useAISettings() {
     } catch (err) { handleError(err) } finally { operation.value = ''; providerBusy.value = '' }
   }
 
-  return { settings, loading, busy, operation, providerBusy, banner, drawerOpen, form, selectedPreset, fieldErrors, formError, testResult, editedProvider, canTest, canSave, canEnable, activeRoutes, deleting, replacementKey, replacements, deleteBlocked, load, openEditor, closeEditor, markDirty, applyPreset, testProvider, save, apply, disable, makeDefault, prepareDelete, remove }
+  return { settings, loading, busy, operation, providerBusy, banner, drawerOpen, form, selectedPreset, fieldErrors, formError, testResult, editedProvider, canTest, canSave, canEnable, deleting, replacementKey, replacements, deleteBlocked, load, openEditor, closeEditor, markDirty, applyPreset, testProvider, save, apply, disable, makeDefault, prepareDelete, remove }
 }

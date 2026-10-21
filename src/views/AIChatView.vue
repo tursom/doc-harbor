@@ -12,6 +12,7 @@ import Composer from './ai/Composer.vue'
 import EvidencePanel from './ai/EvidencePanel.vue'
 import MessageItem from './ai/MessageItem.vue'
 import SessionList from './ai/SessionList.vue'
+import PiChat from './ai/PiChat.vue'
 import { messageNotice } from './ai/chat'
 
 const { repos, selectedRepo, loadAll, tabHref } = useRepos()
@@ -19,11 +20,17 @@ const {
   sessions, selectedSession, messages, settings, question, scopeMode, includeBranchCandidates, fileContent,
   loading, streaming, busy, error, candidates, numberedCitations, evidenceChain, notices, messageListRef,
   markdownRenderer, canAskWithCurrentFile, initialize, refresh, selectSession, newSession, sendQuestion,
-  stopGeneration, openCitation, syncURL
+  stopGeneration, openCitation, syncURL, isPi, legacyReadOnly, buildScope
 } = useAIChat(repos, selectedRepo)
 const sessionsOpen = ref(false)
 const evidencePanel = ref<InstanceType<typeof EvidencePanel> | null>(null)
+const piChat = ref<InstanceType<typeof PiChat> | null>(null)
 let disposed = false
+
+async function refreshPage() {
+  await refresh()
+  await piChat.value?.refresh()
+}
 
 async function chooseSession(session: AISession) {
   sessionsOpen.value = false
@@ -51,24 +58,27 @@ onBeforeUnmount(() => {
   <section class="ai-page">
     <header class="ai-header">
       <h2>AI 问答</h2>
-      <div class="ai-subtitle"><StatusPill :status="settings?.enabled ? 'enabled' : '本地检索模式'" /><span>{{ settings?.default_provider_name || '未配置供应商' }} · <span class="model">{{ settings?.default_model || '—' }}</span></span><span class="description">在全部仓库的智能最新文档和代码中检索，回答附带引用</span><a v-if="settings && !settings.enabled" :href="tabHref('ai-config')">前往 AI 供应商</a></div>
+      <div class="ai-subtitle"><StatusPill :status="settings?.enabled ? 'enabled' : 'disabled'" /><span>{{ settings?.default_provider_name || '未配置供应商' }} · <span class="model">{{ settings?.default_model || '—' }}</span></span><span class="description">在全部仓库的文档和代码中查阅原文，回答附带引用</span></div>
     </header>
-    <div v-if="error" class="page-error"><Notice variant="danger">{{ error }} <button class="btn sm" type="button" :disabled="busy" @click="refresh">重试</button></Notice></div>
+    <div v-if="settings && !settings.enabled" class="page-error"><Notice variant="warn">AI 问答未启用。<a :href="tabHref('ai-config')">前往 AI 供应商配置并启用</a></Notice></div>
+    <div v-if="error" class="page-error"><Notice variant="danger">{{ error }} <button class="btn sm" type="button" :disabled="busy" @click="refreshPage">重试</button></Notice></div>
     <div class="ai-layout">
-      <aside class="sessions-sidebar"><SessionList :sessions="sessions" :selected-id="selectedSession?.id" :busy="busy" @select="chooseSession" @create="createSession" @refresh="refresh" /></aside>
-      <section class="chat" aria-label="AI 对话">
+      <aside class="sessions-sidebar"><SessionList :sessions="sessions" :selected-id="selectedSession?.id" :busy="busy" @select="chooseSession" @create="createSession" @refresh="refreshPage" /></aside>
+      <PiChat v-if="isPi" ref="piChat" :session="selectedSession" v-model:question="question" v-model:scope="scopeMode" :repo-name="selectedRepo?.name" :file-path="fileContent?.file_path" :can-ask-file="canAskWithCurrentFile" :enabled="!!settings?.enabled" :context-loading="loading" :diagnostics-href="tabHref('ai-diagnostics')" :build-scope="buildScope" :ensure-session="newSession" @sessions="sessionsOpen = true" @completed="refresh" @update:scope="syncURL" />
+      <section v-else class="chat" aria-label="AI 对话">
         <div class="mobile-sessions"><button class="btn sm" type="button" @click="sessionsOpen = true"><MessageSquare :size="14" />会话</button><span>{{ selectedSession?.title || '新的 AI 问答' }}</span></div>
+        <div v-if="legacyReadOnly" class="legacy-readonly"><Notice>旧版会话仅供查阅。<button class="btn sm" type="button" :disabled="busy" @click="createSession">新建 pi 问答</button></Notice></div>
         <div ref="messageListRef" class="thread" :aria-busy="loading">
           <div class="thread-inner">
             <MessageItem v-for="message in messages" :key="message.id" :message="message" :notice="messageNotice(message, notices)" :citations="numberedCitations" :renderer="markdownRenderer" :streaming="streaming" :diagnostics-href="tabHref('ai-diagnostics')" @citation="evidencePanel?.focusCitation($event)" @stop="stopGeneration" />
             <EmptyState v-if="!messages.length" :message="loading ? '正在读取会话…' : '从全部仓库提问，回答会附带文档和代码引用'" />
           </div>
         </div>
-        <Composer v-model:question="question" v-model:scope="scopeMode" v-model:include-branches="includeBranchCandidates" :repo-name="selectedRepo?.name" :file-path="fileContent?.file_path" :can-ask-file="canAskWithCurrentFile" :busy="busy" :streaming="streaming" @send="sendQuestion" @stop="stopGeneration" @update:scope="syncURL" />
+        <Composer v-if="!legacyReadOnly && settings?.enabled" v-model:question="question" v-model:scope="scopeMode" v-model:include-branches="includeBranchCandidates" :repo-name="selectedRepo?.name" :file-path="fileContent?.file_path" :can-ask-file="canAskWithCurrentFile" :busy="busy" :streaming="streaming" @send="sendQuestion" @stop="stopGeneration" @update:scope="syncURL" />
       </section>
-      <EvidencePanel ref="evidencePanel" :citations="numberedCitations" :candidates="candidates" :steps="evidenceChain" :streaming="streaming" :repos="repos" @open="openCitation" />
+      <EvidencePanel v-if="!isPi" ref="evidencePanel" :citations="numberedCitations" :candidates="candidates" :steps="evidenceChain" :streaming="streaming" :repos="repos" @open="openCitation" />
     </div>
-    <DrawerPanel :open="sessionsOpen" title="会话" @close="sessionsOpen = false"><SessionList :sessions="sessions" :selected-id="selectedSession?.id" :busy="busy" @select="chooseSession" @create="createSession" @refresh="refresh" /></DrawerPanel>
+    <DrawerPanel :open="sessionsOpen" title="会话" @close="sessionsOpen = false"><SessionList :sessions="sessions" :selected-id="selectedSession?.id" :busy="busy" @select="chooseSession" @create="createSession" @refresh="refreshPage" /></DrawerPanel>
   </section>
 </template>
 
@@ -81,6 +91,8 @@ onBeforeUnmount(() => {
 .description { color: var(--fg-subtle); }
 .ai-subtitle a { color: var(--accent-text); }
 .page-error { padding: 10px 24px; }
+.page-error a { color: var(--accent-text); }
+.legacy-readonly { padding: 12px 24px 0; }
 .ai-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr) 320px; flex: 1; min-height: 0; }
 .sessions-sidebar { border-right: 1px solid var(--border); min-height: 0; min-width: 0; }
 .chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; }

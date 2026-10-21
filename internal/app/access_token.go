@@ -16,14 +16,17 @@ import (
 )
 
 const (
+	accessTokenCapabilityDocsRead          = "docs.read"
 	accessTokenCapabilityAIHistoryRead     = "ai.history.read"
 	accessTokenCapabilityAIDiagnosticsRead = "ai.diagnostics.read"
 	accessTokenDefaultTTL                  = time.Hour
 	accessTokenMinTTL                      = 5 * time.Minute
 	accessTokenMaxTTL                      = 24 * time.Hour
+	accessTokenDocsReadMaxTTL              = 90 * 24 * time.Hour
 )
 
 var allowedAccessTokenCapabilities = map[string]struct{}{
+	accessTokenCapabilityDocsRead:          {},
 	accessTokenCapabilityAIHistoryRead:     {},
 	accessTokenCapabilityAIDiagnosticsRead: {},
 }
@@ -134,16 +137,25 @@ func (s *Server) accessTokenSigningKey() ([]byte, error) {
 }
 
 func (s *Server) issueAccessToken(req accessTokenRequest) (accessTokenResponse, error) {
-	ttl := accessTokenDefaultTTL
-	if req.TTLSeconds > 0 {
-		ttl = time.Duration(req.TTLSeconds) * time.Second
-	}
-	if ttl < accessTokenMinTTL || ttl > accessTokenMaxTTL {
-		return accessTokenResponse{}, errBadRequest("ttl_seconds must be between 300 and 86400")
-	}
 	capabilities, err := normalizeAccessTokenCapabilities(req.Capabilities)
 	if err != nil {
 		return accessTokenResponse{}, err
+	}
+	// 仅文档只读令牌可长期用于 MCP；混合其他能力时仍保持原来的 24 小时上限。
+	maxTTL := accessTokenMaxTTL
+	if len(capabilities) == 1 && capabilities[0] == accessTokenCapabilityDocsRead {
+		maxTTL = accessTokenDocsReadMaxTTL
+	}
+	ttl := accessTokenDefaultTTL
+	if req.TTLSeconds > 0 {
+		// 先比较秒数，避免极大输入转换为 Duration 后溢出。
+		if req.TTLSeconds > int(maxTTL/time.Second) {
+			return accessTokenResponse{}, errBadRequest("ttl_seconds exceeds capability maximum")
+		}
+		ttl = time.Duration(req.TTLSeconds) * time.Second
+	}
+	if ttl < accessTokenMinTTL || ttl > maxTTL {
+		return accessTokenResponse{}, errBadRequest("ttl_seconds must be at least 300 and within capability maximum")
 	}
 	now := time.Now().UTC()
 	scope := accessTokenScope{ViewerKey: strings.TrimSpace(req.Scope.ViewerKey)}

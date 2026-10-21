@@ -5,6 +5,8 @@ node_modules/
 .astro/
 test-results/
 playwright-report/
+out/ai-eval/
+out/ai-ui/
 credentials/*
 !credentials/.gitignore
 !credentials/README.md

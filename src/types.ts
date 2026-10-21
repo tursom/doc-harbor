@@ -267,6 +267,8 @@ export interface AIProviderTestSummary {
 }
 
 export interface AISettingsSummary {
+	engine?: 'legacy' | 'pi'
+	pi_pool?: { total: number; busy: number; idle: number; starting: number; queued: number }
   enabled: boolean
   status: AISettingsStatus
   default_provider_key: string
@@ -329,6 +331,7 @@ export interface AIQuestionScope {
 }
 
 export interface AISession {
+	engine?: 'legacy' | 'pi'
   id: number
   title: string
   viewer_key: string

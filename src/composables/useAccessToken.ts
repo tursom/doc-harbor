@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { api } from '../api'
 import type { AccessTokenResponse } from '../types'
 
@@ -7,11 +7,20 @@ export function useAccessToken() {
   const issuedAccessToken = ref<AccessTokenResponse | null>(null)
   const accessTokenBusy = ref(false)
   const settingsBanner = ref<{ type: 'ok' | 'danger'; message: string } | null>(null)
+  const docsOnly = computed(() => accessTokenForm.value.capabilities.length === 1 && accessTokenForm.value.capabilities[0] === 'docs.read')
+  const maxTokenTTL = computed(() => docsOnly.value ? 7776000 : 86400)
+  const ttlValidation = computed(() => {
+    const ttl = Number(accessTokenForm.value.ttl_seconds)
+    if (!Number.isInteger(ttl) || ttl < 300 || ttl > maxTokenTTL.value) {
+      return docsOnly.value ? '有效期必须在 300 秒至 90 天之间' : '包含 AI 历史或诊断能力时，有效期最长 24 小时；7/30/90 天仅适用于单独的 docs.read'
+    }
+    return ''
+  })
   async function createAccessToken() {
     if (accessTokenBusy.value) return
     const ttl = Number(accessTokenForm.value.ttl_seconds)
-    if (!Number.isInteger(ttl) || ttl < 300 || ttl > 86400) {
-      settingsBanner.value = { type: 'danger', message: '有效期必须在 300–86400 秒之间' }
+    if (ttlValidation.value) {
+      settingsBanner.value = { type: 'danger', message: ttlValidation.value }
       return
     }
     if (!accessTokenForm.value.capabilities.length) {
@@ -31,5 +40,5 @@ export function useAccessToken() {
       settingsBanner.value = { type: 'danger', message: err instanceof Error ? err.message : String(err) }
     } finally { accessTokenBusy.value = false }
   }
-  return { accessTokenForm, issuedAccessToken, accessTokenBusy, settingsBanner, createAccessToken }
+  return { accessTokenForm, issuedAccessToken, accessTokenBusy, settingsBanner, docsOnly, maxTokenTTL, ttlValidation, createAccessToken }
 }

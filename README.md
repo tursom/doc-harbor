@@ -20,8 +20,9 @@ DocHarbor 是一个独立的 Git 文档浏览服务。系统按仓库配置 clon
 
 前置依赖：
 
-- Go 1.24+
-- Node.js 22+
+- Go 1.25+（Docker 构建使用 1.26）
+- Node.js >=22.19.0（运行 pi 必需；运行镜像使用 Node 24）
+- pi `@earendil-works/pi-coding-agent@1.0.0`（使用 pi 引擎时，`npm install -g --omit=dev @earendil-works/pi-coding-agent@1.0.0`）
 - Git
 - SQLite CGO 环境
 
@@ -100,6 +101,13 @@ DOCHARBOR_SCREENSHOTS=1 npx playwright test e2e/redesign.spec.ts --grep 'redesig
 | `ALLOWED_GIT_HOSTS` | 空 | 逗号分隔 Git host 白名单，空表示不限制 |
 | `ALLOW_LOCAL_GIT` | `0` | 是否允许本地路径或 `file://` 仓库 |
 | `GITHUB_WEBHOOK_SECRET` | 空 | GitHub Webhook 共享 secret，空时 webhook 入口不可用 |
+| `AI_ENGINE` | `legacy` | 新会话引擎，`legacy` / `pi`。前端按会话 engine 选择界面；默认切换与旧链路删除仍按质量验收和稳定期条件执行 |
+| `PI_BIN` | `pi` | pi 可执行文件；离线后端测试可指向假进程 |
+| `AI_PI_POOL_SIZE` | `3` | pi 最大进程数，按需启动；每个 run 独占进程，超出后排队 |
+| `AI_PI_MAX_RUNS_PER_PROCESS` | `100` | 每进程运行次数上限，空闲时回收 |
+| `AI_RUN_TIMEOUT_SECONDS` | `300` | 单次 pi run 超时秒数，超时发送 abort |
+| `AI_MAX_TOOL_CALLS` | `40` | 单次 pi run 工具调用上限 |
+| `MCP_ENABLED` | `true` | 是否开放外部 `/api/mcp`；关闭时外部访问返回 404，内部 pi 令牌仍可使用 |
 
 私有仓库凭据不写入数据库。数据库中只保存凭据引用字段，实际密钥通过容器挂载或主机环境提供。
 
@@ -188,9 +196,9 @@ curl -i \
 
 ## 通用访问 Token
 
-管理员可以在系统设置页的“访问令牌”区域签发临时 Token。有效期可选 1 小时、8 小时、24 小时或自定义，自定义范围为 300 到 86400 秒；Token 使用 `DATA_DIR/secrets/access-token.key` 中的 HMAC-SHA256 密钥签名，密钥丢失或轮换后已签发 Token 会失效。
+管理员可以在系统设置页的“访问令牌”区域签发临时 Token。有效期可选 1 小时、8 小时、24 小时或自定义，自定义通常为 300 到 86400 秒；仅含 `docs.read` 的令牌上限为 90 天；Token 使用 `DATA_DIR/secrets/access-token.key` 中的 HMAC-SHA256 密钥签名，密钥丢失或轮换后已签发 Token 会失效。
 
-当前支持签发 `ai.history.read` 和 `ai.diagnostics.read` 能力，分别用于远程只读访问 AI 对话历史和 AI 问答排查数据。`scope.viewer_key` 留空时不限制 viewer，填写后服务端会强制按该 `viewer_key` 收窄支持该 scope 的接口。
+当前支持签发 `ai.history.read`、`ai.diagnostics.read` 和 `docs.read` 能力，分别用于远程只读访问 AI 对话历史、AI 问答排查数据和 MCP 文档/代码工具。系统设置中单独选择 `docs.read` 可签发 7/30/90 天令牌（最长 `ttl_seconds=7776000`）；混合其他能力仍最长 24 小时。混合能力与已选长期限冲突时，页面提示并阻止签发，不会静默缩短期限。`scope.viewer_key` 留空时不限制 viewer，填写后服务端按该值收窄 AI 历史及诊断；MCP 仓库读取不使用 viewer scope。
 
 签发接口：
 
@@ -263,6 +271,113 @@ docker compose up --build
 服务启动后访问 `http://127.0.0.1:14220`。生产环境建议放在 Pangolin 之后，由 Pangolin 负责登录、访问控制和配置页访问策略。
 
 DocHarbor 容器会通过 `tini` / Compose `init: true` 回收 Git 命令产生的孤儿子进程。生产部署不要移除镜像入口中的 init 进程；如果平台覆盖了 `ENTRYPOINT`，需要提供等价的 init/reaper。已经存在的 `git <defunct>` 僵尸进程不能单独 kill 清理，需要重启当前容器。
+
+运行镜像包含 Node 24 和锁定的 pi 1.0.0。`pi-runtime` 阶段单独安装并执行无模型 `get_state` 检查，可以独立验证 Alpine/musl；不会构建前端、发送 prompt 或挂载本机配置：
+
+2026-10-21 本地构建与断网容器复验通过，Node 24.22.0、pi 1.0.0，按实施规格保留 Alpine；完整记录见 [步骤 2 周边交付验证](doc/AI步骤2周边交付验证.md)。
+
+```bash
+docker build --target pi-runtime -t docharbor-pi-runtime:local .
+docker run --rm --network none --entrypoint node \
+  docharbor-pi-runtime:local /usr/local/lib/docharbor/pi-rpc-smoke.mjs
+```
+
+脚本要求 Node >=22.19.0、pi 恰为 1.0.0，使用临时 `HOME` 和 `PI_CODING_AGENT_DIR`、环境白名单及 `PI_OFFLINE=1`；只发送一次 `get_state`，检查成功响应后再关闭 stdin。宿主机安装 pi 后也可执行 `node scripts/pi-rpc-smoke.mjs`。它仅验证 RPC 启动与协议，不代表 MCP 工具循环或模型回答质量已验收。若 Alpine 因原生模块/musl 无法通过，按实施文档 §11 将运行阶段改为 `node:24-bookworm-slim`，Go 阶段同步改为 `golang:1.26-bookworm`，安装 glibc 环境下的 CGO/SQLite 构建依赖和 git、openssh-client、tini、ca-certificates、tzdata；更换基础镜像后须重跑同一检查。
+
+## MCP 接入
+
+`/api/mcp` 使用 streamable HTTP，提供启用仓库中文档和代码的只读工具：`list_repos`、`list_branches`、`list_docs`、`search_docs`、`search_code`、`read`、`list_dir`。`git_log`、`diff_files` 属于后续 P1。先通过受保护的 `POST /api/tokens` 签发只包含 `docs.read` 的令牌，最长 90 天；将返回的 token 存入客户端环境变量 `DOCHARBOR_TOKEN`，不要把实际值写进配置示例或版本库。
+
+签发请求体示例（仅展示请求，不展示返回的 token）：
+
+```json
+{"ttl_seconds":2592000,"capabilities":["docs.read"],"scope":{"viewer_key":""}}
+```
+
+pi 1.0.0：
+
+```bash
+pi mcp add docharbor --url https://docs.example.com/api/mcp \
+  --bearer-token-env-var DOCHARBOR_TOKEN --exposure direct
+pi mcp list
+```
+
+也可合并到用户 `mcp.json`（默认 `~/.pi/agent/mcp.json`，以实际 `PI_CODING_AGENT_DIR` 为准）：
+
+```json
+{
+  "mcpServers": {
+    "docharbor": {
+      "url": "https://docs.example.com/api/mcp",
+      "headers": {"Authorization":"Bearer ${DOCHARBOR_TOKEN}"},
+      "exposure": "direct"
+    }
+  },
+  "autoEnableCodemode": false
+}
+```
+
+在 `/mcp` 中核对暴露方式为 `direct`。`--no-tools` 下默认 codemode 暴露无法使用，不要加 `--no-extensions`，否则内置 MCP 也被禁用。若存在代理，本机 MCP 地址必须加入 `NO_PROXY` 和 `no_proxy`（`127.0.0.1,localhost`，保留原值）。服务端内部 pi 配置位于 `$DATA_DIR/ai/pi-agent/`，由后端管理，不要编辑个人 pi 配置来替代服务端配置；内部 MCP 令牌和供应商 Key 由后端通过子进程环境传入。
+
+Codex 的 `~/.codex/config.toml` 可使用环境变量令牌引用：
+
+```toml
+[mcp_servers.docharbor]
+url = "https://docs.example.com/api/mcp"
+bearer_token_env_var = "DOCHARBOR_TOKEN"
+```
+
+Claude Code 支持同类 HTTP 配置，可合并到对应 MCP 配置文件，保持 token 为环境变量占位符：
+
+```json
+{"mcpServers":{"docharbor":{"type":"http","url":"https://docs.example.com/api/mcp","headers":{"Authorization":"Bearer ${DOCHARBOR_TOKEN}"}}}}
+```
+
+上述 pi 参数按 1.0.0 随包 CLI/MCP 文档核对；其他客户端按当前安装版本检查环境变量展开能力。无令牌返回 401、缺少 `docs.read` 返回 403，来源网段仍受 `ALLOWED_CLIENT_CIDRS` 限制。网关需要另行放行 `/api/mcp`，不要开放管理用的 `/api/tokens`。
+
+## AI 问答使用
+
+前端按会话 `engine` 展示。pi 会话支持开发/产品/测试角色、范围提示、工具过程和可核对的引用；运行中按 Enter 发送补充说明，点击停止按钮终止运行。离开页面会断开接收，后台已开始的问题继续执行，回到会话后自动读取保存的结果。回答下方可复制、反馈和打开指定 run 的诊断记录；诊断令牌默认不保存，可选择只在当前标签页会话内记住。
+
+右栏按文件合并本轮引用，另有用量标签。未核实的行范围会显示提示，点击引用在新标签页阅读原文。旧会话带「旧版」标签，服务配置为 `pi` 后只读；默认 `legacy` 的过渡环境仍可在旧会话提问。AI 未启用时暂停新提问，可查看历史并前往供应商页配置。
+
+2026-10-21 用户明确决定「跳过评估阶段，实现前端」，据此推进步骤 3。默认供应商此前返回 401，真实模型回答质量仍未验收；本次决定不等于切换默认引擎、部署或删除旧链路。
+
+前端交付、自动化验证和桌面/窄屏截图见 [AI 前端重构验收记录](doc/AI前端重构验收记录.md)。记录包含停止、补充说明、刷新恢复、反馈和诊断的验证范围。
+
+## AI 评估与人工评分
+
+实施规格见 [AI 问答重构实施文档](doc/DocHarbor%20AI问答重构实施文档.md)。`cmd/ai-eval` 通过 HTTP 逐题新建会话，保存模型最终回答、SSE 过程与 API 用量；不自动判断答案正确率。
+
+题集 [questions.jsonl](testdata/ai-eval/questions.jsonl) 包含开发、测试、产品各 10 题。现有 `internal/app/ai_agent_eval_test.go` 只有 6 个核心原题，使用 widget_metric、widget orders 和 QuantumDelivery 的虚构 Git fixture；本题集保留原题，并从相同 fixture 扩写角色问题，`source` 明确标注原题/改写。它不是 30 道生产真实问题，重复场景也不是独立业务覆盖。没有这些 fixture 的实例不能据此测业务准确率：先准备等价的已扫描测试仓库，或由维护者补入真实导出问题并重写对应 `expect`，再对两引擎使用同一份题集及仓库快照。
+
+业务示例题集 [questions-real.jsonl](testdata/ai-eval/questions-real.jsonl) 根据实施规格的 SGPS、通用商户、token、秒杀库存、CDK、礼物订单等场景整理，开发/测试/产品各 10 题，包含追问和判定要点。这是规格示例与其扩展，尚未包含生产导出的真实问答；用于当前已扫描业务仓库的评估时，将下面命令的 `-file` 替换为此文件。当前阶段的测试、MCP 连通验证和真实调用阻塞见 [阶段验收记录](doc/AI问答重构阶段验收记录.md)。
+
+JSONL 每行必填 `{id, role, question, expect}`；可选 `source`、`scope` 和 `context`（前置用户问题数组，顺序发送到同一会话）。`id` 仅含英文字母、数字、`-`、`_` 且唯一，`role` 为开发/产品/测试。`expect` 是人工判定要点，不是正则或自动判分程序。追问“参数是什么？”的前置提问会实际调用 API，并单独保存过程与用量。
+
+以下命令会产生真实模型调用，由维护者在准备好模型与仓库后执行。`-engine` 选择客户端协议并核对返回的会话引擎；新建会话的引擎仍由服务端 `AI_ENGINE` 决定。对比时指向两个分别配置为 legacy/pi 的本地实例（使用不同监听端口及数据目录），或由维护者明确配置后依次运行；工具不会修改默认引擎，匹配失败会在提问前退出：
+
+```bash
+# 指向 AI_ENGINE=legacy 的本地实例；原版响应没有 engine 时按 legacy 处理。
+go run ./cmd/ai-eval -engine legacy -file testdata/ai-eval/questions.jsonl \
+  -url http://127.0.0.1:14220
+
+# 指向维护者准备的 AI_ENGINE=pi 评估实例。
+go run ./cmd/ai-eval -engine pi -file testdata/ai-eval/questions.jsonl \
+  -url http://127.0.0.1:14221
+```
+
+默认 `-timeout 6m`（每轮，含排队）、`-out out/ai-eval`。通过 `-scope '{"repo_mode":"selected","repo_ids":[1],"source_mode":"smart_latest_with_branch_candidates"}'` 可以覆盖全部题目的范围；ID 必须来自当前实例，两个数据库中的仓库 ID 可能不同。若 metric_value/metric_cents 的 fixture 分属不同仓库，应在自用题集逐题填写 `scope`，避免把两个版本混在一起。
+
+输出在 `out/ai-eval/<时间>-<引擎>-<唯一后缀>/`，包含固化输入 `questions.json`、汇总 `results.json`、人工评分表 `scores.md`，以及逐题目录的 `answer.md`、`result.json` 和 `events.jsonl`。有前置轮时另存 `context-01.jsonl` 等文件，包含该轮最终回答与用量。pi SSE 工具预览受服务端 2000 字符限制；需完整工具结果时另用带 `ai.diagnostics.read` 的诊断 API。legacy 使用原有 `/messages/stream`，以 `message_done.message.content` 为准覆盖草稿，保留最终回答的 `prompt_tokens/completion_tokens`；它不包含整个旧规划链路的总成本。pi 使用 `/runs`，保留原始 `usage`、引用及工具事件，并额外保存 `transcript.json`，用当前 run 的持久化最终答案覆盖工具循环中的中间说明或重试草稿。API 没返回用量时写 `null`，不伪造零费用。
+
+采集失败、流中断、超时或非成功 run 仍保留已有材料，批次继续并最终返回非零。Ctrl+C 后保留已采集题目；SSE 断开不会自动停止已开始的 pi run，应根据 `session_id` 检查历史或调用 abort。`scores.md` 每题留正确性（1/0.5/0）、引用核实、角色适配和备注栏，按 ID 对照两次产物，并核对范围及前置轮一致；耗时 P90 使用 nearest-rank，仅统计采集成功题的主轮请求（含排队，不含会话创建、前置轮与 transcript 获取）；`result.json` 的 `run_elapsed_ms` 是该主轮耗时，`elapsed_ms` 是整题总耗时。失败题须单独评审。实施规格原定的前端检查点已按用户明确决定跳过；默认引擎切换与旧链路删除仍按步骤 4/5 的质量验收和稳定期条件执行。
+
+离线验证命令（仅 HTTP/SSE mock，不调用模型）：
+
+```bash
+go test ./cmd/ai-eval
+```
 
 ## 安全边界
 

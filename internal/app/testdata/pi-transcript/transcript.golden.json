@@ -1,0 +1,36 @@
+[
+  {
+    "run_id": 0,
+    "question": "秒杀库存有哪些限制？",
+    "supplements": ["也说明异常情况。"],
+    "role": "产品",
+    "scope": {"repo_mode": "selected", "repo_ids": null, "source_mode": "smart_latest_with_branch_candidates", "file_types": null},
+    "scope_label": "当前仓库 游戏服务",
+    "status": "succeeded",
+    "steps": [{
+      "call_id": "call_read",
+      "tool": "mcp_docharbor_read",
+      "args": {"repo": "游戏服务", "path": "doc/库存 方案.md", "start_line": 40},
+      "summary": "读取第 40-42 行，共 100 行",
+      "is_error": false,
+      "preview": "读取第 40-42 行，共 100 行\n== 游戏服务@main:doc/库存 方案.md#L40-42\n   40\t人工归还有数量限制。\n   41\t仅允许有效订单。"
+    }],
+    "answer": "仅允许有效订单。[游戏服务@main:doc/库存 方案.md#L41-45]",
+    "citations": [{"key": "游戏服务@main:doc/库存 方案.md#L41-45", "repo": "游戏服务", "ref": "main", "path": "doc/库存 方案.md", "line_start": 41, "line_end": 45, "status": "verified", "url": ""}],
+    "usage": {"input_tokens": 30, "output_tokens": 6, "cache_read_tokens": 9, "cache_write_tokens": 3, "total_tokens": 48, "cost": 0.09},
+    "feedback": null
+  },
+  {
+    "run_id": 0,
+    "question": "解释 <context>原文</context>。",
+    "role": "测试",
+    "scope": {"repo_mode": "global", "repo_ids": null, "source_mode": "smart_latest_with_branch_candidates", "file_types": null},
+    "scope_label": "全部仓库",
+    "status": "aborted",
+    "steps": [],
+    "answer": "保留原文 context。",
+    "citations": [],
+    "usage": {"input_tokens": 10, "output_tokens": 2, "cache_read_tokens": 3, "cache_write_tokens": 1, "total_tokens": 16, "cost": 0.03},
+    "feedback": null
+  }
+]

@@ -29,9 +29,34 @@ type Server struct {
 	scanner *Scanner
 	// 启动时解析网段，配置错误直接阻止启动，避免误配置导致访问限制失效。
 	allowedClientPrefixes []netip.Prefix
+	// MCP 令牌只驻留内存；pi 生命周期归当前 Server 所有。
+	mcpToken   string
+	mcpHandler http.Handler
+	pi         *piRuntime
 }
 
 func NewServer(cfg Config) (*Server, error) {
+	if cfg.AIEngine == "" {
+		cfg.AIEngine = "legacy"
+	}
+	if cfg.AIEngine != "legacy" && cfg.AIEngine != "pi" {
+		return nil, errors.New("AI_ENGINE must be legacy or pi")
+	}
+	if cfg.PIBin == "" {
+		cfg.PIBin = "pi"
+	}
+	if cfg.AIPIPoolSize <= 0 {
+		cfg.AIPIPoolSize = 3
+	}
+	if cfg.AIPIMaxRunsPerProcess <= 0 {
+		cfg.AIPIMaxRunsPerProcess = 100
+	}
+	if cfg.AIRunTimeout <= 0 {
+		cfg.AIRunTimeout = 300 * time.Second
+	}
+	if cfg.AIMaxToolCalls <= 0 {
+		cfg.AIMaxToolCalls = 40
+	}
 	prefixes, err := parseAllowedClientCIDRs(cfg.AllowedClientCIDRs)
 	if err != nil {
 		return nil, err
@@ -41,16 +66,28 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	git := newGit(cfg)
-	return &Server{
+	s := &Server{
 		cfg:                   cfg,
 		db:                    db,
 		git:                   git,
 		scanner:               newScanner(db, git),
 		allowedClientPrefixes: prefixes,
-	}, nil
+	}
+	if err := s.initMCP(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := s.initPiRuntime(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
 }
 
 func (s *Server) Close() error {
+	if s.pi != nil {
+		s.pi.close()
+	}
 	return s.db.Close()
 }
 
@@ -61,11 +98,14 @@ func (s *Server) StartScheduler(ctx context.Context) {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
+	mux.HandleFunc("/api/mcp", s.handleMCP)
 	mux.HandleFunc("/api/repos", s.handleRepos)
 	mux.HandleFunc("/api/repos/", s.handleRepoSubroutes)
 	mux.HandleFunc("/api/tokens", s.handleAccessTokens)
 	mux.HandleFunc("/api/access", s.handleAccessSubroutes)
 	mux.HandleFunc("/api/access/", s.handleAccessSubroutes)
+	mux.HandleFunc("/api/access/ai/runs", s.handleAccessPiRuns)
+	mux.HandleFunc("/api/access/ai/runs/", s.handleAccessPiRuns)
 	mux.HandleFunc("/api/ai", s.handleAIRoot)
 	mux.HandleFunc("/api/ai/", s.handleAISubroutes)
 	mux.HandleFunc("/api/webhooks/github/secret", s.handleGitHubWebhookSecret)

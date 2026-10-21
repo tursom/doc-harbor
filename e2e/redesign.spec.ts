@@ -54,10 +54,10 @@ async function openPopulatedPage(page: Page, item: typeof pages[number]) {
       await expect(page.getByText('https://api.example.test/v1', { exact: true })).toBeVisible()
       break
     case 'ai-diagnostics':
-      await page.getByLabel(/Token/).fill(fixtureToken)
+      await page.getByLabel('诊断令牌', { exact: true }).fill(fixtureToken)
       await page.getByRole('button', { name: '读取', exact: true }).click()
       await expect(page.getByRole('heading', { name: 'Run #51', exact: true })).toBeVisible()
-      await expect(page.getByText('deployment-v1', { exact: true }).first()).toBeVisible()
+      await expect(page.getByRole('heading', { name: '引用核实 · 2', exact: true })).toBeVisible()
       break
     case 'settings':
       await expect(page.getByRole('button', { name: '轮换 Secret', exact: true })).toBeVisible()

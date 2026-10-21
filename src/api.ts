@@ -44,7 +44,7 @@ export class APIRequestError extends Error {
   }
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...options,
     headers: {
@@ -61,7 +61,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return response.json()
 }
 
-async function throwAPIError(response: Response): Promise<never> {
+export async function throwAPIError(response: Response): Promise<never> {
   let message = response.statusText
   let payload: APIErrorPayload = {}
   try {
