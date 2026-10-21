@@ -73,9 +73,9 @@ test('static history page remains meaningful without JavaScript', async ({ brows
   const context = await browser.newContext({ javaScriptEnabled: false })
   const page = await context.newPage()
   await page.goto('/history/')
-  await expect(page).toHaveTitle('Git 历史 · DocHarbor')
+  await expect(page).toHaveTitle('提交历史 · DocHarbor')
   await expect(page.getByRole('heading', { name: 'DocHarbor' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Git 历史' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '提交历史' })).toBeVisible()
   await expect(page.getByRole('link', { name: 'AI 问答' })).toHaveAttribute('href', '/ai/')
   await context.close()
 })
@@ -102,7 +102,7 @@ test('history first load does not request document rendering dependencies', asyn
     if (request.resourceType() === 'script') scripts.push(request.url())
   })
   await page.goto('/history/')
-  await expect(page.getByRole('heading', { name: 'Git 历史' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '提交历史' })).toBeVisible()
   expect(scripts.join('\n')).not.toMatch(/mermaid|marked|purify|html-preview/i)
 })
 
@@ -121,8 +121,9 @@ test('mobile AI navigation exposes every global page without horizontal overflow
   await page.setViewportSize({ width: 390, height: 844 })
   await mockEmptyRepositories(page)
   await page.goto('/ai/')
+  await page.getByRole('button', { name: '菜单', exact: true }).click()
   const navigation = page.getByRole('navigation', { name: '全局功能' })
-  for (const name of ['AI 问答', 'AI 配置', 'AI 诊断', '系统设置']) {
+  for (const name of ['AI 问答', 'AI 供应商', 'AI 诊断', '系统设置']) {
     await expect(navigation.getByRole('link', { name })).toBeVisible()
   }
   expect(await page.locator('body').evaluate((body) => body.scrollWidth === body.clientWidth)).toBe(true)
@@ -189,6 +190,7 @@ for (const width of [1440, 390]) {
 
     // 无标题的文件仍显示文件名；目录不预留分支行，并且仍可正常进入。
     await expect(page.locator('.file-row-title').filter({ hasText: 'README.md' })).toBeVisible()
+    await expect(page.locator('.file-row').filter({ hasText: 'README.md' }).locator('.file-row-branch')).toHaveCount(0)
     const directory = page.getByRole('button', { name: '运维文档', exact: true })
     await expect(directory.locator('.file-row-branch')).toHaveCount(0)
     const directoryBox = await directory.boundingBox()

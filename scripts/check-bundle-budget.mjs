@@ -8,6 +8,7 @@ const pages = [
   { name: 'documents', file: 'index.html', maxKiB: 130 },
   { name: 'history', file: 'history/index.html', maxKiB: 100 },
   { name: 'scans', file: 'scans/index.html', maxKiB: 100 },
+  { name: 'repo-settings', file: 'repo-settings/index.html', maxKiB: 100 },
   { name: 'ai', file: 'ai/index.html', maxKiB: 100 },
   { name: 'ai-config', file: 'ai/config/index.html', maxKiB: 100 },
   { name: 'ai-diagnostics', file: 'ai/diagnostics/index.html', maxKiB: 100 },

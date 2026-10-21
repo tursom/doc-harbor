@@ -1,5 +1,6 @@
 ---
-import StaticAppPage from '../../components/StaticAppPage.astro'
+import AppLayout from '../../layouts/AppLayout.astro'
+import ScansPage from '../../entries/ScansPage.vue'
 ---
 
-<StaticAppPage title="扫描记录" tab="runs" />
+<AppLayout title="扫描记录"><ScansPage client:load /></AppLayout>

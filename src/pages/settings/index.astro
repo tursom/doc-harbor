@@ -1,5 +1,6 @@
 ---
-import StaticAppPage from '../../components/StaticAppPage.astro'
+import AppLayout from '../../layouts/AppLayout.astro'
+import SettingsPage from '../../entries/SettingsPage.vue'
 ---
 
-<StaticAppPage title="系统设置" tab="settings" />
+<AppLayout title="系统设置"><SettingsPage client:load /></AppLayout>

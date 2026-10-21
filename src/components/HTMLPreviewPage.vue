@@ -85,3 +85,63 @@ function dirNameFromPath(filePath: string) {
   return parts.length ? parts.join('/') : '.'
 }
 </script>
+
+<style>
+@import '../styles/tokens.css';
+
+/* 独立预览不继承应用暗色。保留旧页面的白色 iframe 和浅色加载/错误外观。 */
+body:has(.html-viewer-shell) {
+  overflow: hidden;
+  background: var(--preview-bg);
+  color-scheme: light;
+}
+
+.html-viewer-shell {
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  background: var(--preview-bg);
+  color: var(--preview-fg);
+  color-scheme: light;
+  font: var(--fs-md)/1.5 var(--font-ui);
+}
+
+.html-viewer-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: var(--preview-bg);
+}
+
+.html-viewer-state {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 12px;
+  padding: max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+  color: var(--preview-muted);
+  background: var(--preview-state-bg);
+  text-align: center;
+}
+
+.html-viewer-state h1, .html-viewer-state p { margin: 0; overflow-wrap: anywhere; }
+.html-viewer-state h1 { font-size: var(--fs-preview-heading); color: var(--preview-fg); }
+.html-viewer-state .command {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--button-height);
+  padding: 4px 12px;
+  border: 1px solid var(--preview-border);
+  border-radius: var(--r-md);
+  color: var(--preview-fg);
+  background: var(--preview-bg);
+  font-size: var(--fs-md);
+  text-decoration: none;
+}
+.html-viewer-state .command:hover { background: var(--preview-state-bg); }
+.html-viewer-state .command:focus-visible { outline: 2px solid var(--preview-accent); outline-offset: 2px; }
+</style>

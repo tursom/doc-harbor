@@ -1,18 +1,28 @@
 ---
-import '../styles.css'
+import '../styles/tokens.css'
+import '../styles/base.css'
+import '../styles/components.css'
 
 interface Props {
   title: string
+  standalone?: boolean
 }
 
-const { title } = Astro.props
+const { title, standalone = false } = Astro.props
 ---
 
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme={standalone ? 'light' : undefined}>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width" />
+    {!standalone && <script is:inline>
+      // 在绘制前恢复偏好；禁用存储时仍按系统主题显示。
+      try {
+        const theme = localStorage.getItem('docharbor-theme');
+        if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+      } catch {}
+    </script>}
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <link rel="apple-touch-icon" href="/icon.svg" />
     <title>{title === 'DocHarbor' ? title : `${title} · DocHarbor`}</title>

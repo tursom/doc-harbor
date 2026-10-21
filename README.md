@@ -1,6 +1,6 @@
 # DocHarbor
 
-DocHarbor 是一个独立的 Git 文档浏览服务。系统按仓库配置 clone bare mirror，扫描指定目录下的文档文件，提供智能最新视图、按分支浏览、Markdown/Mermaid 预览、单文件下载、Git 历史和扫描记录。
+DocHarbor 是一个独立的 Git 文档浏览服务。系统按仓库配置 clone bare mirror，扫描指定目录下的文档文件，提供智能最新视图、按分支浏览、Markdown/Mermaid 预览、单文件下载、提交历史和扫描记录。
 
 需求来源见 [DocHarbor 产品需求与设计文档](doc/DocHarbor产品需求与设计文档.md)。完整操作说明见 [DocHarbor 使用手册](doc/DocHarbor使用手册.md)。AI 问答扩展设计见 [DocHarbor AI 问答功能设计文档](doc/DocHarbor%20AI问答功能设计文档.md)，Agent 重构方案见 [DocHarbor AI Agent 架构重构设计文档](doc/DocHarbor%20AI%20Agent架构重构设计文档.md)。
 
@@ -11,9 +11,9 @@ DocHarbor 是一个独立的 Git 文档浏览服务。系统按仓库配置 clon
 - 多分支扫描：按配置目录执行 `git ls-tree`，SQLite 只保存索引和元数据。
 - 智能最新：按文档维度选择最新有效版本，展示来源分支、commit 和最近修改时间。
 - 分支浏览：切换分支查看该分支 HEAD 的扫描结果。
-- Markdown 预览：前端渲染 Markdown，支持 Mermaid，非 Markdown 首期只下载。
+- 文档预览：前端渲染 Markdown，支持 Mermaid；HTML 支持嵌入和独立窗口预览，其他类型可下载。
 - 单文件下载：基于索引中的 blob sha 读取 Git 对象。
-- Git 历史：仓库提交图、commit 详情、变更文件列表。
+- 提交历史：仓库提交图、commit 详情、变更文件列表。
 - 文件历史：展示分支状态和扫描识别的删除、移动、重命名事件。
 
 ## 本地运行
@@ -39,18 +39,24 @@ npm install
 npm run dev
 ```
 
-前端默认代理 `/api` 到 `http://127.0.0.1:8080`。生产构建会生成独立的静态页面：
+前端默认代理 `/api` 到 `http://127.0.0.1:8080`。生产构建会生成八个独立的主页面：
 
-- `/`：文档浏览
-- `/history/`：Git 历史
-- `/scans/`：扫描记录
-- `/ai/`：AI 问答
-- `/ai/config/`：AI 配置
-- `/ai/diagnostics/`：AI 诊断
-- `/settings/`：系统设置
-- `/html-preview/`：独立 HTML 预览
+| 页面 | 路径 | 入口 |
+| --- | --- | --- |
+| 文档 | `/` | 仓库页签 |
+| 提交历史 | `/history/` | 仓库页签 |
+| 扫描记录 | `/scans/` | 仓库页签 |
+| 仓库设置 | `/repo-settings/` | 仓库页签 |
+| AI 问答 | `/ai/` | 侧栏顶部 |
+| AI 供应商 | `/ai/config/` | 侧栏「管理」 |
+| AI 诊断 | `/ai/diagnostics/` | 侧栏「管理」 |
+| 系统设置 | `/settings/` | 侧栏「管理」 |
 
-页面框架在构建阶段生成 HTML，运行时数据继续通过同源 `/api` 从 Go 服务加载。Vue 只负责动态交互区域；Markdown、DOMPurify、Mermaid 和 HTML 预览实现按需加载。
+`/html-preview/` 是额外的独立 HTML 预览页，不加载主应用。窄屏通过顶部「菜单」打开侧栏；侧栏底部可选择跟随系统、浅色或深色主题。旧 `?tab=` 链接继续重定向，并保留对应页面的查询参数。
+
+仓库编辑从原来的「配置」弹窗迁到「仓库设置」页，修改后在底部保存栏保存或放弃；新增仓库仍通过侧栏仓库分组的「+」打开弹窗。Webhook Payload URL 位于「仓库设置 → GitHub Webhook」，共享 Secret 的显示、复制和轮换迁到「系统设置 → GitHub Webhook」。原「Git 历史」改称「提交历史」，原「AI 配置」改称「AI 供应商」，路径不变。
+
+页面框架在构建阶段生成 HTML，运行时数据继续通过同源 `/api` 从 Go 服务加载。每个 Astro 页面挂载自己的 `src/entries/*Page.vue` 入口岛，由入口在 Vue 内组合 `AppShell` 与视图 slots；不要从 Astro 模板把 Vue 视图作为 island 的 slot 传入，否则子视图不会水合。Markdown、DOMPurify、Mermaid 和 HTML 预览实现按需加载。
 
 也可以构建前端后由 Go 服务直接托管：
 
@@ -70,6 +76,15 @@ npm run test:e2e
 
 `check:bundle` 会检查每个静态页面的首屏 JavaScript gzip 预算。Playwright 测试使用 Go 静态托管器验证目录页面、真实多页导航、旧链接兼容和依赖延迟加载。
 
+重设计测试位于 `e2e/redesign.spec.ts`，使用 `e2e/fixtures/redesign.ts` 中的虚构数据拦截 API，覆盖保存、弹窗焦点、Secret 轮换确认、AI 输入法、深链接和八页窄屏布局。构建完成后可单独运行：
+
+```bash
+npx playwright test e2e/static-mpa.spec.ts e2e/redesign.spec.ts
+DOCHARBOR_SCREENSHOTS=1 npx playwright test e2e/redesign.spec.ts --grep 'redesign screenshots' --output=test-results/redesign
+```
+
+第二条命令生成八页 × 1440/390 宽度 × 浅色/深色共 32 张截图，包含选中文档、提交详情、展开的扫描错误、AI 对话与诊断、已签发的虚构 Token 等内容。图片位于已忽略的 `test-results/redesign/` 各用例子目录，供人工检查错位、重叠和截断；生成截图不等于已通过视觉验收。不要复制或提交含真实内部数据的 `doc/ui-redesign/` 原型。使用手册中的旧版截图尚未随重设计更新，以新版文字和页面为准。
+
 ## 配置
 
 | 环境变量 | 默认值 | 说明 |
@@ -88,7 +103,7 @@ npm run test:e2e
 
 私有仓库凭据不写入数据库。数据库中只保存凭据引用字段，实际密钥通过容器挂载或主机环境提供。
 
-AI provider API key 通过前端 AI 配置页录入。DocHarbor 会在 `DATA_DIR/secrets/ai-master.key` 自动生成本机加密主密钥，并随数据目录持久化；不需要额外配置环境变量。
+AI provider API key 通过前端 AI 供应商页的新增或编辑抽屉录入。DocHarbor 会在 `DATA_DIR/secrets/ai-master.key` 自动生成本机加密主密钥，并随数据目录持久化；不需要额外配置环境变量。
 
 通用访问 Token 使用前端页面签发。DocHarbor 会在 `DATA_DIR/secrets/access-token.key` 自动生成 HMAC 签名密钥；密钥丢失或轮换后，已签发但未过期的 Token 会失效。
 
@@ -155,7 +170,7 @@ GITHUB_WEBHOOK_SECRET=your-random-secret docker compose up --build -d
 
 Webhook 会校验 `X-Hub-Signature-256` 的 HMAC-SHA256 签名。`ping` 事件用于 GitHub 测试；`push` 事件会异步触发扫描并立即返回 `202 Accepted`，扫描记录的触发类型为 `github_webhook`；其他事件会返回 ignored，不触发扫描。
 
-仓库页面的 GitHub Webhook 行提供“显示 Secret”按钮，会明文显示当前部署环境中的共享 `GITHUB_WEBHOOK_SECRET`，用于复制到 GitHub Webhook 配置。DocHarbor 本身不维护用户权限，这个入口需要继续依赖 Pangolin 或其他外层访问控制保护。
+在「仓库设置 → GitHub Webhook」复制当前仓库的 Payload URL；在「系统设置 → GitHub Webhook」查看或复制共享 Secret，默认遮罩显示。未配置时可生成 Secret，已有 Secret 的轮换需要页内二次确认。数据库中保存的 Secret 优先于 `GITHUB_WEBHOOK_SECRET`；轮换后立即生效，需要同步更新所有 GitHub 仓库的配置。DocHarbor 本身不维护用户权限，这个入口需要继续依赖 Pangolin 或其他外层访问控制保护。
 
 本地可以用下面的方式构造签名验证：
 
@@ -173,7 +188,7 @@ curl -i \
 
 ## 通用访问 Token
 
-管理员可以在系统设置页的“访问 Token”区域签发临时 Token。默认有效期为 3600 秒，允许范围为 300 到 86400 秒；Token 使用 `DATA_DIR/secrets/access-token.key` 中的 HMAC-SHA256 密钥签名，密钥丢失或轮换后已签发 Token 会失效。
+管理员可以在系统设置页的“访问令牌”区域签发临时 Token。有效期可选 1 小时、8 小时、24 小时或自定义，自定义范围为 300 到 86400 秒；Token 使用 `DATA_DIR/secrets/access-token.key` 中的 HMAC-SHA256 密钥签名，密钥丢失或轮换后已签发 Token 会失效。
 
 当前支持签发 `ai.history.read` 和 `ai.diagnostics.read` 能力，分别用于远程只读访问 AI 对话历史和 AI 问答排查数据。`scope.viewer_key` 留空时不限制 viewer，填写后服务端会强制按该 `viewer_key` 收窄支持该 scope 的接口。
 

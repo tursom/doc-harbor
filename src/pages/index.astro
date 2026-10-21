@@ -1,8 +1,9 @@
 ---
-import StaticAppPage from '../components/StaticAppPage.astro'
+import AppLayout from '../layouts/AppLayout.astro'
+import DocsPage from '../entries/DocsPage.vue'
 ---
 
-<StaticAppPage title="DocHarbor" />
+<AppLayout title="DocHarbor"><DocsPage client:load /></AppLayout>
 
 <script>
   import { legacyPageRedirect } from '../lib/navigation'

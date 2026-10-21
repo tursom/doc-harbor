@@ -1,5 +1,6 @@
 ---
-import StaticAppPage from '../../components/StaticAppPage.astro'
+import AppLayout from '../../layouts/AppLayout.astro'
+import HistoryPage from '../../entries/HistoryPage.vue'
 ---
 
-<StaticAppPage title="Git 历史" tab="history" />
+<AppLayout title="提交历史"><HistoryPage client:load /></AppLayout>

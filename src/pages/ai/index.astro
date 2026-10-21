@@ -1,5 +1,6 @@
 ---
-import StaticAppPage from '../../components/StaticAppPage.astro'
+import AppLayout from '../../layouts/AppLayout.astro'
+import AIChatPage from '../../entries/AIChatPage.vue'
 ---
 
-<StaticAppPage title="AI 问答" tab="ai" />
+<AppLayout title="AI 问答"><AIChatPage client:load /></AppLayout>

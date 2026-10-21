@@ -1,9 +1,10 @@
-export type AppTab = 'docs' | 'history' | 'runs' | 'ai' | 'ai-config' | 'ai-diagnostics' | 'settings'
+export type AppTab = 'docs' | 'history' | 'runs' | 'repo-settings' | 'ai' | 'ai-config' | 'ai-diagnostics' | 'settings'
 
 export const pagePaths: Record<AppTab, string> = {
   docs: '/',
   history: '/history/',
   runs: '/scans/',
+  'repo-settings': '/repo-settings/',
   ai: '/ai/',
   'ai-config': '/ai/config/',
   'ai-diagnostics': '/ai/diagnostics/',
@@ -13,6 +14,7 @@ export const pagePaths: Record<AppTab, string> = {
 const legacyTabs: Partial<Record<string, AppTab>> = {
   history: 'history',
   runs: 'runs',
+  'repo-settings': 'repo-settings',
   ai: 'ai',
   'ai-config': 'ai-config',
   'ai-diagnostics': 'ai-diagnostics',
@@ -23,6 +25,7 @@ const pageQueryKeys: Record<AppTab, string[]> = {
   docs: ['repo', 'view', 'branch', 'dir', 'version'],
   history: ['repo', 'branch', 'commit'],
   runs: ['repo'],
+  'repo-settings': ['repo'],
   ai: ['repo', 'version', 'session', 'scope', 'question'],
   'ai-config': ['repo'],
   'ai-diagnostics': ['repo'],

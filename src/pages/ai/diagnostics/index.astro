@@ -1,5 +1,6 @@
 ---
-import StaticAppPage from '../../../components/StaticAppPage.astro'
+import AppLayout from '../../../layouts/AppLayout.astro'
+import AIDiagnosticsPage from '../../../entries/AIDiagnosticsPage.vue'
 ---
 
-<StaticAppPage title="AI 诊断" tab="ai-diagnostics" />
+<AppLayout title="AI 诊断"><AIDiagnosticsPage client:load /></AppLayout>

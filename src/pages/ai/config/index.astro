@@ -1,5 +1,6 @@
 ---
-import StaticAppPage from '../../../components/StaticAppPage.astro'
+import AppLayout from '../../../layouts/AppLayout.astro'
+import AIProvidersPage from '../../../entries/AIProvidersPage.vue'
 ---
 
-<StaticAppPage title="AI 配置" tab="ai-config" />
+<AppLayout title="AI 供应商"><AIProvidersPage client:load /></AppLayout>

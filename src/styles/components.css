@@ -1,0 +1,103 @@
+/* 旧按钮类名是迁移入口，使用与 .btn 相同的尺寸与状态。 */
+:is(.btn, .command, .primary-action, .mini-command, .icon-button) {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; gap: 6px;
+  min-height: var(--button-height); padding: 4px 11px; border: 1px solid var(--border-strong);
+  border-radius: var(--r-md); background: var(--surface); color: var(--fg);
+  font-size: var(--fs-md); line-height: 20px; font-weight: 500; text-decoration: none; white-space: nowrap;
+}
+:is(.btn, .command, .primary-action, .mini-command, .icon-button):hover:not(:disabled) { background: var(--surface-2); }
+:is(.btn, .command, .primary-action, .mini-command, .icon-button):disabled,
+.btn[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
+:is(.btn.primary, .command.primary, .primary-action) { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+:is(.btn.primary, .command.primary, .primary-action):hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+:is(.btn, .command, .mini-command).ghost { border-color: var(--transparent); background: none; color: var(--fg-muted); }
+:is(.btn, .command, .mini-command).ghost:hover:not(:disabled) { color: var(--fg); background: var(--surface-2); }
+:is(.btn, .command, .mini-command, .icon-button).danger { color: var(--danger); }
+:is(.btn.sm, .mini-command) { min-height: var(--button-height-sm); padding: 2px 8px; font-size: var(--fs-sm); }
+:is(.btn.icon, .icon-button) { width: var(--button-height); height: var(--button-height); padding: 0; }
+.btn.sm.icon { width: var(--button-height-sm); height: var(--button-height-sm); padding: 0; }
+:is(.btn, .command, .primary-action, .mini-command, .icon-button) svg { width: 16px; height: 16px; }
+.field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.field > :is(span, label) { font-size: var(--fs-sm); font-weight: 600; }
+.field small, .field-hint { color: var(--fg-subtle); font-size: var(--fs-sm); }
+.field-error { color: var(--danger); font-size: var(--fs-sm); }
+.check { display: flex; align-items: center; gap: 7px; color: var(--fg-muted); font-size: var(--fs-sm); }
+.check input { margin: 0; }
+:is(.seg, .segmented) { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--r-md); background: var(--surface-2); }
+:is(.seg, .segmented) > button { border: 0; border-radius: var(--r-sm); padding: 3px 10px; background: none; color: var(--fg-muted); font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; }
+:is(.seg, .segmented) > :is(.active, [aria-pressed="true"]) { background: var(--surface); color: var(--fg); box-shadow: var(--shadow-segment); }
+.status-pill, .pill { display: inline-flex; align-items: center; gap: 5px; min-height: 20px; padding: 0 8px; border-radius: var(--r-pill); background: var(--surface-2); color: var(--fg-muted); font-size: var(--fs-xs); font-weight: 600; white-space: nowrap; }
+:is(.status-pill, .pill).ok { background: var(--ok-bg); color: var(--ok); }
+:is(.status-pill, .pill).warn { background: var(--warn-bg); color: var(--warn); }
+:is(.status-pill, .pill).danger { background: var(--danger-bg); color: var(--danger); }
+:is(.status-pill, .pill).info { background: var(--info-bg); color: var(--info); }
+.dot { width: 8px; height: 8px; border-radius: var(--r-round); flex: none; background: var(--fg-subtle); }
+.dot.ok { background: var(--ok); }
+.dot.warn { background: var(--warn); }
+.dot.danger { background: var(--danger); }
+:is(.status-pill, .pill) .dot { width: 6px; height: 6px; background: currentColor; }
+.branch-tag, .branch { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; height: 20px; padding: 0 6px; border-radius: var(--r-sm); background: var(--accent-subtle); color: var(--accent-text); font: 500 var(--fs-xs)/1 var(--font-mono); vertical-align: middle; }
+:is(.branch-tag, .branch).neutral { background: var(--surface-2); color: var(--fg-muted); }
+.branch-tag-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.switch { position: relative; flex: none; width: 32px; height: 18px; padding: 0; border: 0; border-radius: var(--r-pill); background: var(--border-strong); }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: var(--r-round); background: var(--switch-thumb); transition: transform .15s; }
+.switch[aria-checked="true"] { background: var(--accent); }
+.switch[aria-checked="true"]::after { transform: translateX(14px); }
+.switch:disabled { opacity: .5; }
+.empty-state, .empty { display: grid; place-items: center; align-content: center; gap: 8px; padding: 48px 16px; color: var(--fg-subtle); text-align: center; }
+.empty-state > svg { width: 26px; height: 26px; }
+.empty-state p { margin: 0; max-width: 36ch; overflow-wrap: anywhere; }
+.empty-state-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.notice { display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px; border-radius: var(--r-md); background: var(--info-bg); color: var(--fg); font-size: var(--fs-sm); }
+.notice > svg { width: 16px; height: 16px; margin-top: 2px; color: var(--info); }
+.notice-content { min-width: 0; overflow-wrap: anywhere; }
+.notice-content > :first-child { margin-top: 0; }
+.notice-content > :last-child { margin-bottom: 0; }
+.notice a { text-decoration: underline; text-underline-offset: 3px; }
+.notice.warn { background: var(--warn-bg); }
+.notice.warn > svg { color: var(--warn); }
+.notice.danger { background: var(--danger-bg); }
+.notice.danger > svg { color: var(--danger); }
+.notice.ok { background: var(--ok-bg); }
+.notice.ok > svg { color: var(--ok); }
+/* 同级浮层按 DOM 打开顺序叠放；自定义 class 落在面板本身，可覆盖位置和宽度。 */
+.overlay-backdrop { position: fixed; inset: 0; z-index: 100; background: var(--scrim); }
+.drawer-panel, .modal-dialog { display: flex; flex-direction: column; min-width: 0; background: var(--surface); color: var(--fg); box-shadow: var(--shadow); }
+.drawer-panel { position: absolute; top: 0; bottom: 0; right: 0; width: min(480px, 100vw); border-left: 1px solid var(--border); padding-top: env(safe-area-inset-top, 0px); }
+.drawer-panel.left { left: 0; right: auto; border-left: 0; border-right: 1px solid var(--border); }
+.modal-backdrop { display: grid; place-items: center; padding: max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); }
+.modal-dialog { width: min(560px, 100%); max-height: 100%; border: 1px solid var(--border); border-radius: var(--r-xl); }
+.overlay-head { display: flex; align-items: center; gap: 10px; padding: 14px 20px; border-bottom: 1px solid var(--border); }
+.overlay-head h3 { flex: 1; min-width: 0; margin: 0; font-size: var(--fs-lg); }
+.overlay-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 20px; }
+.overlay-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border); }
+.drawer-panel > :is(.overlay-head, .overlay-body, .overlay-foot) { padding-left: max(20px, env(safe-area-inset-left, 0px)); padding-right: max(20px, env(safe-area-inset-right, 0px)); }
+.drawer-panel > :last-child { padding-bottom: max(12px, env(safe-area-inset-bottom, 0px)); }
+.dropdown { position: relative; display: inline-flex; }
+.dropdown-menu { position: fixed; z-index: 110; min-width: 168px; max-width: calc(100vw - 32px); max-height: min(400px, 70dvh); overflow: auto; padding: 4px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); color: var(--fg); box-shadow: var(--shadow); }
+.dropdown-menu :is(button, a) { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 30px; padding: 6px 8px; border: 0; border-radius: var(--r-sm); background: none; color: inherit; text-align: left; font-size: var(--fs-sm); white-space: normal; }
+.dropdown-menu :is(button, a):hover:not(:disabled) { background: var(--surface-2); }
+.dropdown-menu :is(.danger, [data-danger]) { color: var(--danger); }
+.dropdown-menu :is(hr, [role="separator"]) { border: 0; border-top: 1px solid var(--border); margin: 4px 0; }
+.dropdown-menu :is(button, a):disabled { opacity: .5; }
+.inline-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; max-width: 100%; }
+.inline-confirm-prompt { color: var(--danger); font-size: var(--fs-sm); }
+.inline-confirm-extra { min-width: 0; max-width: 100%; }
+.copy-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.copy-field-label { font-size: var(--fs-sm); font-weight: 600; }
+.copy-field-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.copy-field-row input { flex: 1; width: 0; font-family: var(--font-mono); font-size: var(--fs-sm); }
+.copy-field-feedback { color: var(--fg-muted); font-size: var(--fs-sm); }
+.theme-switch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); }
+.theme-switch button { display: flex; align-items: center; justify-content: center; gap: 4px; min-height: 28px; padding: 3px 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--fg-muted); font-size: var(--fs-sm); }
+.theme-switch button[aria-pressed="true"] { background: var(--surface-3); color: var(--fg); }
+.theme-switch svg { width: 14px; height: 14px; }
+.table-wrap { max-width: 100%; overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-lg); }
+.tbl { width: 100%; border-collapse: collapse; font-size: var(--fs-md); }
+.tbl th { padding: 8px 12px; background: var(--surface-2); color: var(--fg-muted); text-align: left; font-size: var(--fs-sm); font-weight: 600; white-space: nowrap; }
+.tbl td { height: 38px; padding: 6px 12px; }
+.tbl :is(th, td) { border-bottom: 1px solid var(--border); }
+.tbl tr:last-child td { border-bottom: 0; }
+.tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl .zero { color: var(--fg-subtle); }
+.tbl .bad { color: var(--danger); font-weight: 600; }
