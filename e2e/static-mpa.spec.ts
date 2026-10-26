@@ -43,7 +43,8 @@ async function mockHistory(page: Page) {
             latest_include_branches: ['*'],
             latest_exclude_branches: [],
             branch_priority: ['main'],
-            scan_paths: []
+            scan_paths: [],
+            document_count: 0
           }
         ]
       })

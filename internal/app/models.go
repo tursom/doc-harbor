@@ -19,6 +19,8 @@ type Repository struct {
 	UpdatedAt             string     `json:"updated_at"`
 	ScanPaths             []ScanPath `json:"scan_paths"`
 	LatestScan            *ScanRun   `json:"latest_scan,omitempty"`
+	// DocumentCount 为当前扫描目录下的最新文档总数，与本次扫描处理数无关。
+	DocumentCount int `json:"document_count"`
 }
 
 type ScanPath struct {

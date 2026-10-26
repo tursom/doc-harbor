@@ -77,6 +77,75 @@ async function expectNoPageOverflow(page: Page) {
   expect(size.body, JSON.stringify(size)).toBeLessThanOrEqual(size.viewport)
 }
 
+test('scan document count survives a successful scan with zero updated files', async ({ page, mock }, testInfo) => {
+  // 复用成功记录模拟无文件变化的最新扫描，列表与仓库摘要保持同一份数据。
+  const latest = { ...mock.scanRuns[1]!, id: 82, file_count: 0, started_at: '2026-10-22T03:40:00Z', finished_at: '2026-10-22T03:40:09Z' }
+  mock.repo.latest_scan = latest
+  mock.scanRuns.unshift(latest)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.emulateMedia({ colorScheme: 'light' })
+  await page.goto('/scans/?repo=7')
+  const repoLink = page.getByRole('navigation', { name: '仓库', exact: true }).getByRole('link', { name: new RegExp(repository.name) })
+  const count = page.getByRole('navigation', { name: '仓库页面' }).getByRole('link', { name: /^文档/ }).locator('.count')
+  await expect(repoLink.locator('.repo-count')).toHaveText(String(mock.repo.document_count))
+  await expect(repoLink.locator('.scan-dot')).toHaveClass(/success/)
+  await expect(count).toHaveText(String(mock.repo.document_count))
+  await expect(page.locator('.repo-title')).toContainText('成功')
+  const latestRow = page.locator('.scan-table tbody > tr').first()
+  await expect(latestRow.getByRole('cell').nth(0)).toHaveText('成功')
+  await expect(latestRow.getByRole('cell').nth(3)).toHaveText('0')
+  await expect(latestRow.getByRole('cell').nth(5)).toHaveText('0')
+  await expectNoPageOverflow(page)
+  await page.evaluate(() => document.fonts.ready)
+  await page.screenshot({ path: testInfo.outputPath('scan-success-zero-files.png'), fullPage: true, animations: 'disabled' })
+  await page.reload()
+  await expect(count).toHaveText(String(mock.repo.document_count))
+  await expect(repoLink.locator('.repo-count')).toHaveText(String(mock.repo.document_count))
+})
+
+test('scan partial success keeps document totals and expands error details', async ({ page, mock }, testInfo) => {
+  // 使用扫描器实际返回的 branches/error_details 结构验证新增诊断字段的展示。
+  const latest = mock.repo.latest_scan!
+  latest.error_message = 'main: 回填路径历史 docs: 示例 Git 读取失败'
+  latest.detail_json = JSON.stringify({ branches: { main: {
+    files: 27, skipped: 3, errors: 2, head: fixtureSHA, skipped_by_head: false,
+    error: '回填路径历史 docs: 示例 Git 读取失败',
+    error_details: [
+      { stage: '回填路径历史', path: 'docs', message: '示例 Git 读取失败' },
+      { stage: '读取文件版本', path: 'docs/legacy/broken.md', message: '读取 Markdown 内容: missing git object' }
+    ]
+  } } })
+  mock.scanRuns[0] = latest
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.emulateMedia({ colorScheme: 'light' })
+  await page.goto('/scans/?repo=7')
+  // 总数刻意不同于本次扫描文件数，防止两处计数退回 file_count 后用例仍通过。
+  expect(mock.repo.document_count).not.toBe(latest.file_count)
+  const repoLink = page.getByRole('navigation', { name: '仓库', exact: true }).getByRole('link', { name: new RegExp(repository.name) })
+  await expect(repoLink.locator('.repo-count')).toHaveText(String(mock.repo.document_count))
+  await expect(repoLink.locator('.scan-dot')).toHaveClass(/partial_success/)
+  await expect(page.getByRole('navigation', { name: '仓库页面' }).locator('.count')).toHaveText(String(mock.repo.document_count))
+  await expect(page.locator('.repo-title')).toContainText('部分成功 · 2 个错误')
+  await expect(page.getByText('最近一次扫描有 2 个错误。', { exact: true })).toBeVisible()
+  const toggle = page.getByRole('button', { name: '展开扫描 #81 错误详情', exact: true })
+  const row = page.getByRole('row').filter({ has: toggle })
+  await expect(row.getByRole('cell').nth(3)).toHaveText(String(latest.file_count))
+  await expect(row.getByRole('cell').nth(5)).toHaveText(String(latest.error_count))
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await toggle.click()
+  const collapse = page.getByRole('button', { name: '收起扫描 #81 错误详情', exact: true })
+  await expect(collapse).toHaveAttribute('aria-expanded', 'true')
+  const detail = page.locator('#scan-detail-81')
+  await expect(detail.getByText(latest.error_message, { exact: true })).toBeVisible()
+  await expect(detail.locator('pre')).toHaveText(JSON.stringify(JSON.parse(latest.detail_json), null, 2))
+  await expectNoPageOverflow(page)
+  await page.evaluate(() => document.fonts.ready)
+  await page.screenshot({ path: testInfo.outputPath('scan-partial-success-errors.png'), fullPage: true, animations: 'disabled' })
+  await collapse.click()
+  await expect(detail).toHaveCount(0)
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+})
+
 test('repo settings saves dirty form with PATCH and supports discard', async ({ page, mock }) => {
   await page.goto('/repo-settings/?repo=7')
   const name = page.getByLabel('名称', { exact: true })

@@ -445,6 +445,10 @@ func listRepositories(ctx context.Context, db *sql.DB) ([]Repository, error) {
 		repos[i].ScanPaths, _ = listScanPaths(ctx, db, repos[i].ID, false)
 		run, _ := latestScanRun(ctx, db, repos[i].ID)
 		repos[i].LatestScan = run
+		repos[i].DocumentCount, err = countLatestDocuments(ctx, db, repos[i].ID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return repos, nil
 }
@@ -464,6 +468,10 @@ func getRepository(ctx context.Context, db *sql.DB, id int64) (Repository, error
 	repo.ScanPaths, _ = listScanPaths(ctx, db, repo.ID, false)
 	run, _ := latestScanRun(ctx, db, repo.ID)
 	repo.LatestScan = run
+	repo.DocumentCount, err = countLatestDocuments(ctx, db, repo.ID)
+	if err != nil {
+		return Repository{}, err
+	}
 	return repo, nil
 }
 

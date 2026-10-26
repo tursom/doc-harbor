@@ -3,7 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
-	"errors"
+	"fmt"
 	"log"
 	"path"
 	"strings"
@@ -85,16 +85,16 @@ func (s *Scanner) Scan(ctx context.Context, repoID int64, trigger string) (resul
 			continue
 		}
 		run.BranchCount++
-		stat, err := s.scanBranch(ctx, repo, ref, scanPaths)
+		stat, err := s.scanBranch(ctx, repo, ref, scanPaths, trigger == "manual")
 		branchStats[ref.Name] = stat
-		if err != nil {
-			run.ErrorCount++
-			run.Status = "partial_success"
-			continue
-		}
+		// 部分失败的分支仍可能提交了文件索引，必须先累计统计，不能被错误分支跳过。
 		run.FileCount += stat.Files
 		run.SkippedCount += stat.Skipped
 		run.ErrorCount += stat.Errors
+		if err != nil || stat.Errors > 0 {
+			run.Status = "partial_success"
+			run.ErrorMessage = strings.TrimSpace(run.ErrorMessage + "\n" + ref.Name + ": " + stat.Error)
+		}
 	}
 	details["branches"] = branchStats
 
@@ -105,7 +105,9 @@ func (s *Scanner) Scan(ctx context.Context, repoID int64, trigger string) (resul
 	}
 	if err := s.recomputeLatestTx(ctx, repo); err != nil {
 		run.Status = "partial_success"
-		run.ErrorMessage = err.Error()
+		run.ErrorCount++
+		run.ErrorMessage = strings.TrimSpace(run.ErrorMessage + "\n重建最新文档索引: " + err.Error())
+		details["latest_error"] = err.Error()
 		return run, err
 	}
 	if run.ErrorCount > 0 && run.Status == "success" {
@@ -115,35 +117,58 @@ func (s *Scanner) Scan(ctx context.Context, repoID int64, trigger string) (resul
 }
 
 type branchScanStat struct {
-	Files         int    `json:"files"`
-	Skipped       int    `json:"skipped"`
-	Errors        int    `json:"errors"`
-	Head          string `json:"head"`
-	SkippedByHead bool   `json:"skipped_by_head"`
-	Error         string `json:"error,omitempty"`
+	Files         int               `json:"files"`
+	Skipped       int               `json:"skipped"`
+	Errors        int               `json:"errors"`
+	Head          string            `json:"head"`
+	SkippedByHead bool              `json:"skipped_by_head"`
+	Error         string            `json:"error,omitempty"`
+	ErrorDetails  []branchScanError `json:"error_details,omitempty"`
 }
 
-func (s *Scanner) scanBranch(ctx context.Context, repo Repository, ref gitRef, scanPaths []ScanPath) (branchScanStat, error) {
-	stat := branchScanStat{Head: ref.CommitSHA}
+// branchScanError 保留每个失败的阶段、文件或目录及原始错误，避免只有计数却无法排障。
+type branchScanError struct {
+	Stage   string `json:"stage"`
+	Path    string `json:"path,omitempty"`
+	Message string `json:"message"`
+}
+
+func (stat *branchScanStat) addError(stage, filePath string, err error) {
+	stat.Errors++
+	stat.ErrorDetails = append(stat.ErrorDetails, branchScanError{Stage: stage, Path: filePath, Message: err.Error()})
+	if stat.Error == "" {
+		stat.Error = strings.TrimSpace(stage+" "+filePath) + ": " + err.Error()
+	}
+}
+
+func (s *Scanner) scanBranch(ctx context.Context, repo Repository, ref gitRef, scanPaths []ScanPath, force bool) (stat branchScanStat, resultErr error) {
+	stat.Head = ref.CommitSHA
+	committed := false
+	defer func() {
+		if resultErr != nil {
+			stat.addError("分支扫描", "", resultErr)
+		}
+		// 文件数表示已提交的索引数量，事务回滚后不能保留处理中的计数。
+		if !committed {
+			stat.Files = 0
+		}
+	}()
 	repoPath := s.git.repoPath(repo.ID)
-	oldRef, _ := getRepoRef(ctx, s.db, repo.ID, "branch", ref.Name)
-	if oldRef != nil && oldRef.CommitSHA == ref.CommitSHA && !scanPathsChangedSince(scanPaths, oldRef.LastScannedAt) {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return stat, err
-		}
-		defer rollback(tx)
-		if err := upsertRepoRef(ctx, tx, RepoRef{
-			RepoID: repo.ID, RefType: "branch", RefName: ref.Name, CommitSHA: ref.CommitSHA,
-			CommitTime: ref.CommitTime, LastScannedAt: nowString(),
-		}); err != nil {
-			return stat, err
-		}
-		if err := tx.Commit(); err != nil {
-			return stat, err
-		}
+	oldRef, err := getRepoRef(ctx, s.db, repo.ID, "branch", ref.Name)
+	if err != nil {
+		return stat, fmt.Errorf("读取上次分支扫描: %w", err)
+	}
+	// 手动扫描始终重检，用于重试旧版本已错误推进 HEAD 的部分失败扫描。
+	if !force && oldRef != nil && oldRef.LastScannedAt != "" && oldRef.CommitSHA == ref.CommitSHA && !scanPathsChangedSince(scanPaths, oldRef.LastScannedAt) {
 		stat.SkippedByHead = true
 		return stat, nil
+	}
+	// 成功标记在文件事务之外失效：即使后续事务回滚，下次也必须重试。
+	// 保留旧 HEAD 供重命名 diff 使用，仅完整成功后才推进 HEAD 和成功时间。
+	if oldRef != nil {
+		if _, err := s.db.ExecContext(ctx, `UPDATE repo_refs SET last_scanned_at = '' WHERE id = ?`, oldRef.ID); err != nil {
+			return stat, fmt.Errorf("清除上次分支扫描成功标记: %w", err)
+		}
 	}
 
 	renameMap := map[string]CommitFileChange{}
@@ -151,7 +176,7 @@ func (s *Scanner) scanBranch(ctx context.Context, repo Repository, ref gitRef, s
 		for _, sp := range scanPaths {
 			changes, err := s.git.diffNameStatus(ctx, repoPath, oldRef.CommitSHA, ref.CommitSHA, sp.Path)
 			if err != nil {
-				stat.Errors++
+				stat.addError("读取重命名差异", sp.Path, err)
 				continue
 			}
 			for _, change := range changes {
@@ -164,16 +189,17 @@ func (s *Scanner) scanBranch(ctx context.Context, repo Repository, ref gitRef, s
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return stat, err
+		return stat, fmt.Errorf("开始索引事务: %w", err)
 	}
 	defer rollback(tx)
 
 	currentPaths := map[string]bool{}
+	inventoryComplete := true
 	for _, sp := range scanPaths {
 		entries, err := s.git.lsTree(ctx, repoPath, ref.CommitSHA, sp.Path)
 		if err != nil {
-			stat.Errors++
-			stat.Error = err.Error()
+			stat.addError("枚举目录", sp.Path, err)
+			inventoryComplete = false
 			continue
 		}
 		for _, entry := range entries {
@@ -187,28 +213,37 @@ func (s *Scanner) scanBranch(ctx context.Context, repo Repository, ref gitRef, s
 			currentPaths[entry.Path] = true
 			v, err := s.versionFromEntry(ctx, repo, ref, sp, entry, renameMap[entry.Path])
 			if err != nil {
-				stat.Errors++
+				stat.addError("读取文件版本", entry.Path, err)
 				continue
 			}
 			docID := int64(0)
 			if v.PreviousPath != "" {
 				docID, err = findDocumentByPath(ctx, tx, repo.ID, v.PreviousPath)
 				if err != nil {
-					stat.Errors++
+					stat.addError("查找原文档", v.PreviousPath, err)
+					continue
+				}
+			}
+			if docID == 0 {
+				// 重命名后 doc_key 仍保留原始路径。同 HEAD 重扫没有 rename diff，
+				// 必须先按当前分支路径复用文档身份，否则会为同一路径创建第二份文档。
+				docID, err = findBranchDocumentByPath(ctx, tx, repo.ID, ref.Name, entry.Path)
+				if err != nil {
+					stat.addError("查找当前文档", entry.Path, err)
 					continue
 				}
 			}
 			if docID == 0 {
 				docID, err = findOrCreateDocument(ctx, tx, repo.ID, sp.Path, buildDocKey(sp.Path, entry.Path), ref.Name, ref.CommitSHA, v.Title, entry.Path)
 				if err != nil {
-					stat.Errors++
+					stat.addError("创建文档索引", entry.Path, err)
 					continue
 				}
 			}
 			v.DocumentID = docID
 			versionID, err := upsertDocVersion(ctx, tx, v)
 			if err != nil {
-				stat.Errors++
+				stat.addError("写入文件版本", entry.Path, err)
 				continue
 			}
 			v.ID = versionID
@@ -218,30 +253,39 @@ func (s *Scanner) scanBranch(ctx context.Context, repo Repository, ref gitRef, s
 					OldPath: v.PreviousPath, NewPath: v.FilePath, CommitSHA: v.LastCommitSHA,
 					CommitTime: v.LastCommitTime, RenameScore: v.RenameScore,
 				}); err != nil {
-					stat.Errors++
+					stat.addError("写入路径事件", entry.Path, err)
 				}
 			}
 			stat.Files++
 		}
 		if err := s.backfillPathHistory(ctx, tx, repo, ref, sp); err != nil {
-			stat.Errors++
+			stat.addError("回填路径历史", sp.Path, err)
 		}
 	}
-	if _, err := markDeletedVersions(ctx, tx, repo.ID, ref.Name, ref.CommitSHA, ref.CommitTime, currentPaths); err != nil {
-		stat.Errors++
+	// 未能完整枚举时，缺失路径不代表文件已删除，保留既有文档等待重试。
+	if inventoryComplete {
+		if _, err := markDeletedVersions(ctx, tx, repo.ID, ref.Name, ref.CommitSHA, ref.CommitTime, currentPaths); err != nil {
+			stat.addError("标记已删除文件", "", err)
+		}
 	}
-	if err := upsertRepoRef(ctx, tx, RepoRef{
+	checkpoint := RepoRef{
 		RepoID: repo.ID, RefType: "branch", RefName: ref.Name, CommitSHA: ref.CommitSHA,
-		CommitTime: ref.CommitTime, LastScannedAt: nowString(),
-	}); err != nil {
-		return stat, err
+		CommitTime: ref.CommitTime,
+	}
+	if stat.Errors == 0 {
+		checkpoint.LastScannedAt = nowString()
+	} else if oldRef != nil {
+		checkpoint = *oldRef
+		checkpoint.LastScannedAt = ""
+	}
+	// 首次部分成功也保留分支列表项，但空成功时间禁止后续按 HEAD 跳过。
+	if err := upsertRepoRef(ctx, tx, checkpoint); err != nil {
+		return stat, fmt.Errorf("保存分支扫描状态: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return stat, err
+		return stat, fmt.Errorf("提交索引事务: %w", err)
 	}
-	if stat.Errors > 0 {
-		return stat, errors.New("branch scanned with file errors")
-	}
+	committed = true
 	return stat, nil
 }
 
@@ -334,13 +378,16 @@ func (s *Scanner) versionFromEntry(ctx context.Context, repo Repository, ref git
 	repoPath := s.git.repoPath(repo.ID)
 	last, err := s.git.lastCommitForPath(ctx, repoPath, ref.CommitSHA, entry.Path)
 	if err != nil {
-		last = lastCommit{SHA: ref.CommitSHA, Time: ref.CommitTime}
+		// 提交时间参与跨分支最新版本选择，读取失败不能伪装成分支 HEAD 的时间。
+		return DocVersion{}, fmt.Errorf("读取文件最近提交: %w", err)
 	}
 	title := baseName(entry.Path)
 	if isMarkdown(entry.Path) && entry.Size <= repo.MaxFileSizeBytes {
-		if content, err := s.git.catFile(ctx, repoPath, entry.BlobSHA); err == nil {
-			title = titleFromMarkdown(content, title)
+		content, err := s.git.catFile(ctx, repoPath, entry.BlobSHA)
+		if err != nil {
+			return DocVersion{}, fmt.Errorf("读取 Markdown 内容: %w", err)
 		}
+		title = titleFromMarkdown(content, title)
 	}
 	previousPath := ""
 	renameScore := 0

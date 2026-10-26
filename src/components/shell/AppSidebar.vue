@@ -13,7 +13,7 @@ const { repos, selectedRepo, tab, tabHref, repoHref, isGlobalTab } = useRepos()
     <nav class="repositories" aria-label="仓库">
       <div class="group-heading"><span class="group-label">仓库</span><button class="btn ghost icon sm" aria-label="新增仓库" @click="emit('newRepo')"><Plus :size="15" /></button></div>
       <a v-for="repo in repos" :key="repo.id" :href="repoHref(repo)" :class="{ active: !isGlobalTab && selectedRepo?.id === repo.id }" :aria-current="!isGlobalTab && selectedRepo?.id === repo.id ? 'page' : undefined">
-        <span class="scan-dot" :class="repo.latest_scan?.status" :title="repo.latest_scan?.status || '未扫描'"></span><span class="repo-name" :title="repo.name">{{ repo.name }}</span><span class="repo-count">{{ repo.latest_scan?.file_count ?? 0 }}</span>
+        <span class="scan-dot" :class="repo.latest_scan?.status" :title="repo.latest_scan?.status || '未扫描'"></span><span class="repo-name" :title="repo.name">{{ repo.name }}</span><span class="repo-count">{{ repo.document_count }}</span>
       </a>
       <p v-if="!repos.length" class="no-repos">添加仓库以开始阅读</p>
     </nav>

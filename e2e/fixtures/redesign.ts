@@ -45,7 +45,7 @@ export const repository: Repository = {
   sync_interval_seconds: 3600, max_file_size_bytes: 2097152, created_at: timestamp, updated_at: timestamp,
   scan_paths: ['docs', 'handbook'].map((path, index) => ({
     id: index + 1, repo_id: 7, path, include_globs: ['**/*.md', '**/*.html'], exclude_globs: [], enabled: true
-  })), latest_scan: scanRuns[0]
+  })), document_count: 31, latest_scan: scanRuns[0]
 }
 const version: DocVersion = {
   id: 42, repo_id: 7, document_id: 11, branch: 'feature/release-guide', head_commit_sha: fixtureSHA,
@@ -202,7 +202,7 @@ export const piDiagnostics: PiDiagnosticDetail = { run: piRun, session: { ...ses
 /** 每个测试独立保存状态；所有 /api 请求在浏览器端拦截，绝不读写真实服务数据。 */
 export async function mockRedesign(page: Page) {
   const state = {
-    repo: structuredClone(repository), patches: [] as Partial<Repository>[], secretRotations: 0,
+    repo: structuredClone(repository), scanRuns: structuredClone(scanRuns), patches: [] as Partial<Repository>[], secretRotations: 0,
     questions: [] as { question: string; scope_override: unknown }[], unexpected: [] as string[],
     repoReads: 0, messageReads: [] as number[], secret: fixtureSecret,
     createdRepos: [] as Repository[], scannedRepos: [] as number[], tokenRequests: [] as Record<string, unknown>[]
@@ -245,7 +245,7 @@ export async function mockRedesign(page: Page) {
     if (/\/repos\/\d+\/documents\/\d+\/versions$/.test(path)) return json({ items: documentContent.versions })
     if (/\/repos\/\d+\/history$/.test(path)) return json({ items: commits })
     if (/\/repos\/\d+\/commits\//.test(path)) return json(commits.find((item) => path.endsWith(item.sha)) || commits[0])
-    if (/\/repos\/\d+\/scan-runs$/.test(path)) return json({ items: scanRuns })
+    if (/\/repos\/\d+\/scan-runs$/.test(path)) return json({ items: state.scanRuns })
     if (path === '/api/webhooks/github/secret') {
       if (method === 'POST') { state.secretRotations++; state.secret = `${fixtureSecret}-rotated` }
       return json({ configured: true, secret: state.secret })

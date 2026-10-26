@@ -16,7 +16,7 @@ function scanTime(value: string) {
       <button class="btn" :disabled="busy" aria-label="立即扫描" @click="scanSelected"><RefreshCw :size="14" :class="{ spinning: busy }" /><span>{{ busy ? '扫描中…' : '立即扫描' }}</span></button>
     </div>
     <p class="repo-meta"><span class="repo-url" :title="selectedRepo.repo_url">{{ selectedRepo.repo_url }}</span><span v-if="selectedRepo.latest_scan"> · 最近扫描 {{ scanTime(selectedRepo.latest_scan.started_at) }} · {{ selectedRepo.latest_scan.branch_count }} 个分支</span></p>
-    <nav class="repo-tabs" aria-label="仓库页面"><a v-for="item in tabs" :key="item.tab" :href="tabHref(item.tab)" :class="{ active: tab === item.tab }" :aria-current="tab === item.tab ? 'page' : undefined"><component :is="item.icon" :size="15" />{{ item.label }}<span v-if="item.tab === 'docs'" class="count">{{ selectedRepo.latest_scan?.file_count || 0 }}</span></a></nav>
+    <nav class="repo-tabs" aria-label="仓库页面"><a v-for="item in tabs" :key="item.tab" :href="tabHref(item.tab)" :class="{ active: tab === item.tab }" :aria-current="tab === item.tab ? 'page' : undefined"><component :is="item.icon" :size="15" />{{ item.label }}<span v-if="item.tab === 'docs'" class="count">{{ selectedRepo.document_count }}</span></a></nav>
   </header>
 </template>
 <style scoped>

@@ -49,6 +49,19 @@ func findDocumentByPath(ctx context.Context, tx *sql.Tx, repoID int64, filePath 
 	return 0, err
 }
 
+// findBranchDocumentByPath 为重复扫描复用当前分支已有的文档身份。
+// 优先采用当前有效版本；文件删除后原路径恢复时也可复用该分支的历史身份。
+func findBranchDocumentByPath(ctx context.Context, tx *sql.Tx, repoID int64, branch, filePath string) (int64, error) {
+	var id int64
+	err := tx.QueryRowContext(ctx, `SELECT document_id FROM doc_versions
+		WHERE repo_id = ? AND branch = ? AND file_path = ?
+		ORDER BY CASE WHEN status = 'deleted' THEN 1 ELSE 0 END, updated_at DESC, id DESC LIMIT 1`, repoID, branch, filePath).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return id, err
+}
+
 func upsertDocVersion(ctx context.Context, tx *sql.Tx, v DocVersion) (int64, error) {
 	now := nowString()
 	res, err := tx.ExecContext(ctx, `INSERT INTO doc_versions
@@ -640,6 +653,20 @@ func treeForView(ctx context.Context, db *sql.DB, repoID int64, view, branch str
 		entries = append(entries, entry)
 	}
 	return entries, rows.Err()
+}
+
+// countLatestDocuments 与文档最新视图采用同一目录过滤，扫描未处理新文件时仍返回已有总数。
+// 直接统计 doc_latest，避免跨分支重复计数，也不把历史/已删除版本计入文档数。
+func countLatestDocuments(ctx context.Context, db *sql.DB, repoID int64) (int, error) {
+	scanPaths, err := currentScanPaths(ctx, db, repoID)
+	if err != nil {
+		return 0, err
+	}
+	filter, pathArgs := scanPathSQLFilter("file_path", scanPaths)
+	args := append([]any{repoID}, pathArgs...)
+	var count int
+	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM doc_latest WHERE repo_id = ? AND `+filter, args...).Scan(&count)
+	return count, err
 }
 
 func currentScanPaths(ctx context.Context, db *sql.DB, repoID int64) ([]ScanPath, error) {

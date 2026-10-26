@@ -16,6 +16,8 @@ export interface Repository {
   created_at: string
   updated_at: string
   scan_paths: ScanPath[]
+  /** 当前扫描目录范围内的 doc_latest 总数，不随单次扫描更新文件数变化。 */
+  document_count: number
   latest_scan?: ScanRun
 }
 
