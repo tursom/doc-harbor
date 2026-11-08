@@ -12,11 +12,11 @@ import (
 // 多个 Server 实例也不会因各自缓存而继续接受旧密钥。只有尚未刷新时才回退环境变量；
 // 数据库读取失败必须返回错误，不能回退到可能已经泄漏的旧密钥。
 func (s *Server) githubWebhookSecret(ctx context.Context) (string, error) {
-	if s.db == nil {
+	if s.reader() == nil {
 		return s.cfg.GitHubWebhookSecret, nil
 	}
 	var secret string
-	err := s.db.QueryRowContext(ctx, `SELECT secret FROM github_webhook_settings WHERE id = 1`).Scan(&secret)
+	err := s.reader().QueryRowContext(ctx, `SELECT secret FROM github_webhook_settings WHERE id = 1`).Scan(&secret)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s.cfg.GitHubWebhookSecret, nil
 	}

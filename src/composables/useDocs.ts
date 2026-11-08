@@ -7,7 +7,7 @@ import { useRepos } from './useRepos'
 export const searchResultDir = '搜索结果'
 
 /** 文档页只拥有浏览、搜索和当前文件状态；仓库由 Shell 注入。 */
-export function useDocs({ selectedRepo, branches }: Pick<ReturnType<typeof useRepos>, 'selectedRepo' | 'branches'> = useRepos()) {
+export function useDocs({ selectedRepo, branches, scanRevision }: Pick<ReturnType<typeof useRepos>, 'selectedRepo' | 'branches'> & Partial<Pick<ReturnType<typeof useRepos>, 'scanRevision'>> = useRepos()) {
   const files = ref<FileEntry[]>([])
   const fileContent = ref<FileContent | null>(null)
   const docEvents = ref<PathEvent[]>([])
@@ -170,6 +170,24 @@ export function useDocs({ selectedRepo, branches }: Pick<ReturnType<typeof useRe
   }
 
   watch(selectedRepo, () => { void restoreURL() }, { immediate: true })
+  /** 扫描结束只刷新当前列表。正文版本、阅读位置、目录、分支和搜索范围都由用户继续控制。 */
+  async function refreshFiles() {
+    if (!selectedRepo.value) return
+    const request = ++listRequest
+    const repoID = selectedRepo.value.id
+    const params: Record<string, string> = { view: viewMode.value, dir: currentDir.value }
+    if (viewMode.value === 'branch') params.branch = selectedBranch.value
+    try {
+      const response = currentDir.value === searchResultDir
+        ? await api.search(repoID, searchText.value.trim()) : await api.files(repoID, params)
+      if (request === listRequest && repoID === selectedRepo.value?.id) { files.value = response.items; error.value = '' }
+    } catch (err) {
+      if (request === listRequest) error.value = errorMessage(err)
+    } finally {
+      if (request === listRequest) listLoading.value = false
+    }
+  }
+  if (scanRevision) watch(scanRevision, () => { void refreshFiles() })
   onMounted(() => window.addEventListener('popstate', restoreURL))
   onBeforeUnmount(() => {
     listRequest++; contentRequest++; restoreRequest++

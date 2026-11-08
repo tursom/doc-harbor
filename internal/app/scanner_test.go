@@ -39,7 +39,8 @@ func scannerSQL(t *testing.T, server *Server, query string) {
 
 func regressionScan(t *testing.T, server *Server, repo Repository, trigger string) (ScanRun, branchScanStat) {
 	t.Helper()
-	run, err := server.scanner.Scan(context.Background(), repo.ID, trigger)
+	// 普通 manual 现在遵守成功检查点；回归中的故障注入通过显式重建重走处理路径。
+	run, err := server.scanner.ScanWithOptions(context.Background(), repo.ID, trigger, trigger == "rebuild")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,8 +90,12 @@ func TestScannerPartialCountsAndSameHeadRetry(t *testing.T) {
 		t.Fatalf("repository list = %+v, err = %v", repos, err)
 	}
 	run, stat = regressionScan(t, server, repo, "manual")
+	if run.FileCount != 0 || !stat.SkippedByHead {
+		t.Fatalf("ordinary manual scan should reuse a successful checkpoint: %+v", run)
+	}
+	run, stat = regressionScan(t, server, repo, "rebuild")
 	if run.FileCount != 3 || stat.SkippedByHead {
-		t.Fatalf("manual scan should recheck even a legacy successful checkpoint: %+v", run)
+		t.Fatalf("explicit rebuild should recheck every file: %+v", run)
 	}
 	// 目录变更立即影响可见总数，不需要等待下次扫描清理旧索引。
 	stored, err = updateRepository(context.Background(), server.db, repo.ID, Repository{ScanPaths: []ScanPath{{Path: "doc", Enabled: true}}})
@@ -109,7 +114,7 @@ func TestScannerRolledBackFilesAreNotCountedAndRetry(t *testing.T) {
 			// 文件已处理后，让保存分支状态失败，验证整笔索引事务回滚。
 			scannerSQL(t, server, `CREATE TRIGGER reject_checkpoint BEFORE INSERT ON repo_refs
 				BEGIN SELECT RAISE(ABORT, 'injected checkpoint failure'); END`)
-			run, stat := regressionScan(t, server, repo, "manual")
+			run, stat := regressionScan(t, server, repo, "rebuild")
 			if run.Status != "partial_success" || run.FileCount != 0 || stat.Files != 0 || run.ErrorCount != 1 || !strings.Contains(run.ErrorMessage, "injected checkpoint failure") {
 				t.Fatalf("rolled back scan = %+v", run)
 			}
@@ -136,7 +141,7 @@ func TestScannerGitStageFailuresKeepDocumentsAndRetry(t *testing.T) {
 	}{
 		{"ls-tree", "枚举目录", ".", 0, 1},
 		{"--format=%x1e%H%x00%cI", "回填路径历史", ".", 3, 1},
-		{"-1", "读取文件版本", "README.md", 0, 3},
+		{"--format=%x00%H%x00%cI%x00%P%x00", "读取文件版本", "", 0, 1},
 		{"cat-file", "读取文件版本", "README.md", 1, 2},
 	} {
 		t.Run(failure.stage, func(t *testing.T) {
@@ -153,7 +158,7 @@ func TestScannerGitStageFailuresKeepDocumentsAndRetry(t *testing.T) {
 				t.Fatal(err)
 			}
 			server.scanner.git.cfg.GitBin = wrapper
-			run, stat := regressionScan(t, server, repo, "manual")
+			run, stat := regressionScan(t, server, repo, "rebuild")
 			if run.Status != "partial_success" || run.FileCount != failure.files || run.ErrorCount != failure.errors || len(stat.ErrorDetails) != failure.errors || stat.ErrorDetails[0].Stage != failure.stage || stat.ErrorDetails[0].Path != failure.path {
 				t.Fatalf("git failure = %+v", run)
 			}
@@ -183,9 +188,10 @@ func TestScannerManualRescanKeepsRenamedDocumentIdentity(t *testing.T) {
 	runTestGit(t, repo.RepoURL, "add", "-A")
 	runTestGit(t, repo.RepoURL, "commit", "-m", "rename regression document")
 	// 先处理真实重命名，再多次重扫相同 HEAD：每次都应复用最初的文档身份。
-	for _, trigger := range []string{"scheduled", "manual", "manual"} {
+	for i, trigger := range []string{"scheduled", "manual", "rebuild", "rebuild"} {
 		run, stat := regressionScan(t, server, repo, trigger)
-		if run.Status != "success" || run.FileCount != 3 || stat.SkippedByHead {
+		wantFiles := []int{1, 0, 3, 3}[i]
+		if run.Status != "success" || run.FileCount != wantFiles || stat.SkippedByHead != (i == 1) {
 			t.Fatalf("rename/rescan = %+v", run)
 		}
 		renamed, err := getScanPathTestVersion(context.Background(), server, repo.ID, "doc/b.md")
@@ -212,7 +218,7 @@ func TestScannerSkippedFilesAndLatestFailurePreserveBranchErrors(t *testing.T) {
 	scannerSQL(t, server, `CREATE TRIGGER reject_latest BEFORE INSERT ON doc_latest
 		BEGIN SELECT RAISE(ABORT, 'injected latest failure'); END`)
 	run, err := server.scanner.Scan(context.Background(), repo.ID, "manual")
-	if err == nil || run.Status != "partial_success" || run.FileCount != 1 || run.SkippedCount != 1 || run.ErrorCount != 2 {
+	if run.Status != "partial_success" || run.FileCount != 0 || run.SkippedCount != 1 || run.ErrorCount != 2 {
 		t.Fatalf("branch and latest failures = %+v, err = %v", run, err)
 	}
 	for _, message := range []string{"injected source failure", "injected latest failure"} {

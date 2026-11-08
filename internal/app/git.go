@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -174,7 +175,8 @@ func (g *Git) lsTree(ctx context.Context, repoPath, commit, scanPath string) ([]
 			Type:    fields[1],
 			BlobSHA: fields[2],
 			Size:    size,
-			Path:    normalizeRepoPath(string(filePath)),
+			// Git 的 -z 输出已经是仓库相对路径，不能清理空白或替换反斜线。
+			Path: string(filePath),
 		})
 	}
 	return entries, nil
@@ -243,7 +245,7 @@ func (g *Git) grepPathScores(ctx context.Context, repoPath, commit string, terms
 }
 
 func (g *Git) lastCommitForPath(ctx context.Context, repoPath, commit, filePath string) (lastCommit, error) {
-	out, err := g.run(ctx, repoPath, "log", "-1", "--format=%H%x00%cI", commit, "--", filePath)
+	out, err := g.run(ctx, repoPath, "--literal-pathspecs", "log", "-1", "--format=%H%x00%cI", commit, "--", filePath)
 	if err != nil {
 		return lastCommit{}, err
 	}
@@ -255,72 +257,19 @@ func (g *Git) lastCommitForPath(ctx context.Context, repoPath, commit, filePath 
 }
 
 func (g *Git) diffNameStatus(ctx context.Context, repoPath, oldCommit, newCommit, scanPath string) ([]CommitFileChange, error) {
-	args := []string{"diff", "--name-status", "--find-renames", "--find-copies", oldCommit, newCommit}
+	args := []string{"--literal-pathspecs", "diff", "--name-status", "-z", "--find-renames", "--find-copies", oldCommit, newCommit}
 	if scanPath != "." {
 		args = append(args, "--", scanPath)
 	}
-	out, err := g.run(ctx, repoPath, args...)
+	out, err := g.runBytes(ctx, repoPath, args...)
 	if err != nil {
 		return nil, err
 	}
-	return parseNameStatus(out), nil
+	return parseNameStatusNUL(out)
 }
 
 func (g *Git) pathHistory(ctx context.Context, repoPath, branch, scanPath string) ([]historyPathEvent, error) {
-	args := []string{"log", "--date=iso-strict", "--name-status", "--find-renames", "--format=%x1e%H%x00%cI", branch}
-	if scanPath != "." {
-		args = append(args, "--", scanPath)
-	}
-	out, err := g.run(ctx, repoPath, args...)
-	if err != nil {
-		return nil, err
-	}
-	chunks := strings.Split(out, "\x1e")
-	events := []historyPathEvent{}
-	for _, chunk := range chunks {
-		chunk = strings.TrimSpace(chunk)
-		if chunk == "" {
-			continue
-		}
-		lines := strings.Split(chunk, "\n")
-		header := strings.Split(lines[0], "\x00")
-		if len(header) < 2 {
-			continue
-		}
-		commitSHA := header[0]
-		commitTime := normalizeGitTime(header[1])
-		changes := parseNameStatus(strings.Join(lines[1:], "\n"))
-		for _, change := range changes {
-			event := historyPathEvent{
-				ScanPath:   scanPath,
-				Branch:     branch,
-				CommitSHA:  commitSHA,
-				CommitTime: commitTime,
-			}
-			switch {
-			case strings.HasPrefix(change.Status, "R"), strings.HasPrefix(change.Status, "C"):
-				event.EventType = pathEventType(change.OldPath, change.NewPath)
-				event.OldPath = change.OldPath
-				event.NewPath = change.NewPath
-				event.RenameScore = change.RenameScore
-			case change.Status == "D":
-				event.EventType = "deleted"
-				event.OldPath = change.Path
-			case change.Status == "A":
-				event.EventType = "created"
-				event.NewPath = change.Path
-			default:
-				continue
-			}
-			if event.OldPath != "" || event.NewPath != "" {
-				events = append(events, event)
-			}
-		}
-	}
-	for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
-		events[i], events[j] = events[j], events[i]
-	}
-	return events, nil
+	return g.pathHistoryRange(ctx, repoPath, branch, scanPath, "", branch)
 }
 
 func (g *Git) commitLog(ctx context.Context, repoPath, branch string, limit int) ([]CommitSummary, error) {
@@ -441,23 +390,32 @@ func (g *Git) runBytes(ctx context.Context, dir string, args ...string) ([]byte,
 	cmdCtx, cancel := context.WithTimeout(ctx, g.cfg.GitCommandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, g.cfg.GitBin, args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd := g.command(cmdCtx, dir, args...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if cmdCtx.Err() != nil {
+			err = errors.Join(err, cmdCtx.Err())
+		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()
 		}
-		return nil, fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
+		return nil, fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), msg, err)
 	}
 	return stdout.Bytes(), nil
+}
+
+// command 统一普通命令和流式批量命令的目录、环境及进程回收设置。
+// 超时由调用方创建的 context 控制；WaitDelay 限制异常子进程持有 stderr 的等待。
+func (g *Git) command(ctx context.Context, dir string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, g.cfg.GitBin, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.WaitDelay = time.Second
+	return cmd
 }
 
 func normalizeGitTime(value string) string {

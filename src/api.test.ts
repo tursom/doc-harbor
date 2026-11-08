@@ -1,6 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from './api'
 
+describe('后台扫描请求契约', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  it('202 后立即返回任务，明确区分普通增量、完整重建和取消', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ id: 91, status: 'running' }), { status: 202 }))
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await api.scanRepo(7)).toMatchObject({ status: 'running' })
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/repos/7/scan', expect.objectContaining({ method: 'POST', body: '{"force":false}' }))
+    await api.scanRepo(7, true)
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/repos/7/scan', expect.objectContaining({ body: '{"force":true}' }))
+    await api.cancelScan(7)
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/repos/7/scan/cancel', expect.objectContaining({ method: 'POST' }))
+  })
+})
+
 describe('AI stream transport', () => {
   afterEach(() => {
     vi.unstubAllGlobals()

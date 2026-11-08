@@ -107,8 +107,12 @@ export const api = {
   async updateRepo(id: number, repo: Partial<Repository>) {
     return request<Repository>(`/api/repos/${id}`, { method: 'PATCH', body: JSON.stringify(repo) })
   },
-  async scanRepo(id: number) {
-    return request<ScanRun>(`/api/repos/${id}/scan`, { method: 'POST', body: '{}' })
+  // 普通手动扫描复用成功检查点；只有用户明确确认完整重建时才传 force=true。
+  async scanRepo(id: number, force = false) {
+    return request<ScanRun>(`/api/repos/${id}/scan`, { method: 'POST', body: JSON.stringify({ force }) })
+  },
+  async cancelScan(id: number) {
+    return request<ScanRun>(`/api/repos/${id}/scan/cancel`, { method: 'POST', body: '{}' })
   },
   async branches(id: number) {
     return request<{ items: RepoRef[] }>(`/api/repos/${id}/branches`)

@@ -9,35 +9,56 @@ import (
 	"strings"
 )
 
-func findOrCreateDocument(ctx context.Context, tx *sql.Tx, repoID int64, scanPath, docKey, branch, commit, title, filePath string) (int64, error) {
-	var id int64
-	err := tx.QueryRowContext(ctx, `SELECT id FROM documents WHERE repo_id = ? AND doc_key = ?`, repoID, docKey).Scan(&id)
-	if err == nil {
-		return id, nil
+func findOrCreateDocument(ctx context.Context, tx *sql.Tx, repoID int64, scanPath, docKey, branch, commit, title, filePath string, reservations ...map[int64]string) (int64, error) {
+	var reserved map[int64]string
+	if len(reservations) > 0 {
+		reserved = reservations[0]
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return 0, err
+	key := docKey
+	for {
+		var id int64
+		err := tx.QueryRowContext(ctx, `SELECT id FROM documents WHERE repo_id = ? AND doc_key = ?`, repoID, key).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			break
+		}
+		if err != nil {
+			return 0, err
+		}
+		owner, hasOwner := reserved[id]
+		occupied := hasOwner && owner != filePath
+		var previousPath, status string
+		err = tx.QueryRowContext(ctx, `SELECT file_path,status FROM doc_versions WHERE repo_id=? AND branch=? AND document_id=?`, repoID, branch, id).Scan(&previousPath, &status)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
+		}
+		occupied = occupied || (err == nil && status != "deleted" && previousPath != filePath)
+		if !occupied {
+			return id, nil
+		}
+		// 原文档可能已经改名，旧路径重新出现时必须建立独立身份。
+		// 后缀只用于内部唯一键，不改变文件路径；重复扫描仍优先从分支版本复用身份。
+		key = fmt.Sprintf("%s#document-%d", docKey, id)
 	}
 	now := nowString()
 	res, err := tx.ExecContext(ctx, `INSERT INTO documents
 		(repo_id, scan_path, doc_key, current_title, current_path, status, created_from_branch, created_from_commit, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
-		repoID, scanPath, docKey, title, filePath, branch, commit, now, now)
+		repoID, scanPath, key, title, filePath, branch, commit, now, now)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
-func findDocumentByPath(ctx context.Context, tx *sql.Tx, repoID int64, filePath string) (int64, error) {
-	var id int64
-	err := tx.QueryRowContext(ctx, `SELECT document_id FROM doc_versions
-		WHERE repo_id = ? AND file_path = ? ORDER BY updated_at DESC LIMIT 1`, repoID, filePath).Scan(&id)
-	if err == nil {
-		return id, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+// findDocumentForBranchPath 优先当前分支，其次按原始文档键回退。
+// 不能按其它分支的当前路径查找：别的文档可能恰好在其它分支改名成同一路径。
+func findDocumentForBranchPath(ctx context.Context, tx *sql.Tx, repoID int64, branch, filePath string) (int64, error) {
+	id, err := findBranchDocumentByPath(ctx, tx, repoID, branch, filePath)
+	if err != nil {
 		return 0, err
+	}
+	if id != 0 {
+		return id, nil
 	}
 	err = tx.QueryRowContext(ctx, `SELECT id FROM documents WHERE repo_id = ? AND doc_key = ?`, repoID, filePath).Scan(&id)
 	if err == nil {
@@ -117,7 +138,9 @@ func insertPathEvent(ctx context.Context, tx *sql.Tx, event PathEvent) error {
 	return err
 }
 
-func existingBranchVersions(ctx context.Context, tx *sql.Tx, repoID int64, branch string) (map[string]DocVersion, error) {
+func existingBranchVersions(ctx context.Context, tx interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, repoID int64, branch string) (map[string]DocVersion, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT id, repo_id, document_id, branch, head_commit_sha, scan_path, file_path,
 		previous_path, dir_path, file_name, extension, mime_type, file_size, blob_sha, status, title, previewable,
 		download_enabled, last_commit_sha, last_commit_time, delete_commit_sha, delete_commit_time, rename_score,
@@ -134,7 +157,14 @@ func existingBranchVersions(ctx context.Context, tx *sql.Tx, repoID int64, branc
 		if err != nil {
 			return nil, err
 		}
-		versions[v.FilePath] = v
+		// 历史旧数据可能对同一路径保留多个文档身份；与单路径查询保持一致，
+		// 优先有效版本，再按更新时间和 ID 选择，避免批量快照改变重命名身份。
+		previous, found := versions[v.FilePath]
+		if !found || (previous.Status == "deleted" && v.Status != "deleted") ||
+			((previous.Status == "deleted") == (v.Status == "deleted") &&
+				(v.UpdatedAt > previous.UpdatedAt || (v.UpdatedAt == previous.UpdatedAt && v.ID > previous.ID))) {
+			versions[v.FilePath] = v
+		}
 	}
 	return versions, rows.Err()
 }

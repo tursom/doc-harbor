@@ -25,6 +25,7 @@ const immutableBlobCacheControl = "private, max-age=31536000, immutable"
 type Server struct {
 	cfg     Config
 	db      *sql.DB
+	readDB  *sql.DB
 	git     *Git
 	scanner *Scanner
 	// 启动时解析网段，配置错误直接阻止启动，避免误配置导致访问限制失效。
@@ -61,34 +62,65 @@ func NewServer(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 先统一内存 URI，确保读写连接池指向同一数据库；磁盘库保持原文件路径。
+	cfg.DBDSN = sharedSQLiteDSN(cfg.DBDSN)
 	db, err := openDB(context.Background(), cfg)
 	if err != nil {
+		return nil, err
+	}
+	// 上次进程退出时未完成的任务不能恢复执行，保留失败原因供管理页排障。
+	if _, err := db.ExecContext(context.Background(), `UPDATE scan_runs SET status = 'failed',
+		finished_at = ?, error_message = '服务重启：上次扫描未完成', error_count = error_count + 1
+		WHERE status = 'running'`, nowString()); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	readDB, err := openReadDB(context.Background(), cfg)
+	if err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 	git := newGit(cfg)
 	s := &Server{
 		cfg:                   cfg,
 		db:                    db,
+		readDB:                readDB,
 		git:                   git,
 		scanner:               newScanner(db, git),
 		allowedClientPrefixes: prefixes,
 	}
+	s.scanner.readDB = readDB
 	if err := s.initMCP(); err != nil {
-		db.Close()
+		_ = s.Close()
 		return nil, err
 	}
 	if err := s.initPiRuntime(); err != nil {
-		db.Close()
+		_ = s.Close()
 		return nil, err
 	}
 	return s, nil
 }
 
 func (s *Server) Close() error {
+	if s.scanner != nil {
+		s.scanner.Close()
+	}
 	if s.pi != nil {
 		s.pi.close()
 	}
-	return s.db.Close()
+	var readErr error
+	if s.readDB != nil && s.readDB != s.db {
+		readErr = s.readDB.Close()
+	}
+	return errors.Join(readErr, s.db.Close())
+}
+
+// reader 保留旧测试和手工组装 Server 的兼容路径；所有写操作仍使用 db。
+func (s *Server) reader() *sql.DB {
+	if s.readDB != nil {
+		return s.readDB
+	}
+	return s.db
 }
 
 func (s *Server) StartScheduler(ctx context.Context) {
@@ -136,7 +168,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRepos(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		repos, err := listRepositories(r.Context(), s.db)
+		repos, err := listRepositories(r.Context(), s.reader())
 		if err != nil {
 			writeError(w, err)
 			return
@@ -185,7 +217,13 @@ func (s *Server) handleRepoSubroutes(w http.ResponseWriter, r *http.Request) {
 
 	switch parts[1] {
 	case "scan":
-		s.handleScan(w, r, repoID)
+		if len(parts) == 3 && parts[2] == "cancel" {
+			s.handleScanCancel(w, r, repoID)
+		} else if len(parts) == 2 {
+			s.handleScan(w, r, repoID)
+		} else {
+			writeError(w, errNotFound("not found"))
+		}
 	case "scan-runs":
 		s.handleScanRuns(w, r, repoID)
 	case "branches":
@@ -220,7 +258,7 @@ func (s *Server) handleRepoSubroutes(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRepo(w http.ResponseWriter, r *http.Request, repoID int64) {
 	switch r.Method {
 	case http.MethodGet:
-		repo, err := getRepository(r.Context(), s.db, repoID)
+		repo, err := getRepository(r.Context(), s.reader(), repoID)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -260,8 +298,34 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request, repoID int64
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	run, err := s.scanner.Scan(r.Context(), repoID, "manual")
-	if err != nil && run.ID == 0 {
+	var options struct {
+		Force bool `json:"force"`
+	}
+	// 保留原来无 body 的调用方式，空 JSON 对象同样表示普通增量扫描。
+	if r.Body != nil {
+		defer r.Body.Close()
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&options); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, errBadRequest("invalid json: "+err.Error()))
+			return
+		}
+	}
+	run, err := s.scanner.Start(r.Context(), repoID, "manual", options.Force)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, run)
+}
+
+func (s *Server) handleScanCancel(w http.ResponseWriter, r *http.Request, repoID int64) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	run, err := s.scanner.Cancel(repoID)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
@@ -342,7 +406,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 			"repo_id": repoID,
 		})
 	case "push":
-		repo, err := getRepository(r.Context(), s.db, repoID)
+		repo, err := getRepository(r.Context(), s.reader(), repoID)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -351,7 +415,12 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 			writeError(w, errBadRequest("repository disabled"))
 			return
 		}
-		go s.runGitHubWebhookScan(repoID, deliveryID)
+		// 接纳后才启动后台执行，繁忙时直接拒绝，避免每次 Webhook 都创建 goroutine。
+		if _, err := s.scanner.Start(r.Context(), repoID, "github_webhook", false); err != nil {
+			log.Printf("github webhook scan rejected: repo_id=%d delivery=%s error=%v", repoID, deliveryID, err)
+			writeError(w, err)
+			return
+		}
 		writeJSON(w, http.StatusAccepted, map[string]any{
 			"accepted": true,
 			"event":    "push",
@@ -364,19 +433,6 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 			"event":    event,
 			"repo_id":  repoID,
 		})
-	}
-}
-
-func (s *Server) runGitHubWebhookScan(repoID int64, deliveryID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
-
-	if _, err := s.scanner.Scan(ctx, repoID, "github_webhook"); err != nil {
-		if isAppErrorStatus(err, http.StatusConflict) {
-			log.Printf("github webhook scan skipped: repo_id=%d delivery=%s error=%v", repoID, deliveryID, err)
-			return
-		}
-		log.Printf("github webhook scan failed: repo_id=%d delivery=%s error=%v", repoID, deliveryID, err)
 	}
 }
 
@@ -405,7 +461,7 @@ func (s *Server) handleScanRuns(w http.ResponseWriter, r *http.Request, repoID i
 		return
 	}
 	limit := cleanLimit(r.URL.Query().Get("limit"), 50, 200)
-	runs, err := listScanRuns(r.Context(), s.db, repoID, limit)
+	runs, err := listScanRuns(r.Context(), s.reader(), repoID, limit)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -418,7 +474,7 @@ func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request, repoID i
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	branches, err := listBranches(r.Context(), s.db, repoID)
+	branches, err := listBranches(r.Context(), s.reader(), repoID)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -435,7 +491,7 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request, repoID int64
 	if view == "" {
 		view = "latest"
 	}
-	entries, err := treeForView(r.Context(), s.db, repoID, view, r.URL.Query().Get("branch"))
+	entries, err := treeForView(r.Context(), s.reader(), repoID, view, r.URL.Query().Get("branch"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -464,9 +520,9 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request, repoID int6
 			writeError(w, errBadRequest("branch is required"))
 			return
 		}
-		entries, err = listBranchFiles(r.Context(), s.db, repoID, branch, dir)
+		entries, err = listBranchFiles(r.Context(), s.reader(), repoID, branch, dir)
 	} else {
-		entries, err = listLatestFiles(r.Context(), s.db, repoID, dir)
+		entries, err = listLatestFiles(r.Context(), s.reader(), repoID, dir)
 	}
 	if err != nil {
 		writeError(w, err)
@@ -480,7 +536,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request, repoID int
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	items, err := searchDocuments(r.Context(), s.db, repoID, r.URL.Query().Get("q"), cleanLimit(r.URL.Query().Get("limit"), 30, 100))
+	items, err := searchDocuments(r.Context(), s.reader(), repoID, r.URL.Query().Get("q"), cleanLimit(r.URL.Query().Get("limit"), 30, 100))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -503,7 +559,7 @@ func (s *Server) handleDocuments(w http.ResponseWriter, r *http.Request, repoID 
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		doc, err := getDocument(r.Context(), s.db, repoID, documentID)
+		doc, err := getDocument(r.Context(), s.reader(), repoID, documentID)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -517,7 +573,7 @@ func (s *Server) handleDocuments(w http.ResponseWriter, r *http.Request, repoID 
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		versions, err := listDocumentVersions(r.Context(), s.db, repoID, documentID)
+		versions, err := listDocumentVersions(r.Context(), s.reader(), repoID, documentID)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -528,7 +584,7 @@ func (s *Server) handleDocuments(w http.ResponseWriter, r *http.Request, repoID 
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		history, err := docHistory(r.Context(), s.db, repoID, documentID)
+		history, err := docHistory(r.Context(), s.reader(), repoID, documentID)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -568,17 +624,17 @@ func (s *Server) handleVersions(w http.ResponseWriter, r *http.Request, repoID i
 }
 
 func (s *Server) writeVersionContent(w http.ResponseWriter, r *http.Request, repoID, versionID int64) {
-	v, err := getVersion(r.Context(), s.db, repoID, versionID)
+	v, err := getVersion(r.Context(), s.reader(), repoID, versionID)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	repo, err := getRepository(r.Context(), s.db, repoID)
+	repo, err := getRepository(r.Context(), s.reader(), repoID)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	versions, _ := listDocumentVersions(r.Context(), s.db, repoID, v.DocumentID)
+	versions, _ := listDocumentVersions(r.Context(), s.reader(), repoID, v.DocumentID)
 	previewable := v.Previewable || (isPreviewable(v.FilePath) && v.FileSize <= repo.MaxFileSizeBytes)
 	content := FileContent{
 		VersionID:       v.ID,
@@ -610,7 +666,7 @@ func (s *Server) writeVersionContent(w http.ResponseWriter, r *http.Request, rep
 }
 
 func (s *Server) writeVersionDownload(w http.ResponseWriter, r *http.Request, repoID, versionID int64) {
-	v, err := getVersion(r.Context(), s.db, repoID, versionID)
+	v, err := getVersion(r.Context(), s.reader(), repoID, versionID)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -632,7 +688,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request, repoID in
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if _, err := getRepository(r.Context(), s.db, repoID); err != nil {
+	if _, err := getRepository(r.Context(), s.reader(), repoID); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -666,7 +722,7 @@ func (s *Server) handleCommits(w http.ResponseWriter, r *http.Request, repoID in
 		writeError(w, err)
 		return
 	}
-	scanPaths, err := currentScanPaths(r.Context(), s.db, repoID)
+	scanPaths, err := currentScanPaths(r.Context(), s.reader(), repoID)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -689,7 +745,7 @@ func (s *Server) handlePathEvents(w http.ResponseWriter, r *http.Request, repoID
 		}
 		documentID = id
 	}
-	events, err := listPathEvents(r.Context(), s.db, repoID, documentID, r.URL.Query().Get("branch"), r.URL.Query().Get("event_type"))
+	events, err := listPathEvents(r.Context(), s.reader(), repoID, documentID, r.URL.Query().Get("branch"), r.URL.Query().Get("event_type"))
 	if err != nil {
 		writeError(w, err)
 		return

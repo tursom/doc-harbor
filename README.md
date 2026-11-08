@@ -15,6 +15,23 @@ DocHarbor 是一个独立的 Git 文档浏览服务。系统按仓库配置 clon
 - 单文件下载：基于索引中的 blob sha 读取 Git 对象。
 - 提交历史：仓库提交图、commit 详情、变更文件列表。
 - 文件历史：展示分支状态和扫描识别的删除、移动、重命名事件。
+- 后台增量扫描：普通「立即扫描」复用成功检查点，「完整重建」需页内确认；支持阶段/分支/文件进度、取消请求和重新打开页面后恢复服务端状态。
+
+## 扫描与进度
+
+「立即扫描」默认增量，跳过 HEAD 和扫描配置均未变化且上次完整成功的分支；需要重新处理当前文档范围时，选择「完整重建」并在页内确认。完整重建不扩大扫描目录、文件类型或参与分支范围。普通刷新索引也应使用默认增量请求。
+
+`POST /api/repos/{id}/scan` 接受可选 JSON `{"force":true}`（默认 `false`），返回 HTTP 202 和 `ScanRun` 后任务在后台继续。202 只表示任务已提交，最终结果通过 `GET /api/repos` 的 `latest_scan` 或 `GET /api/repos/{id}/scan-runs` 读取。服务串行执行扫描，已有任何仓库的任务运行时，新提交返回 409，不创建排队记录。
+
+页头和扫描记录展示 `detail_json` JSON 字符串中的 `progress`：`stage`、`branch`、`processed_files`、`total_files`。阶段包括 fetching / enumerating / metadata / content / history / writing / latest / finished，未知阶段保留原值。准备文件进度与 `file_count`（已提交文件处理数）分开，不能据准备进度判断事务已完成；仓库文档总数仍使用 `document_count`。
+
+「取消扫描」调用 `POST /api/repos/{id}/scan/cancel`。返回的任务仍可能是 `running`，页面显示「正在取消…」并继续等待最终结果；取消或服务重启中断可用 `failed` 和 `error_message` 解释，`cancelled` 也按已取消展示。重新打开页面会从服务端记录恢复状态，不根据浏览器旧状态推测成功；中断后的失败记录可再次发起增量扫描，后端从成功检查点继续。
+
+页面每约 1.5 秒串行读取已选仓库状态，离开页面清理定时器，换仓库后忽略旧响应。轮询保持当前仓库对象身份，不重置文档阅读。扫描结束刷新分支和当前文件列表，同时保留文档目录、分支、搜索范围及正在阅读的版本。
+
+上述契约的来源为 2026-11-08 扫描性能优化任务约定及本仓库扫描接口；日期为记录日期，不表示已部署。独立 DocHarbor 接口直接访问本服务，不经过 Gateway。
+
+读写隔离、成功检查点、Git 批处理和失败一致性的实现与验收见 [扫描性能与一致性](doc/scanning-performance.md)。
 
 ## 本地运行
 
@@ -83,6 +100,10 @@ npm run test:e2e
 npx playwright test e2e/static-mpa.spec.ts e2e/redesign.spec.ts
 DOCHARBOR_SCREENSHOTS=1 npx playwright test e2e/redesign.spec.ts --grep 'redesign screenshots' --output=test-results/redesign
 ```
+
+后台扫描回归位于 `e2e/scanning.spec.ts`，用本地虚构 fixture 覆盖默认增量、完整重建确认、运行中进度、取消等待终态、页面重开恢复状态和扫描完成保留阅读。可在上述构建完成后运行 `npx playwright test e2e/scanning.spec.ts`。这些是前端契约验证，真实后端性能、重启恢复与集成服务验收由集成测试验证。
+
+仅验证前端时，可使用 `npx playwright test --config e2e/scanning.config.ts e2e/scanning.spec.ts --output=../artifacts/scanning-browser`，自动在本地 14326 端口启动 Astro 开发服务，结束后停止；无需 Go 服务或运行凭据，截图保存到指定输出目录。依赖使用本仓库锁文件独立 `npm ci`，不能链接其他目录的 `node_modules`。
 
 第二条命令生成八页 × 1440/390 宽度 × 浅色/深色共 32 张截图，包含选中文档、提交详情、展开的扫描错误、AI 对话与诊断、已签发的虚构 Token 等内容。图片位于已忽略的 `test-results/redesign/` 各用例子目录，供人工检查错位、重叠和截断；生成截图不等于已通过视觉验收。不要复制或提交含真实内部数据的 `doc/ui-redesign/` 原型。使用手册中的旧版截图尚未随重设计更新，以新版文字和页面为准。
 

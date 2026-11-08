@@ -3,22 +3,21 @@ import { api } from '../api'
 import type { ScanRun } from '../types'
 import { useRepos } from './useRepos'
 
-/** 扫描页仅随共享仓库变更刷新，不保存其他页面的状态。 */
+/** 扫描记录随 latest_scan 轮询结果刷新，保留展开行，避免每次进度更新都闪烁。 */
 export function useScanRuns({ selectedRepo }: Pick<ReturnType<typeof useRepos>, 'selectedRepo'> = useRepos()) {
   const scanRuns = ref<ScanRun[]>([])
   const expanded = ref<Set<number>>(new Set())
   const loading = ref(false)
   const error = ref('')
   let requestID = 0
-  async function loadScanRuns() {
+  async function loadScanRuns(reset = true) {
     const request = ++requestID
-    scanRuns.value = []
-    expanded.value = new Set()
+    if (reset) { scanRuns.value = []; expanded.value = new Set() }
     error.value = ''
     loading.value = false
     if (!selectedRepo.value) return
     const repoID = selectedRepo.value.id
-    loading.value = true
+    loading.value = reset
     try {
       const response = await api.scanRuns(repoID)
       if (request === requestID && repoID === selectedRepo.value?.id) scanRuns.value = response.items
@@ -37,6 +36,7 @@ export function useScanRuns({ selectedRepo }: Pick<ReturnType<typeof useRepos>, 
     expanded.value = next
   }
   watch(selectedRepo, () => { void loadScanRuns() }, { immediate: true })
+  watch(() => selectedRepo.value?.latest_scan, () => { void loadScanRuns(false) })
   onBeforeUnmount(() => { requestID++ })
   return { scanRuns, expanded, loading, error, loadScanRuns, canExpand, toggleRun }
 }

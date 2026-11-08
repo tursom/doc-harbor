@@ -42,8 +42,10 @@ type RepoRef struct {
 	CommitSHA     string `json:"commit_sha"`
 	CommitTime    string `json:"commit_time"`
 	LastScannedAt string `json:"last_scanned_at"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
+	// ScanConfigHash 将成功检查点绑定到收录规则，规则变化后不能仅凭 HEAD 跳过。
+	ScanConfigHash string `json:"-"`
+	CreatedAt      string `json:"created_at"`
+	UpdatedAt      string `json:"updated_at"`
 }
 
 type Document struct {

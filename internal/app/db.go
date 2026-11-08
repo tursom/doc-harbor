@@ -6,15 +6,77 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
 const timeLayout = time.RFC3339
+
+var memoryDBSequence atomic.Uint64
+
+// sharedSQLiteDSN 将私有内存库转换为本次 Server 独享的共享内存 URI。
+// writer 和 reader 必须使用同一个返回值；不同 Server 的 :memory: 仍相互隔离。
+func sharedSQLiteDSN(dsn string) string {
+	base, query, _ := strings.Cut(dsn, "?")
+	values, _ := url.ParseQuery(query)
+	if base == ":memory:" || base == "file::memory:" || base == "" {
+		base = fmt.Sprintf("file:docharbor-memory-%d", memoryDBSequence.Add(1))
+		values.Set("mode", "memory")
+	}
+	if values.Get("mode") == "memory" {
+		values.Set("cache", "shared")
+	}
+	if len(values) == 0 {
+		return base
+	}
+	return base + "?" + values.Encode()
+}
+
+// sqlitePoolDSN 把连接级约束放进驱动参数，保证连接回收、重建后仍然有效。
+// reader 使用 query_only 而非只在首条连接执行 PRAGMA，也兼容共享内存库。
+func sqlitePoolDSN(dsn string, readOnly bool) string {
+	base, query, _ := strings.Cut(dsn, "?")
+	values, _ := url.ParseQuery(query)
+	for _, alias := range []string{"_fk", "_foreign_keys", "_query_only", "_journal", "_journal_mode"} {
+		values.Del(alias)
+	}
+	values.Set("_foreign_keys", "on")
+	if values.Get("_busy_timeout") == "" && values.Get("_timeout") == "" {
+		values.Set("_busy_timeout", "5000")
+	}
+	if readOnly {
+		values.Set("_query_only", "on")
+		// 读连接不应继承调用方可能设置的写事务锁模式。
+		values.Set("_txlock", "deferred")
+		if values.Get("mode") != "memory" {
+			// 磁盘库依赖 WAL 快照隔离；共享缓存的表锁会使读请求仍被写事务阻塞。
+			values.Set("cache", "private")
+		}
+	} else {
+		values.Set("_journal_mode", "WAL")
+	}
+	return base + "?" + values.Encode()
+}
+
+func openReadDB(ctx context.Context, cfg Config) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", sqlitePoolDSN(cfg.DBDSN, true))
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
 
 func openDB(ctx context.Context, cfg Config) (*sql.DB, error) {
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
@@ -24,7 +86,7 @@ func openDB(ctx context.Context, cfg Config) (*sql.DB, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite3", cfg.DBDSN)
+	db, err := sql.Open("sqlite3", sqlitePoolDSN(sharedSQLiteDSN(cfg.DBDSN), false))
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +149,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			commit_sha TEXT NOT NULL,
 			commit_time TEXT NOT NULL,
 			last_scanned_at TEXT NOT NULL,
+			scan_config_hash TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
 			UNIQUE(repo_id, ref_type, ref_name),
@@ -142,6 +205,8 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_doc_versions_repo_branch_dir ON doc_versions(repo_id, branch, dir_path)`,
 		`CREATE INDEX IF NOT EXISTS idx_doc_versions_repo_document_branch ON doc_versions(repo_id, document_id, branch)`,
 		`CREATE INDEX IF NOT EXISTS idx_doc_versions_repo_last_commit ON doc_versions(repo_id, last_commit_time)`,
+		`CREATE INDEX IF NOT EXISTS idx_doc_versions_repo_path_updated ON doc_versions(repo_id, file_path, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_doc_versions_repo_branch_path ON doc_versions(repo_id, branch, file_path)`,
 		`CREATE TABLE IF NOT EXISTS doc_latest (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			repo_id INTEGER NOT NULL,
@@ -355,6 +420,16 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	for _, stmt := range stmts {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	// 老库无规则指纹时保留空值，由扫描核心决定何时重建可靠检查点。
+	var hasScanConfigHash int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('repo_refs') WHERE name = 'scan_config_hash'`).Scan(&hasScanConfigHash); err != nil {
+		return err
+	}
+	if hasScanConfigHash == 0 {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE repo_refs ADD COLUMN scan_config_hash TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
 	}
@@ -728,22 +803,23 @@ func listScanPaths(ctx context.Context, db *sql.DB, repoID int64, onlyEnabled bo
 func upsertRepoRef(ctx context.Context, tx *sql.Tx, ref RepoRef) error {
 	now := nowString()
 	_, err := tx.ExecContext(ctx, `INSERT INTO repo_refs
-		(repo_id, ref_type, ref_name, commit_sha, commit_time, last_scanned_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		(repo_id, ref_type, ref_name, commit_sha, commit_time, last_scanned_at, scan_config_hash, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(repo_id, ref_type, ref_name) DO UPDATE SET
 		commit_sha = excluded.commit_sha,
 		commit_time = excluded.commit_time,
 		last_scanned_at = excluded.last_scanned_at,
+		scan_config_hash = excluded.scan_config_hash,
 		updated_at = excluded.updated_at`,
-		ref.RepoID, ref.RefType, ref.RefName, ref.CommitSHA, ref.CommitTime, ref.LastScannedAt, now, now)
+		ref.RepoID, ref.RefType, ref.RefName, ref.CommitSHA, ref.CommitTime, ref.LastScannedAt, ref.ScanConfigHash, now, now)
 	return err
 }
 
 func getRepoRef(ctx context.Context, db *sql.DB, repoID int64, refType, refName string) (*RepoRef, error) {
-	row := db.QueryRowContext(ctx, `SELECT id, repo_id, ref_type, ref_name, commit_sha, commit_time, last_scanned_at, created_at, updated_at
+	row := db.QueryRowContext(ctx, `SELECT id, repo_id, ref_type, ref_name, commit_sha, commit_time, last_scanned_at, scan_config_hash, created_at, updated_at
 		FROM repo_refs WHERE repo_id = ? AND ref_type = ? AND ref_name = ?`, repoID, refType, refName)
 	var ref RepoRef
-	if err := row.Scan(&ref.ID, &ref.RepoID, &ref.RefType, &ref.RefName, &ref.CommitSHA, &ref.CommitTime, &ref.LastScannedAt, &ref.CreatedAt, &ref.UpdatedAt); err != nil {
+	if err := row.Scan(&ref.ID, &ref.RepoID, &ref.RefType, &ref.RefName, &ref.CommitSHA, &ref.CommitTime, &ref.LastScannedAt, &ref.ScanConfigHash, &ref.CreatedAt, &ref.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -753,7 +829,7 @@ func getRepoRef(ctx context.Context, db *sql.DB, repoID int64, refType, refName 
 }
 
 func listBranches(ctx context.Context, db *sql.DB, repoID int64) ([]RepoRef, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, repo_id, ref_type, ref_name, commit_sha, commit_time, last_scanned_at, created_at, updated_at
+	rows, err := db.QueryContext(ctx, `SELECT id, repo_id, ref_type, ref_name, commit_sha, commit_time, last_scanned_at, scan_config_hash, created_at, updated_at
 		FROM repo_refs WHERE repo_id = ? AND ref_type = 'branch' ORDER BY ref_name`, repoID)
 	if err != nil {
 		return nil, err
@@ -762,7 +838,7 @@ func listBranches(ctx context.Context, db *sql.DB, repoID int64) ([]RepoRef, err
 	refs := []RepoRef{}
 	for rows.Next() {
 		var ref RepoRef
-		if err := rows.Scan(&ref.ID, &ref.RepoID, &ref.RefType, &ref.RefName, &ref.CommitSHA, &ref.CommitTime, &ref.LastScannedAt, &ref.CreatedAt, &ref.UpdatedAt); err != nil {
+		if err := rows.Scan(&ref.ID, &ref.RepoID, &ref.RefType, &ref.RefName, &ref.CommitSHA, &ref.CommitTime, &ref.LastScannedAt, &ref.ScanConfigHash, &ref.CreatedAt, &ref.UpdatedAt); err != nil {
 			return nil, err
 		}
 		refs = append(refs, ref)
@@ -785,7 +861,9 @@ func createScanRun(ctx context.Context, db *sql.DB, repoID int64, trigger string
 }
 
 func finishScanRun(ctx context.Context, db *sql.DB, run ScanRun) error {
-	run.FinishedAt = nowString()
+	if run.FinishedAt == "" {
+		run.FinishedAt = nowString()
+	}
 	_, err := db.ExecContext(ctx, `UPDATE scan_runs SET status = ?, branch_count = ?, file_count = ?, skipped_count = ?,
 		error_count = ?, finished_at = ?, error_message = ?, detail_json = ? WHERE id = ?`,
 		run.Status, run.BranchCount, run.FileCount, run.SkippedCount, run.ErrorCount, run.FinishedAt, run.ErrorMessage, run.DetailJSON, run.ID)

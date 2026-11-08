@@ -23,7 +23,7 @@ async function submit() {
     await api.scanRepo(created.id)
     window.location.assign(`/?repo=${created.id}`)
   } catch (err) {
-    error.value = `仓库已添加，扫描未完成：${err instanceof Error ? err.message : String(err)}`
+    error.value = `仓库已添加，扫描任务未提交成功：${err instanceof Error ? err.message : String(err)}`
   } finally { scanning.value = false }
 }
 </script>
@@ -48,7 +48,7 @@ async function submit() {
         </div></details>
       </fieldset>
     </form>
-    <template #footer><button class="btn" type="button" @click="emit('close')">取消</button><button class="btn primary" form="new-repository" type="submit" :disabled="saving || scanning">{{ scanning ? '扫描中…' : saving ? '添加中…' : createdRepo ? '重试扫描' : '添加并开始扫描' }}</button></template>
+    <template #footer><button class="btn" type="button" @click="emit('close')">取消</button><button class="btn primary" form="new-repository" type="submit" :disabled="saving || scanning">{{ scanning ? '提交扫描中…' : saving ? '添加中…' : createdRepo ? '重试扫描' : '添加并开始扫描' }}</button></template>
   </ModalDialog>
 </template>
 <style scoped>

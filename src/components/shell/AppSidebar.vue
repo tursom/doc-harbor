@@ -46,6 +46,7 @@ p.group-label { padding: 0 9px; margin: 2px 0 8px; }
 .repo-count { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--fg-subtle); font-variant-numeric: tabular-nums; }
 .scan-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-subtle); flex-shrink: 0; }
 .scan-dot.success { background: var(--ok); }.scan-dot.partial_success { background: var(--warn); }.scan-dot.failed { background: var(--danger); }
+.scan-dot.running { background: var(--accent); }
 .no-repos { color: var(--fg-subtle); padding: 0 9px; font-size: var(--fs-sm); }
 .theme-footer { grid-row: 6; padding-top: 12px; }
 .theme-footer :deep(.theme-switch) { grid-template-columns: 1.45fr 1fr 1fr; }

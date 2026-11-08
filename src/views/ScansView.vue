@@ -8,6 +8,7 @@ import { triggerLabel } from '../lib/labels'
 import StatusPill from '../components/ui/StatusPill.vue'
 import Notice from '../components/ui/Notice.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
+import ScanProgress from '../components/shell/ScanProgress.vue'
 
 const repos = useRepos()
 const { selectedRepo } = repos
@@ -29,11 +30,11 @@ const scanPaths = computed(() => selectedRepo.value?.scan_paths.map((path) => pa
     <EmptyState v-if="loading || !scanRuns.length" :message="loading ? '正在加载扫描记录' : '暂无扫描记录'" />
     <div v-else class="scan-table-scroll">
       <table class="scan-table">
-        <thead><tr><th>状态</th><th>触发方式</th><th class="num hide-sm">分支</th><th class="num">文件</th><th class="num hide-sm">跳过</th><th class="num">错误</th><th>开始时间</th><th class="num">耗时</th></tr></thead>
+        <thead><tr><th>状态 / 进度</th><th>触发方式</th><th class="num hide-sm">分支</th><th class="num" title="该次扫描已成功提交到索引的文件数，不是准备进度">已提交文件</th><th class="num hide-sm">跳过</th><th class="num">错误</th><th>开始时间</th><th class="num">耗时</th></tr></thead>
         <tbody>
           <template v-for="run in scanRuns" :key="run.id">
             <tr :class="{ expandable: canExpand(run), expanded: expanded.has(run.id) }" @click="toggleRun(run)">
-              <td><button v-if="canExpand(run)" class="expand-run" type="button" :aria-label="`${expanded.has(run.id) ? '收起' : '展开'}扫描 #${run.id} 错误详情`" :aria-expanded="expanded.has(run.id)" :aria-controls="`scan-detail-${run.id}`" @click.stop="toggleRun(run)"><component :is="expanded.has(run.id) ? ChevronDown : ChevronRight" :size="13" /><StatusPill :status="run.status" /></button><StatusPill v-else :status="run.status" /></td>
+              <td class="scan-state"><button v-if="canExpand(run)" class="expand-run" type="button" :aria-label="`${expanded.has(run.id) ? '收起' : '展开'}扫描 #${run.id} 错误详情`" :aria-expanded="expanded.has(run.id)" :aria-controls="`scan-detail-${run.id}`" @click.stop="toggleRun(run)"><component :is="expanded.has(run.id) ? ChevronDown : ChevronRight" :size="13" /><StatusPill :status="run.status" /></button><StatusPill v-else :status="run.status" /><ScanProgress v-if="run.status === 'running'" :run="run" /></td>
               <td :title="run.trigger_type">{{ triggerLabel(run.trigger_type) }}</td>
               <td class="num hide-sm" :class="{ zero: !run.branch_count }">{{ run.branch_count }}</td>
               <td class="num" :class="{ zero: !run.file_count }">{{ run.file_count }}</td>
@@ -67,6 +68,7 @@ tbody > tr:last-child td { border-bottom: 0; }
 .zero { color: var(--fg-subtle); }
 .bad { color: var(--danger); font-weight: 600; }
 .scan-time { font-variant-numeric: tabular-nums; }
+.scan-state { min-width: 160px; max-width: 360px; white-space: normal; }
 .expandable { cursor: pointer; }
 .expandable:hover, .expanded { background: var(--surface-2); }
 .expand-run { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none; color: var(--fg-muted); }
